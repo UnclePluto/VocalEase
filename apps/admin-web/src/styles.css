@@ -1,0 +1,74 @@
+:root {
+  color: #e9fbff;
+  background: #050b15;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 78% 14%, rgb(89 68 255 / 20%), transparent 32%),
+    radial-gradient(circle at 8% 88%, rgb(0 229 255 / 12%), transparent 30%),
+    #050b15;
+}
+
+.health-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.health-panel {
+  width: min(100%, 560px);
+  padding: 32px;
+  border: 1px solid rgb(98 229 255 / 28%);
+  border-radius: 16px;
+  background: rgb(8 18 34 / 92%);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 32%);
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  color: #72eefe;
+  font-size: 0.75rem;
+  letter-spacing: 0.16em;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.6rem, 5vw, 2.3rem);
+  font-weight: 500;
+}
+
+.summary {
+  margin: 12px 0 24px;
+  color: #90a7bd;
+}
+
+.dependency-list {
+  margin: 0;
+}
+
+.dependency-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 13px 0;
+  border-top: 1px solid rgb(102 222 255 / 12%);
+}
+
+.dependency-row dd {
+  margin: 0;
+  color: #ffbc65;
+}
+
+.dependency-row dd[data-state="up"] {
+  color: #61efbb;
+}

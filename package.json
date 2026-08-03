@@ -1,0 +1,11 @@
+{
+  "name": "vocaease",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build:web": "pnpm --filter @vocaease/admin-web build",
+    "test:web": "pnpm --filter @vocaease/admin-web test",
+    "typecheck:web": "pnpm --filter @vocaease/admin-web typecheck",
+    "verify": "./scripts/verify.sh"
+  }
+}
