@@ -11,9 +11,8 @@ export interface HealthReport {
 
 export async function fetchHealth(): Promise<HealthReport> {
   const response = await fetch("/api/v1/health");
-  if (!response.ok) {
+  if (!response.ok && response.status !== 503) {
     throw new Error("服务健康检查失败");
   }
   return response.json() as Promise<HealthReport>;
 }
-

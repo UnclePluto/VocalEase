@@ -11,14 +11,16 @@ class HttpHealthGateway(
     override fun fetch(): HealthReport {
         val request = Request.Builder().url(endpoint).build()
         client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "健康检查请求失败：HTTP ${response.code}" }
+            check(response.isSuccessful || response.code == 503) {
+                "健康检查请求失败：HTTP ${response.code}"
+            }
             val payload = JSONObject(response.body.string())
             val dependenciesObject = payload.getJSONObject("dependencies")
             val dependencies = dependenciesObject.keys().asSequence().associateWith { key ->
-                dependenciesObject.getString(key)
+                Availability.fromWireValue(dependenciesObject.getString(key))
             }
             return HealthReport(
-                status = payload.getString("status"),
+                status = HealthStatus.fromWireValue(payload.getString("status")),
                 dependencies = dependencies,
             )
         }

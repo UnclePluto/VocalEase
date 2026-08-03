@@ -3,7 +3,7 @@ from vocaease_worker.worker import Worker
 
 
 def test_worker_completes_a_deterministic_task():
-    queue = DeterministicTaskQueue("redis://127.0.0.1:63799/1")
+    queue = DeterministicTaskQueue("redis://127.0.0.1:63799/15")
     queue.clear()
     task = queue.enqueue("health-check")
 

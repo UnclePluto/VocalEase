@@ -1,8 +1,36 @@
 package com.unclepluto.vocaease
 
+enum class HealthStatus {
+    HEALTHY,
+    DEGRADED,
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): HealthStatus = when (value) {
+            "healthy" -> HEALTHY
+            "degraded" -> DEGRADED
+            else -> error("未知健康状态：$value")
+        }
+    }
+}
+
+enum class Availability {
+    UP,
+    DOWN,
+    ;
+
+    companion object {
+        fun fromWireValue(value: String): Availability = when (value) {
+            "up" -> UP
+            "down" -> DOWN
+            else -> error("未知依赖状态：$value")
+        }
+    }
+}
+
 data class HealthReport(
-    val status: String,
-    val dependencies: Map<String, String>,
+    val status: HealthStatus,
+    val dependencies: Map<String, Availability>,
 )
 
 fun interface HealthGateway {
@@ -25,9 +53,13 @@ class HealthScreenPresenter(
     fun load(): HealthScreenState {
         val report = gateway.fetch()
         return HealthScreenState(
-            title = if (report.status == "healthy") "服务运行正常" else "服务暂时不可用",
+            title = if (report.status == HealthStatus.HEALTHY) {
+                "服务运行正常"
+            } else {
+                "部分服务不可用"
+            },
             dependencies = DEPENDENCY_LABELS.map { (key, label) ->
-                HealthDependency(label, report.dependencies[key] == "up")
+                HealthDependency(label, report.dependencies[key] == Availability.UP)
             },
         )
     }
