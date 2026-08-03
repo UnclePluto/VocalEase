@@ -1,2 +1,1 @@
 """VocaEase shared business API."""
-

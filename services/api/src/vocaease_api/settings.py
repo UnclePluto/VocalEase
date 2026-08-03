@@ -11,4 +11,3 @@ class Settings(BaseSettings):
     )
     redis_url: str = "redis://127.0.0.1:63799/0"
     media_directory: Path = Path(".runtime/media")
-

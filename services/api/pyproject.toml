@@ -33,4 +33,3 @@ addopts = "-q --strict-markers"
 markers = [
   "product_flow: exercises observable API behaviour against real infrastructure",
 ]
-

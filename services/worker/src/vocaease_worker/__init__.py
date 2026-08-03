@@ -1,2 +1,1 @@
 """VocaEase asynchronous audio worker."""
-

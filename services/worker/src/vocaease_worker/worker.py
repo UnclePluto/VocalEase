@@ -11,4 +11,3 @@ class Worker:
             return False
         self._queue.complete(task, f"processed:{task.value}")
         return True
-

@@ -31,4 +31,3 @@ addopts = "-q --strict-markers"
 markers = [
   "audio_processing: exercises the worker through its public queue",
 ]
-

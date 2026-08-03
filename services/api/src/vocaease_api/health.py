@@ -68,4 +68,3 @@ class HealthService:
             return "up"
         except OSError:
             return "down"
-

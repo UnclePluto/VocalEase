@@ -49,4 +49,3 @@ class DeterministicTaskQueue:
     def result(self, task_id: str) -> dict[str, str] | None:
         payload = self._client.get(f"{self._result_prefix}{task_id}")
         return json.loads(payload) if payload is not None else None
-
