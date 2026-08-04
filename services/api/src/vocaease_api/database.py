@@ -1,9 +1,12 @@
 from collections.abc import Generator
 from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import UUID, uuid4
 
+from alembic import command
+from alembic.config import Config
 from fastapi import Request
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, create_engine
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, create_engine, inspect
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -21,11 +24,23 @@ class Base(DeclarativeBase):
     pass
 
 
+class AccountRole(StrEnum):
+    ADMIN = "admin"
+    PARTICIPANT = "participant"
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[UUID] = mapped_column(PostgresUUID(as_uuid=True), primary_key=True, default=uuid4)
-    role: Mapped[str] = mapped_column(String(20), index=True)
+    role: Mapped[AccountRole] = mapped_column(
+        Enum(
+            AccountRole,
+            native_enum=False,
+            values_callable=lambda values: [item.value for item in values],
+        ),
+        index=True,
+    )
     username: Mapped[str | None] = mapped_column(String(80), unique=True)
     phone: Mapped[str | None] = mapped_column(String(20), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
@@ -63,7 +78,13 @@ class LoginSession(Base):
 
 def initialize_database(settings: Settings) -> sessionmaker[Session]:
     engine = create_engine(settings.database_url, pool_pre_ping=True)
-    Base.metadata.create_all(engine)
+    config = Config(settings.migration_config)
+    config.set_main_option("sqlalchemy.url", settings.database_url)
+    existing_tables = set(inspect(engine).get_table_names())
+    if "accounts" in existing_tables and "alembic_version" not in existing_tables:
+        command.stamp(config, "head")
+    else:
+        command.upgrade(config, "head")
     return sessionmaker(engine, expire_on_commit=False)
 
 

@@ -92,54 +92,15 @@ h1 {
   align-items: end;
 }
 
-.admin-form label {
-  display: grid;
-  gap: 8px;
-  color: #90a7bd;
-}
-
-.admin-form input,
-.admin-form button {
-  min-height: 44px;
-  border: 1px solid rgb(98 229 255 / 28%);
-  border-radius: 8px;
-  padding: 0 12px;
-}
-
-.admin-form input {
-  color: #e9fbff;
-  background: #081222;
-}
-
-.admin-form button {
-  color: #041018;
-  background: #72eefe;
-  cursor: pointer;
-}
-
-.form-error {
-  color: #ff8f8f;
-}
-
 .participant-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 16px;
   margin-top: 32px;
 }
 
-.participant-card {
-  display: grid;
+.participant-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  padding: 20px;
-  border: 1px solid rgb(98 229 255 / 20%);
-  border-radius: 12px;
-  background: #081222;
-}
-
-.participant-card span,
-.participant-card small {
-  color: #90a7bd;
+  margin-top: 16px;
 }
 
 @media (max-width: 760px) {

@@ -78,17 +78,26 @@ private fun ParticipantApp(gateway: ParticipantAuthGateway, sessionStore: Partic
                     destination = destinationAfterLogin(result)
                 }
             }
-            AuthDestination.CHANGE_PASSWORD -> ChangePasswordScreen(error, busy) { newPassword ->
-                runRequest {
-                    val result = withContext(Dispatchers.IO) {
-                        gateway.changePassword(token.orEmpty(), currentPassword, newPassword)
+            AuthDestination.CHANGE_PASSWORD -> ChangePasswordScreen(
+                error = error,
+                busy = busy,
+                onChange = { newPassword ->
+                    runRequest {
+                        val result = withContext(Dispatchers.IO) {
+                            gateway.changePassword(token.orEmpty(), currentPassword, newPassword)
+                        }
+                        token = result.accessToken
+                        currentPassword = ""
+                        sessionStore.save(result.accessToken)
+                        destination = AuthDestination.HOME
                     }
-                    token = result.accessToken
+                },
+                onLogout = {
+                    token = null
                     currentPassword = ""
-                    sessionStore.save(result.accessToken)
-                    destination = AuthDestination.HOME
-                }
-            }
+                    destination = AuthDestination.LOGIN
+                },
+            )
             AuthDestination.HOME -> HomeScreen {
                 sessionStore.clear()
                 token = null
@@ -105,7 +114,7 @@ private fun AppFrame(content: @Composable () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         Text("VocaEase", style = MaterialTheme.typography.headlineLarge)
-        Text("一期内部测试 · 请勿录入真实患者数据")
+        Text("一期内部测试 · 请勿录入真实参与者数据")
         content()
     }
 }
@@ -130,7 +139,12 @@ private fun LoginScreen(error: String, busy: Boolean, onLogin: (String, String) 
 }
 
 @Composable
-private fun ChangePasswordScreen(error: String, busy: Boolean, onChange: (String) -> Unit) {
+private fun ChangePasswordScreen(
+    error: String,
+    busy: Boolean,
+    onChange: (String) -> Unit,
+    onLogout: () -> Unit,
+) {
     var newPassword by remember { mutableStateOf("") }
     Text("首次登录需要修改密码", style = MaterialTheme.typography.headlineMedium)
     Text("新密码至少 10 位，不能继续使用 88888888。")
@@ -144,6 +158,9 @@ private fun ChangePasswordScreen(error: String, busy: Boolean, onChange: (String
     if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
     Button(onClick = { onChange(newPassword) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
         Text(if (busy) "提交中…" else "修改密码并进入")
+    }
+    Button(onClick = onLogout, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        Text("退出登录")
     }
 }
 

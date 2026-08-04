@@ -9,7 +9,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from vocaease_api.database import Account, LoginSession, database_session
+from vocaease_api.database import Account, AccountRole, LoginSession, database_session
 from vocaease_api.settings import Settings
 
 INITIAL_PARTICIPANT_PASSWORD = "88888888"
@@ -29,7 +29,7 @@ def bootstrap_admin(session: Session, settings: Settings) -> None:
         return
     session.add(
         Account(
-            role="admin",
+            role=AccountRole.ADMIN,
             username=settings.bootstrap_admin_username,
             phone=None,
             password_hash=password_hash.hash(settings.bootstrap_admin_password),
@@ -99,6 +99,6 @@ CurrentAccount = Annotated[Account, Depends(current_account)]
 DatabaseSession = Annotated[Session, Depends(database_session)]
 
 
-def require_role(account: Account, role: str) -> None:
+def require_role(account: Account, role: AccountRole) -> None:
     if account.role != role:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "没有访问权限")

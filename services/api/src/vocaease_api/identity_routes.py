@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
-from vocaease_api.database import Account, Participant
+from vocaease_api.database import Account, AccountRole, Participant
 from vocaease_api.identity import (
     INITIAL_PARTICIPANT_PASSWORD,
     CurrentAccount,
@@ -83,7 +83,7 @@ def admin_login(payload: AdminLoginRequest, session: DatabaseSession) -> LoginRe
         session.scalar(select(Account).where(Account.username == payload.username)),
         payload.password,
     )
-    require_role(account, "admin")
+    require_role(account, AccountRole.ADMIN)
     return LoginResponse(
         access_token=issue_session(session, account, Settings()), must_change_password=False
     )
@@ -94,7 +94,7 @@ def participant_login(payload: ParticipantLoginRequest, session: DatabaseSession
     account = verify_credentials(
         session.scalar(select(Account).where(Account.phone == payload.phone)), payload.password
     )
-    require_role(account, "participant")
+    require_role(account, AccountRole.PARTICIPANT)
     return LoginResponse(
         access_token=issue_session(session, account, Settings()),
         must_change_password=account.must_change_password,
@@ -105,7 +105,7 @@ def participant_login(payload: ParticipantLoginRequest, session: DatabaseSession
 def change_password(
     payload: ChangePasswordRequest, account: CurrentAccount, session: DatabaseSession
 ) -> LoginResponse:
-    require_role(account, "participant")
+    require_role(account, AccountRole.PARTICIPANT)
     verify_credentials(account, payload.current_password)
     if payload.new_password == INITIAL_PARTICIPANT_PASSWORD:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "新密码不能使用初始密码")
@@ -120,7 +120,7 @@ def change_password(
 
 @router.get("/participant/home")
 def participant_home(account: CurrentAccount) -> dict[str, str]:
-    require_role(account, "participant")
+    require_role(account, AccountRole.PARTICIPANT)
     if account.must_change_password:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "必须先修改初始密码")
     return {"status": "ready"}
@@ -128,7 +128,7 @@ def participant_home(account: CurrentAccount) -> dict[str, str]:
 
 @router.get("/admin/me")
 def admin_me(account: CurrentAccount) -> dict[str, str]:
-    require_role(account, "admin")
+    require_role(account, AccountRole.ADMIN)
     return {"username": account.username or ""}
 
 
@@ -136,7 +136,7 @@ def admin_me(account: CurrentAccount) -> dict[str, str]:
 def list_participants(
     account: CurrentAccount, session: DatabaseSession
 ) -> list[ParticipantResponse]:
-    require_role(account, "admin")
+    require_role(account, AccountRole.ADMIN)
     participants = session.scalars(select(Participant).order_by(Participant.research_code)).all()
     return [participant_response(participant) for participant in participants]
 
@@ -147,7 +147,7 @@ def list_participants(
 def create_participant(
     payload: CreateParticipantRequest, account: CurrentAccount, session: DatabaseSession
 ) -> ParticipantResponse:
-    require_role(account, "admin")
+    require_role(account, AccountRole.ADMIN)
     duplicate = session.scalar(
         select(Account.id)
         .outerjoin(Participant, Participant.account_id == Account.id)
@@ -159,7 +159,7 @@ def create_participant(
         raise HTTPException(status.HTTP_409_CONFLICT, "手机号或研究编号已存在")
     participant = Participant(
         account=Account(
-            role="participant",
+            role=AccountRole.PARTICIPANT,
             username=None,
             phone=payload.phone,
             password_hash=password_hash.hash(INITIAL_PARTICIPANT_PASSWORD),
@@ -188,7 +188,7 @@ def update_participant(
     account: CurrentAccount,
     session: DatabaseSession,
 ) -> ParticipantResponse:
-    require_role(account, "admin")
+    require_role(account, AccountRole.ADMIN)
     participant = find_participant(participant_id, session)
     values = payload.model_dump(exclude_unset=True)
     if "name" in values:
@@ -216,7 +216,7 @@ def update_participant(
 def reset_participant_password(
     participant_id: UUID, account: CurrentAccount, session: DatabaseSession
 ) -> None:
-    require_role(account, "admin")
+    require_role(account, AccountRole.ADMIN)
     participant = find_participant(participant_id, session)
     participant.account.password_hash = password_hash.hash(INITIAL_PARTICIPANT_PASSWORD)
     participant.account.must_change_password = True

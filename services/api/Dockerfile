@@ -6,6 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY services/api/pyproject.toml services/api/pyproject.toml
+COPY services/api/alembic.ini services/api/alembic.ini
+COPY services/api/migrations services/api/migrations
 COPY services/api/src services/api/src
 RUN pip install --no-cache-dir ./services/api
 

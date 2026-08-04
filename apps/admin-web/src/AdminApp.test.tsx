@@ -35,7 +35,7 @@ it("allows an administrator to login and create a participant", async () => {
   fireEvent.change(screen.getByLabelText("管理员密码"), {
     target: { value: "admin888888" }
   });
-  fireEvent.click(screen.getByRole("button", { name: "登录" }));
+  fireEvent.click(screen.getByRole("button", { name: /登\s*录/ }));
 
   expect(await screen.findByText("参与者管理")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "测试参与者" } });

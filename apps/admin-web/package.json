@@ -10,6 +10,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "antd": "6.3.3",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

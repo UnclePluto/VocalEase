@@ -47,3 +47,23 @@ export function createParticipant(
     token
   );
 }
+
+export function setParticipantActive(
+  token: string,
+  participantId: string,
+  active: boolean
+): Promise<Participant> {
+  return request(
+    `/api/v1/admin/participants/${participantId}`,
+    { method: "PATCH", body: JSON.stringify({ active }) },
+    token
+  );
+}
+
+export function resetParticipantPassword(token: string, participantId: string): Promise<void> {
+  return request(
+    `/api/v1/admin/participants/${participantId}/reset-password`,
+    { method: "POST" },
+    token
+  );
+}

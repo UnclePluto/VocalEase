@@ -26,7 +26,7 @@ def test_admin_creates_participant_and_participant_must_change_password(monkeypa
         created = client.post(
             "/api/v1/admin/participants",
             headers=admin_headers,
-            json={"name": "测试患者", "phone": phone, "research_code": research_code},
+            json={"name": "测试参与者", "phone": phone, "research_code": research_code},
         )
         assert created.status_code == 201
         participant_id = created.json()["id"]
@@ -76,6 +76,13 @@ def test_admin_creates_participant_and_participant_must_change_password(monkeypa
         )
         assert disabled.status_code == 200
         assert client.get("/api/v1/participant/home", headers=active_headers).status_code == 401
+        assert (
+            client.post(
+                "/api/v1/auth/participant/login",
+                json={"phone": phone, "password": "Secure-2026-pass"},
+            ).status_code
+            == 401
+        )
 
         restored = client.patch(
             f"/api/v1/admin/participants/{participant_id}",
@@ -84,11 +91,23 @@ def test_admin_creates_participant_and_participant_must_change_password(monkeypa
         )
         assert restored.status_code == 200
 
+        before_reset_login = client.post(
+            "/api/v1/auth/participant/login",
+            json={"phone": phone, "password": "Secure-2026-pass"},
+        )
+        before_reset_headers = {
+            "Authorization": f"Bearer {before_reset_login.json()['access_token']}"
+        }
+
         reset = client.post(
             f"/api/v1/admin/participants/{participant_id}/reset-password",
             headers=admin_headers,
         )
         assert reset.status_code == 204
+        assert (
+            client.get("/api/v1/participant/home", headers=before_reset_headers).status_code
+            == 401
+        )
 
         reset_login = client.post(
             "/api/v1/auth/participant/login",
