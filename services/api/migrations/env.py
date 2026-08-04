@@ -2,9 +2,13 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from vocaease_api import mixing_models, separation_models, singing_models  # noqa: F401
 from vocaease_api.database import Base
+from vocaease_api.settings import Settings
 
 config = context.config
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", Settings().database_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata

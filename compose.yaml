@@ -36,7 +36,11 @@ services:
     environment:
       VOCAEASE_DATABASE_URL: postgresql+psycopg://vocaease:vocaease_dev@database:5432/vocaease
       VOCAEASE_REDIS_URL: redis://redis:6379/0
+      VOCAEASE_SEPARATION_REDIS_URL: redis://redis:6379/1
       VOCAEASE_MEDIA_DIRECTORY: /data/media
+      VOCAEASE_WORKER_INTERNAL_TOKEN: development-worker-token
+      VOCAEASE_PLAYBACK_MEDIA_SIGNING_SECRET: development-playback-signing-secret
+      VOCAEASE_PLAYBACK_MEDIA_GRANT_SECONDS: "300"
     ports:
       - "8000:8000"
     depends_on:
@@ -64,9 +68,19 @@ services:
       dockerfile: services/worker/Dockerfile
     environment:
       VOCAEASE_REDIS_URL: redis://redis:6379/1
+      VOCAEASE_MEDIA_DIRECTORY: /data/media
+      VOCAEASE_API_BASE_URL: http://api:8000
+      VOCAEASE_WORKER_INTERNAL_TOKEN: development-worker-token
+      VOCAEASE_SEPARATION_MODEL_NAME: UVR-MDX-NET-Inst_HQ_3.onnx
+      VOCAEASE_SEPARATION_MODEL_DIRECTORY: /data/separation-models
     depends_on:
       redis:
         condition: service_healthy
+      api:
+        condition: service_healthy
+    volumes:
+      - media-data:/data/media
+      - separation-model-data:/data/separation-models
 
   admin-web:
     build:
@@ -81,4 +95,5 @@ services:
 volumes:
   database-data:
   media-data:
+  separation-model-data:
   redis-data:

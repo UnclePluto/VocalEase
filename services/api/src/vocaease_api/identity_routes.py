@@ -1,10 +1,11 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
+from vocaease_api.audit import record_audit
 from vocaease_api.database import Account, AccountRole, Participant
 from vocaease_api.identity import (
     INITIAL_PARTICIPANT_PASSWORD,
@@ -84,9 +85,16 @@ def admin_login(payload: AdminLoginRequest, session: DatabaseSession) -> LoginRe
         payload.password,
     )
     require_role(account, AccountRole.ADMIN)
-    return LoginResponse(
-        access_token=issue_session(session, account, Settings()), must_change_password=False
+    token = issue_session(session, account, Settings())
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="auth.admin_login",
+        object_type="account",
+        object_id=account.id,
     )
+    session.commit()
+    return LoginResponse(access_token=token, must_change_password=False)
 
 
 @router.post("/auth/participant/login", response_model=LoginResponse)
@@ -95,8 +103,17 @@ def participant_login(payload: ParticipantLoginRequest, session: DatabaseSession
         session.scalar(select(Account).where(Account.phone == payload.phone)), payload.password
     )
     require_role(account, AccountRole.PARTICIPANT)
+    token = issue_session(session, account, Settings())
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="auth.participant_login",
+        object_type="account",
+        object_id=account.id,
+    )
+    session.commit()
     return LoginResponse(
-        access_token=issue_session(session, account, Settings()),
+        access_token=token,
         must_change_password=account.must_change_password,
     )
 
@@ -108,14 +125,21 @@ def change_password(
     require_role(account, AccountRole.PARTICIPANT)
     verify_credentials(account, payload.current_password)
     if payload.new_password == INITIAL_PARTICIPANT_PASSWORD:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "新密码不能使用初始密码")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "新密码不能使用初始密码")
     account.password_hash = password_hash.hash(payload.new_password)
     account.must_change_password = False
     revoke_account_sessions(session, account.id)
     session.commit()
-    return LoginResponse(
-        access_token=issue_session(session, account, Settings()), must_change_password=False
+    token = issue_session(session, account, Settings())
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="auth.password_changed",
+        object_type="account",
+        object_id=account.id,
     )
+    session.commit()
+    return LoginResponse(access_token=token, must_change_password=False)
 
 
 @router.get("/participant/home")
@@ -134,10 +158,27 @@ def admin_me(account: CurrentAccount) -> dict[str, str]:
 
 @router.get("/admin/participants", response_model=list[ParticipantResponse])
 def list_participants(
-    account: CurrentAccount, session: DatabaseSession
+    account: CurrentAccount,
+    session: DatabaseSession,
+    q: str | None = Query(default=None, max_length=100),
 ) -> list[ParticipantResponse]:
     require_role(account, AccountRole.ADMIN)
-    participants = session.scalars(select(Participant).order_by(Participant.research_code)).all()
+    query = (
+        select(Participant)
+        .join(Account)
+        .where(Participant.deleted_at.is_(None))
+        .order_by(Participant.research_code)
+    )
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        query = query.where(
+            or_(
+                Participant.name.ilike(pattern),
+                Participant.research_code.ilike(pattern),
+                Account.phone.ilike(pattern),
+            )
+        )
+    participants = session.scalars(query).all()
     return [participant_response(participant) for participant in participants]
 
 
@@ -170,13 +211,25 @@ def create_participant(
         research_code=payload.research_code,
     )
     session.add(participant)
-    session.commit()
+    try:
+        session.flush()
+        record_audit(
+            session,
+            actor_account_id=account.id,
+            action="participant.created",
+            object_type="participant",
+            object_id=participant.id,
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "手机号或研究编号已存在") from error
     return participant_response(participant)
 
 
 def find_participant(participant_id: UUID, session: DatabaseSession) -> Participant:
     participant = session.get(Participant, participant_id)
-    if participant is None:
+    if participant is None or participant.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "参与者不存在")
     return participant
 
@@ -201,6 +254,14 @@ def update_participant(
         participant.account.active = values["active"]
         if not values["active"]:
             revoke_account_sessions(session, participant.account.id)
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="participant.updated",
+        object_type="participant",
+        object_id=participant.id,
+        detail={"fields": sorted(values)},
+    )
     try:
         session.commit()
     except IntegrityError as error:
@@ -221,4 +282,11 @@ def reset_participant_password(
     participant.account.password_hash = password_hash.hash(INITIAL_PARTICIPANT_PASSWORD)
     participant.account.must_change_password = True
     revoke_account_sessions(session, participant.account.id)
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="participant.password_reset",
+        object_type="participant",
+        object_id=participant.id,
+    )
     session.commit()

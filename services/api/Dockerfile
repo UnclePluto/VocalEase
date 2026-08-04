@@ -5,6 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY services/api/pyproject.toml services/api/pyproject.toml
 COPY services/api/alembic.ini services/api/alembic.ini
 COPY services/api/migrations services/api/migrations

@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -14,6 +15,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,27 +29,68 @@ import com.unclepluto.vocaease.auth.HttpParticipantAuthGateway
 import com.unclepluto.vocaease.auth.ParticipantAuthGateway
 import com.unclepluto.vocaease.auth.ParticipantSessionStore
 import com.unclepluto.vocaease.auth.destinationAfterLogin
+import com.unclepluto.vocaease.catalog.CatalogGateway
+import com.unclepluto.vocaease.catalog.CatalogScreen
+import com.unclepluto.vocaease.catalog.HttpCatalogGateway
+import com.unclepluto.vocaease.catalog.createAuthenticatedPlayer
+import com.unclepluto.vocaease.catalog.CatalogSong
+import com.unclepluto.vocaease.singing.CaptureInterruptionRegistry
+import com.unclepluto.vocaease.singing.HttpSingingGateway
+import com.unclepluto.vocaease.singing.InterruptionReason
+import com.unclepluto.vocaease.singing.LocalCaptureStore
+import com.unclepluto.vocaease.singing.SingingGateway
+import com.unclepluto.vocaease.singing.SingingSessionScreen
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val interruptionRegistry = CaptureInterruptionRegistry()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val sessionStore = ParticipantSessionStore(this)
-        val gateway = HttpParticipantAuthGateway("http://10.0.2.2:8000")
+        val baseUrl = BuildConfig.API_BASE_URL
+        val gateway = HttpParticipantAuthGateway(baseUrl)
+        val catalogGateway = HttpCatalogGateway(baseUrl)
+        val singingGateway = HttpSingingGateway(baseUrl)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    ParticipantApp(gateway, sessionStore)
+                    ParticipantApp(
+                        gateway = gateway,
+                        catalogGateway = catalogGateway,
+                        singingGateway = singingGateway,
+                        sessionStore = sessionStore,
+                        baseUrl = baseUrl,
+                        activity = this,
+                        interruptionRegistry = interruptionRegistry,
+                        playerFactory = { createAuthenticatedPlayer(this, it) },
+                    )
                 }
             }
         }
     }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) interruptionRegistry.appBackgrounded()
+        super.onStop()
+    }
 }
 
 @Composable
-private fun ParticipantApp(gateway: ParticipantAuthGateway, sessionStore: ParticipantSessionStore) {
+private fun ParticipantApp(
+    gateway: ParticipantAuthGateway,
+    catalogGateway: CatalogGateway,
+    singingGateway: SingingGateway,
+    sessionStore: ParticipantSessionStore,
+    baseUrl: String,
+    activity: ComponentActivity,
+    interruptionRegistry: CaptureInterruptionRegistry,
+    playerFactory: (com.unclepluto.vocaease.catalog.AuthenticatedMediaSource) ->
+        androidx.media3.exoplayer.ExoPlayer,
+) {
     var destination by remember {
         mutableStateOf(if (sessionStore.token() == null) AuthDestination.LOGIN else AuthDestination.HOME)
     }
@@ -55,7 +98,23 @@ private fun ParticipantApp(gateway: ParticipantAuthGateway, sessionStore: Partic
     var currentPassword by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var activeSingingSong by remember { mutableStateOf<CatalogSong?>(null) }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(token) {
+        val accessToken = token ?: return@LaunchedEffect
+        val store = LocalCaptureStore(activity)
+        val active = store.active() ?: return@LaunchedEffect
+        val reason = active.interruptionReason ?: InterruptionReason.PROCESS_RECOVERED
+        runCatching {
+            withContext(Dispatchers.IO) {
+                singingGateway.interrupt(accessToken, active.sessionId, reason)
+            }
+        }.onSuccess {
+            File(active.filePath).delete()
+            store.clearActive(deletePartial = true)
+        }
+    }
 
     fun runRequest(block: suspend () -> Unit) {
         busy = true
@@ -98,10 +157,33 @@ private fun ParticipantApp(gateway: ParticipantAuthGateway, sessionStore: Partic
                     destination = AuthDestination.LOGIN
                 },
             )
-            AuthDestination.HOME -> HomeScreen {
-                sessionStore.clear()
-                token = null
-                destination = AuthDestination.LOGIN
+            AuthDestination.HOME -> {
+                val singingSong = activeSingingSong
+                if (singingSong == null) {
+                    CatalogScreen(
+                        token = token.orEmpty(),
+                        baseUrl = baseUrl,
+                        gateway = catalogGateway,
+                        playerFactory = playerFactory,
+                        onStartSinging = { activeSingingSong = it },
+                        onLogout = {
+                            sessionStore.clear()
+                            token = null
+                            destination = AuthDestination.LOGIN
+                        },
+                    )
+                } else {
+                    SingingSessionScreen(
+                        activity = activity,
+                        token = token.orEmpty(),
+                        baseUrl = baseUrl,
+                        song = singingSong,
+                        catalogGateway = catalogGateway,
+                        gateway = singingGateway,
+                        interruptionRegistry = interruptionRegistry,
+                        onExit = { activeSingingSong = null },
+                    )
+                }
             }
         }
     }
@@ -110,12 +192,12 @@ private fun ParticipantApp(gateway: ParticipantAuthGateway, sessionStore: Partic
 @Composable
 private fun AppFrame(content: @Composable () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
+        modifier = Modifier.fillMaxSize().padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         Text("VocaEase", style = MaterialTheme.typography.headlineLarge)
         Text("一期内部测试 · 请勿录入真实参与者数据")
-        content()
+        Box(modifier = Modifier.weight(1f)) { content() }
     }
 }
 
@@ -162,11 +244,4 @@ private fun ChangePasswordScreen(
     Button(onClick = onLogout, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
         Text("退出登录")
     }
-}
-
-@Composable
-private fun HomeScreen(onLogout: () -> Unit) {
-    Text("账户已激活", style = MaterialTheme.typography.headlineMedium)
-    Text("下一批次将接入研究曲库与自由选歌。")
-    Button(onClick = onLogout) { Text("退出登录") }
 }

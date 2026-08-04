@@ -31,6 +31,19 @@ def test_admin_creates_participant_and_participant_must_change_password(monkeypa
         assert created.status_code == 201
         participant_id = created.json()["id"]
         assert created.json()["must_change_password"] is True
+        searched = client.get(
+            "/api/v1/admin/participants",
+            headers=admin_headers,
+            params={"q": research_code[-6:]},
+        )
+        assert [item["id"] for item in searched.json()] == [participant_id]
+        edited = client.patch(
+            f"/api/v1/admin/participants/{participant_id}",
+            headers=admin_headers,
+            json={"name": "已编辑测试参与者"},
+        )
+        assert edited.status_code == 200
+        assert edited.json()["name"] == "已编辑测试参与者"
 
         participant_login = client.post(
             "/api/v1/auth/participant/login",
@@ -105,8 +118,7 @@ def test_admin_creates_participant_and_participant_must_change_password(monkeypa
         )
         assert reset.status_code == 204
         assert (
-            client.get("/api/v1/participant/home", headers=before_reset_headers).status_code
-            == 401
+            client.get("/api/v1/participant/home", headers=before_reset_headers).status_code == 401
         )
 
         reset_login = client.post(
@@ -115,6 +127,20 @@ def test_admin_creates_participant_and_participant_must_change_password(monkeypa
         )
         assert reset_login.status_code == 200
         assert reset_login.json()["must_change_password"] is True
+        audit = client.get(
+            "/api/v1/admin/audit-events",
+            headers=admin_headers,
+            params={"object_type": "participant"},
+        )
+        assert audit.status_code == 200
+        actions = {event["action"] for event in audit.json()}
+        assert {
+            "participant.created",
+            "participant.updated",
+            "participant.password_reset",
+        } <= actions
+        assert all("password" not in str(event["detail"]).lower() for event in audit.json())
+        assert "88888888" not in audit.text
 
     engine = create_engine(DATABASE_URL)
     with engine.connect() as connection:
