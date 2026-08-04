@@ -45,6 +45,32 @@ class RawVoiceQualityTest {
     }
 
     @Test
+    fun `低音量金样按服务端相同五百毫秒窗口生成标记`() {
+        val lowVolume = temporaryWav(ShortArray(48_000) { 100 })
+        val report =
+            analyzeWav(lowVolume, 1_000, usedHeadphones = true, routeRisk = false)
+
+        assertEquals("warning", report.status)
+        assertTrue(report.fileWarnings.any { it.contains("音量") })
+        assertEquals(2, report.markers.count { it.kind == "low_volume" })
+        assertEquals(0L, report.markers.first().startMs)
+        assertEquals(500L, report.markers.first().endMs)
+        assertTrue(report.markers.none { it.kind == "silence" })
+        lowVolume.delete()
+    }
+
+    @Test
+    fun `Android 默认质检阈值与服务端语义一致`() {
+        val thresholds = QualityThresholds()
+        assertEquals(32, thresholds.silenceAmplitude)
+        assertEquals(32_734, thresholds.clippingAmplitude)
+        assertEquals(0.8, thresholds.silenceRatioWarning, 0.0)
+        assertEquals(0.01, thresholds.clippingRatioWarning, 0.0)
+        assertEquals(-42.0, thresholds.lowRmsDbfs, 0.0)
+        assertEquals(500, thresholds.markerWindowMs)
+    }
+
+    @Test
     fun `损坏文件不能通过可读性检查`() {
         val file = File.createTempFile("vocaease-corrupt-", ".wav")
         file.writeText("not wav")

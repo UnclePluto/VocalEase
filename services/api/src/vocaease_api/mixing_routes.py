@@ -19,7 +19,7 @@ from vocaease_api.database import (
     MediaFile,
 )
 from vocaease_api.identity import CurrentAccount, DatabaseSession
-from vocaease_api.media import probe_audio, sha256
+from vocaease_api.media import probe_audio, sha256_file
 from vocaease_api.mixing_models import PlaybackMixJob
 from vocaease_api.mixing_queue import PlaybackMixQueue, PlaybackMixTask
 from vocaease_api.settings import Settings
@@ -339,7 +339,13 @@ def worker_started(
     worker_token: Annotated[str | None, Header(alias="X-VocaEase-Worker-Token")] = None,
 ) -> None:
     require_internal_token(worker_token)
-    job = require_current_attempt(session.get(PlaybackMixJob, job_id), payload.attempt, "queued")
+    job = session.get(PlaybackMixJob, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "混音任务不存在")
+    if job.attempts != payload.attempt or job.status not in {"queued", "running"}:
+        raise HTTPException(status.HTTP_409_CONFLICT, "混音任务状态已经变化")
+    if job.status == "running":
+        return
     job.status = "running"
     job.updated_at = datetime.now(UTC)
     session.commit()
@@ -356,15 +362,31 @@ def worker_completed(
     worker_token: Annotated[str | None, Header(alias="X-VocaEase-Worker-Token")] = None,
 ) -> None:
     require_internal_token(worker_token)
-    job = require_current_attempt(session.get(PlaybackMixJob, job_id), payload.attempt, "running")
+    job = session.get(PlaybackMixJob, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "混音任务不存在")
+    if job.attempts != payload.attempt:
+        raise HTTPException(status.HTTP_409_CONFLICT, "混音任务状态已经变化")
+    if job.status == "succeeded":
+        output = session.get(MediaFile, job.output_media_id)
+        if (
+            output is not None
+            and output.storage_key == payload.output.storage_key
+            and output.sha256 == payload.output.sha256
+        ):
+            return
+        raise HTTPException(status.HTTP_409_CONFLICT, "混音任务终态与回调结果不一致")
+    job = require_current_attempt(job, payload.attempt, "running")
     expected_key = f"playback-mixes/{job.id}/mix.m4a"
     if payload.output.storage_key != expected_key:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "混音输出存储键不合法")
     path = storage().path(payload.output.storage_key)
     if not path.is_file():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "混音输出文件不存在")
-    content = path.read_bytes()
-    if len(content) != payload.output.size_bytes or sha256(content) != payload.output.sha256:
+    if (
+        path.stat().st_size != payload.output.size_bytes
+        or sha256_file(path) != payload.output.sha256
+    ):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "混音输出文件校验失败")
     metadata = probe_audio(path)
     if metadata.sample_rate != 48000 or metadata.channels != 2:
@@ -378,7 +400,7 @@ def worker_completed(
     backing_path = storage().path(backing.storage_key)
     if (
         not raw_path.is_file()
-        or sha256(raw_path.read_bytes()) != raw_voice.sha256
+        or sha256_file(raw_path) != raw_voice.sha256
         or not backing_path.is_file()
     ):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "混音来源文件校验失败")
@@ -418,7 +440,15 @@ def worker_failed(
     worker_token: Annotated[str | None, Header(alias="X-VocaEase-Worker-Token")] = None,
 ) -> None:
     require_internal_token(worker_token)
-    job = require_current_attempt(session.get(PlaybackMixJob, job_id), payload.attempt, "running")
+    job = session.get(PlaybackMixJob, job_id)
+    if (
+        job is not None
+        and job.attempts == payload.attempt
+        and job.status == "failed"
+        and job.failure_code == payload.failure_code
+    ):
+        return
+    job = require_current_attempt(job, payload.attempt, "running")
     job.status = "failed"
     job.failure_code = payload.failure_code
     job.updated_at = datetime.now(UTC)

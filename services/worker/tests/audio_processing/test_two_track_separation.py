@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from vocaease_worker.callback import CallbackDeliveryError
 from vocaease_worker.separation import (
     AudioSeparatorTwoTrack,
     DeterministicTwoTrackSeparator,
@@ -77,6 +78,11 @@ class InvalidOutputSeparator:
 
 class NamedSeparator(DeterministicTwoTrackSeparator):
     model_name = "configured-model"
+
+
+class UndeliverableFailureCallback(RecordedCallback):
+    def failed(self, job_id: UUID, attempt: int, failure_code: str) -> None:
+        raise CallbackDeliveryError("固定网络失败")
 
 
 def make_task(media: Path, attempt: int = 1) -> SeparationTask:
@@ -203,6 +209,49 @@ def test_worker_rejects_task_for_a_different_configured_model(tmp_path):
     worker.process(task)
 
     assert callback.events[-1] == ("failed", task.job_id, 1, "MODEL_UNAVAILABLE")
+
+
+def test_callback_delivery_failure_requeues_unacknowledged_task(tmp_path):
+    media = tmp_path / "media"
+    queue = SeparationQueue(REDIS_URL)
+    queue.clear()
+    task = SeparationTask(
+        job_id=uuid4(),
+        attempt=1,
+        source_storage_key="original-music/missing.wav",
+        model_name="deterministic-test",
+    )
+    queue.enqueue(task)
+    worker = SeparationWorker(
+        queue,
+        UndeliverableFailureCallback(),
+        DeterministicTwoTrackSeparator(),
+        media,
+    )
+
+    assert worker.run_once(timeout_seconds=1) is True
+    retried = queue.take(timeout_seconds=1)
+
+    assert retried is not None
+    assert retried.job_id == task.job_id
+    queue.ack(retried)
+
+
+def test_startup_recovers_task_left_in_processing_list(tmp_path):
+    queue = SeparationQueue(REDIS_URL)
+    queue.clear()
+    task = make_task(tmp_path / "media")
+    queue.enqueue(task)
+    unacknowledged = queue.take(timeout_seconds=1)
+    assert unacknowledged is not None
+
+    restarted_queue = SeparationQueue(REDIS_URL)
+    assert restarted_queue.recover_processing() == 1
+    recovered = restarted_queue.take(timeout_seconds=1)
+
+    assert recovered is not None
+    assert recovered.job_id == task.job_id
+    restarted_queue.ack(recovered)
 
 
 def test_audio_separator_adapter_requests_named_vocals_and_instrumental(monkeypatch, tmp_path):

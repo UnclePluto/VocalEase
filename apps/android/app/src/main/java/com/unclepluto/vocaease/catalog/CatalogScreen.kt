@@ -29,8 +29,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,10 +51,13 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import com.unclepluto.vocaease.singing.LocalCaptureStore
 import com.unclepluto.vocaease.singing.LocalUploadStatus
 import com.unclepluto.vocaease.singing.PendingCapture
+import com.unclepluto.vocaease.singing.PlaybackMix
+import com.unclepluto.vocaease.singing.PlaybackMixClient
 import com.unclepluto.vocaease.singing.enqueueVoiceUpload
 import com.unclepluto.vocaease.singing.uploadStatusLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -61,7 +66,7 @@ fun CatalogScreen(
     baseUrl: String,
     gateway: CatalogGateway,
     playerFactory: (AuthenticatedMediaSource) -> ExoPlayer,
-    onStartSinging: (CatalogSong) -> Unit,
+    onStartSinging: (CatalogSong, Float) -> Unit,
     onLogout: () -> Unit,
 ) {
     var selectedSongId by remember { mutableStateOf<String?>(null) }
@@ -70,6 +75,7 @@ fun CatalogScreen(
             token = token,
             baseUrl = baseUrl,
             gateway = gateway,
+            playerFactory = playerFactory,
             onSongSelected = { selectedSongId = it },
             onLogout = onLogout,
         )
@@ -90,6 +96,7 @@ private fun CatalogList(
     token: String,
     baseUrl: String,
     gateway: CatalogGateway,
+    playerFactory: (AuthenticatedMediaSource) -> ExoPlayer,
     onSongSelected: (String) -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -122,7 +129,7 @@ private fun CatalogList(
             }
             OutlinedButton(onClick = onLogout) { Text("退出") }
         }
-        PendingUploads(baseUrl)
+        PendingUploads(token, baseUrl, playerFactory)
         when {
             loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
@@ -142,7 +149,11 @@ private fun CatalogList(
 }
 
 @Composable
-private fun PendingUploads(baseUrl: String) {
+private fun PendingUploads(
+    token: String,
+    baseUrl: String,
+    playerFactory: (AuthenticatedMediaSource) -> ExoPlayer,
+) {
     val context = LocalContext.current
     val store = remember { LocalCaptureStore(context) }
     var captures by remember { mutableStateOf<List<PendingCapture>>(emptyList()) }
@@ -153,23 +164,118 @@ private fun PendingUploads(baseUrl: String) {
         }
     }
     captures.take(3).forEach { capture ->
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text("录音提交状态", style = MaterialTheme.typography.titleMedium)
-                Text(uploadStatusLabel(capture))
-                Text(capture.qualitySummary)
-                capture.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                if (capture.status == LocalUploadStatus.FAILED) {
-                    OutlinedButton(
-                        onClick = { enqueueVoiceUpload(context, capture.sessionId, baseUrl) }
-                    ) {
-                        Text("重新上传")
+        CaptureStatusCard(capture, token, baseUrl, playerFactory)
+    }
+}
+
+@Composable
+private fun CaptureStatusCard(
+    capture: PendingCapture,
+    token: String,
+    baseUrl: String,
+    playerFactory: (AuthenticatedMediaSource) -> ExoPlayer,
+) {
+    val context = LocalContext.current
+    var mix by remember(capture.sessionId) { mutableStateOf<PlaybackMix?>(null) }
+    var message by remember(capture.sessionId) { mutableStateOf("") }
+    var playback by remember(capture.sessionId) { mutableStateOf<ExoPlayer?>(null) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(capture.status, mix?.status) {
+        if (capture.status != LocalUploadStatus.SUBMITTED) return@LaunchedEffect
+        while (mix?.status !in setOf("succeeded", "failed")) {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    PlaybackMixClient(baseUrl).status(token, capture.sessionId)
+                }
+            }.onSuccess {
+                mix = it
+                message = ""
+            }.onFailure {
+                message = "回放混音正在创建…"
+            }
+            delay(2_000)
+        }
+    }
+    DisposableEffect(capture.sessionId) {
+        onDispose { playback?.release() }
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("录音提交状态", style = MaterialTheme.typography.titleMedium)
+            Text(uploadStatusLabel(capture))
+            Text(capture.qualitySummary)
+            capture.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (capture.status == LocalUploadStatus.FAILED) {
+                OutlinedButton(
+                    onClick = {
+                        enqueueVoiceUpload(
+                            context,
+                            capture.sessionId,
+                            baseUrl,
+                            manualRetry = true,
+                        )
                     }
+                ) {
+                    Text("重新上传")
                 }
             }
+            if (capture.status == LocalUploadStatus.SUBMITTED) {
+                when (mix?.status) {
+                    "succeeded" -> OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        PlaybackMixClient(baseUrl).access(
+                                            token,
+                                            capture.sessionId,
+                                        )
+                                    }
+                                }.onSuccess { access ->
+                                    playback?.release()
+                                    playback = playerFactory(
+                                        AuthenticatedMediaSource(
+                                            url = access.url,
+                                            headers = authorizationHeaders(token),
+                                        )
+                                    ).also { it.play() }
+                                    message = "正在回听体验混音（短时授权）"
+                                }.onFailure {
+                                    message = it.message ?: "无法获取回听授权"
+                                }
+                            }
+                        }
+                    ) {
+                        Text("回听体验混音")
+                    }
+                    "failed" -> OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        PlaybackMixClient(baseUrl).retry(
+                                            token,
+                                            capture.sessionId,
+                                        )
+                                    }
+                                }.onSuccess {
+                                    mix = it
+                                    message = "已重新生成回放混音"
+                                }.onFailure {
+                                    message = it.message ?: "无法重试回放混音"
+                                }
+                            }
+                        }
+                    ) {
+                        Text("重新生成回放混音")
+                    }
+                    else -> Text("回放混音处理中")
+                }
+            }
+            if (message.isNotEmpty()) Text(message)
         }
     }
 }
@@ -213,7 +319,7 @@ private fun CatalogDetail(
     songId: String,
     gateway: CatalogGateway,
     playerFactory: (AuthenticatedMediaSource) -> ExoPlayer,
-    onStartSinging: (CatalogSong) -> Unit,
+    onStartSinging: (CatalogSong, Float) -> Unit,
     onBack: () -> Unit,
 ) {
     var song by remember(songId) { mutableStateOf<CatalogSong?>(null) }
@@ -242,7 +348,7 @@ private fun SongPlayer(
     token: String,
     gateway: CatalogGateway,
     playerFactory: (AuthenticatedMediaSource) -> ExoPlayer,
-    onStartSinging: (CatalogSong) -> Unit,
+    onStartSinging: (CatalogSong, Float) -> Unit,
     onBack: () -> Unit,
 ) {
     val player = remember(song.id, song.backingTrackUrl, token) {
@@ -250,7 +356,7 @@ private fun SongPlayer(
     }
     var playing by remember(player) { mutableStateOf(player.isPlaying) }
     var positionMs by remember(player) { mutableLongStateOf(0) }
-    var volume by remember(player) { mutableStateOf(1f) }
+    var volume by remember(player) { mutableFloatStateOf(1f) }
     val activeIndex = activeLyricIndex(song.lines, positionMs)
     val lyricListState = rememberLazyListState()
 
@@ -319,7 +425,7 @@ private fun SongPlayer(
         Button(
             onClick = {
                 player.stop()
-                onStartSinging(song)
+                onStartSinging(song, volume)
             },
             modifier = Modifier.fillMaxWidth(),
         ) {

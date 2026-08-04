@@ -56,6 +56,14 @@ def sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def validate_image(content: bytes, content_type: str) -> None:
     signatures = {
         "image/jpeg": (b"\xff\xd8\xff",),

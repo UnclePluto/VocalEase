@@ -180,8 +180,11 @@ function ParticipantManagement({
     <>
       <Input.Search
         allowClear
+        aria-label="搜索参与者"
+        autoComplete="off"
         className="participant-search"
         enterButton="搜索"
+        name="participant-search"
         placeholder="按姓名、手机号或研究编号搜索"
         onSearch={(query) => {
           setSearching(true);
@@ -351,17 +354,17 @@ function ParticipantEditModal({
         onFinish={(values) => void onSave(values)}
       >
         <Form.Item label="姓名" name="name" rules={[{ required: true }]}>
-          <Input />
+          <Input autoComplete="name" />
         </Form.Item>
         <Form.Item
           label="手机号"
           name="phone"
           rules={[{ required: true, pattern: /^1\d{10}$/ }]}
         >
-          <Input />
+          <Input autoComplete="tel" inputMode="tel" />
         </Form.Item>
         <Form.Item label="研究编号" name="research_code" rules={[{ required: true }]}>
-          <Input />
+          <Input autoComplete="off" />
         </Form.Item>
         <Form.Item label="账号状态" name="active" rules={[{ required: true }]}>
           <Select
@@ -413,6 +416,7 @@ function AuditLog({
       }>
         className="audit-filters"
         layout="vertical"
+        name="audit-filter"
         onFinish={(values) =>
           void load({
             actor_account_id: values.actorAccountId,
@@ -424,13 +428,13 @@ function AuditLog({
         }
       >
         <Form.Item label="操作者账号 ID" name="actorAccountId">
-          <Input />
+          <Input autoComplete="off" />
         </Form.Item>
         <Form.Item label="对象类型" name="objectType">
-          <Input placeholder="participant、song、media" />
+          <Input autoComplete="off" placeholder="participant、song、media" />
         </Form.Item>
         <Form.Item label="操作" name="action">
-          <Input placeholder="participant.updated" />
+          <Input autoComplete="off" placeholder="participant.updated" />
         </Form.Item>
         <Form.Item label="开始时间" name="createdFrom">
           <Input type="datetime-local" />
@@ -643,6 +647,7 @@ function SongEditor({
             <input
               aria-label="封面文件"
               accept="image/jpeg,image/png,image/webp"
+              name="song-cover"
               type="file"
               onChange={(event) => setCoverFile(event.target.files?.[0])}
             />
@@ -669,6 +674,7 @@ function SongEditor({
           <input
             aria-label="伴奏文件"
             accept="audio/*"
+            name="backing-track"
             type="file"
             onChange={(event) => setTrackFile(event.target.files?.[0])}
           />
@@ -719,6 +725,7 @@ function SongEditor({
         <h2>4. LRC 歌词</h2>
         <Input.TextArea
           aria-label="LRC 歌词"
+          autoComplete="off"
           rows={9}
           value={lrc}
           placeholder={"[00:03.50]第一句歌词\n[00:08.20]第二句歌词"}
@@ -886,6 +893,7 @@ function SeparationPanel({
         <input
           aria-label="原版音乐文件"
           accept="audio/*"
+          name="original-music"
           type="file"
           onChange={(event) => setSourceFile(event.target.files?.[0])}
         />
@@ -1084,14 +1092,15 @@ function LoginForm({
     <Form<{ username: string; password: string }>
       className="admin-form"
       layout="vertical"
+      name="admin-login"
       initialValues={{ username: "admin" }}
       onFinish={({ username, password }) => void onLogin(username, password)}
     >
       <Form.Item label="管理员账号" name="username" rules={[{ required: true }]}>
-        <Input />
+        <Input autoComplete="username" />
       </Form.Item>
       <Form.Item label="管理员密码" name="password" rules={[{ required: true }]}>
-        <Input.Password />
+        <Input.Password autoComplete="current-password" />
       </Form.Item>
       {error && <Alert message={error} type="error" />}
       <Button type="primary" htmlType="submit" block>
@@ -1112,22 +1121,23 @@ function ParticipantForm({
     <Form<{ name: string; phone: string; researchCode: string }>
       className="admin-form participant-form"
       layout="vertical"
+      name="participant-create"
       onFinish={({ name, phone, researchCode }) =>
         void onCreate({ name, phone, research_code: researchCode })
       }
     >
       <Form.Item label="姓名" name="name" rules={[{ required: true }]}>
-        <Input />
+        <Input autoComplete="name" />
       </Form.Item>
       <Form.Item
         label="手机号"
         name="phone"
         rules={[{ required: true, pattern: /^1\d{10}$/ }]}
       >
-        <Input />
+        <Input autoComplete="tel" inputMode="tel" />
       </Form.Item>
       <Form.Item label="研究编号" name="researchCode" rules={[{ required: true }]}>
-        <Input />
+        <Input autoComplete="off" />
       </Form.Item>
       {error && <Alert message={error} type="error" />}
       <Form.Item>
@@ -1150,16 +1160,17 @@ function SongForm({
       form={form}
       className="song-form"
       layout="vertical"
+      name="song-create"
       onFinish={async (values) => {
         await onCreate(values);
         form.resetFields();
       }}
     >
       <Form.Item label="歌曲名称" name="title" rules={[{ required: true }]}>
-        <Input />
+        <Input autoComplete="off" />
       </Form.Item>
       <Form.Item label="歌手" name="artist" rules={[{ required: true }]}>
-        <Input />
+        <Input autoComplete="off" />
       </Form.Item>
       <Button type="primary" htmlType="submit" block>
         创建歌曲

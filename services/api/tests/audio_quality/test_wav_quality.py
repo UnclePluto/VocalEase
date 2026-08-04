@@ -2,6 +2,7 @@ import io
 import math
 import struct
 import wave
+from pathlib import Path
 
 import pytest
 from vocaease_api.audio_quality import QualityThresholds, analyze_pcm_wav
@@ -75,3 +76,44 @@ def test_invalid_or_nonconforming_wav_is_reported(payload: bytes, message: str):
 
     assert report.status == "warning"
     assert message in report.file_warnings
+
+
+class TrackingReader:
+    def __init__(self, path: Path) -> None:
+        self.file = path.open("rb")
+        self.max_read_size = 0
+
+    def read(self, size: int = -1) -> bytes:
+        self.max_read_size = max(self.max_read_size, size)
+        return self.file.read(size)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self.file.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self.file.tell()
+
+    def close(self) -> None:
+        self.file.close()
+
+
+def test_large_wav_is_analyzed_in_bounded_streaming_windows(tmp_path):
+    path = tmp_path / "large-recording.wav"
+    one_second = b"\0\0" * 48_000
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(48_000)
+        for _ in range(120):
+            audio.writeframesraw(one_second)
+
+    reader = TrackingReader(path)
+    try:
+        report = analyze_pcm_wav(reader)
+    finally:
+        reader.close()
+
+    assert path.stat().st_size > 10_000_000
+    assert report.duration_ms == 120_000
+    assert report.readable is True
+    assert reader.max_read_size <= 48_000

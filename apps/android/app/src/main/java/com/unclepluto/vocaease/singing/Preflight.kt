@@ -134,9 +134,9 @@ fun currentAudioRoute(context: Context): AudioRouteSnapshot {
     val input = inputs.firstOrNull { it.type in EXTERNAL_INPUT_TYPES }
         ?: inputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
         ?: inputs.firstOrNull()
-    val outputRoute = audioType(output?.type, output = true)
+    val outputRoute = audioDeviceTypeLabel(output?.type, output = true)
     return AudioRouteSnapshot(
-        inputType = audioType(input?.type, output = false),
+        inputType = audioDeviceTypeLabel(input?.type, output = false),
         outputRoute = outputRoute,
         bluetoothMode = when (output?.type) {
             AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "a2dp"
@@ -151,7 +151,7 @@ fun currentAudioRoute(context: Context): AudioRouteSnapshot {
     )
 }
 
-private fun audioType(type: Int?, output: Boolean): String = when (type) {
+fun audioDeviceTypeLabel(type: Int?, output: Boolean): String = when (type) {
     AudioDeviceInfo.TYPE_BUILTIN_MIC -> "built_in_mic"
     AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker"
     AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_headphones"
@@ -165,6 +165,8 @@ private fun audioType(type: Int?, output: Boolean): String = when (type) {
     null -> "unknown"
     else -> "other"
 }
+
+fun isHeadphoneDeviceType(type: Int): Boolean = type in HEADPHONE_TYPES
 
 class BackingTrackCache(
     context: Context,

@@ -94,6 +94,7 @@ class CatalogSongResponse(BaseModel):
     artist: str
     cover_url: str | None
     duration_ms: int
+    backing_track_id: UUID
     backing_track_url: str
     lyric_version_id: UUID
     lines: list[dict[str, int | str]]
@@ -407,6 +408,7 @@ def catalog_song(publication: SongPublication, session: DatabaseSession) -> Cata
         artist=song.artist,
         cover_url=f"/api/v1/media/{song.cover_media_id}" if song.cover_media_id else None,
         duration_ms=track.duration_ms,
+        backing_track_id=track.id,
         backing_track_url=f"/api/v1/media/{track.normalized_media_id}",
         lyric_version_id=lyrics.id,
         lines=parse_lrc(lyrics.lrc_text),
@@ -452,13 +454,21 @@ def read_media(media_id: UUID, account: CurrentAccount, session: DatabaseSession
     media = session.get(MediaFile, media_id)
     if media is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "媒体不存在")
+    allowed: object | None = None
     if account.role == AccountRole.PARTICIPANT:
-        from vocaease_api.singing_models import SingingSession
-
         participant = session.scalar(
             select(Participant).where(Participant.account_id == account.id)
         )
         if participant is None:
+            record_audit(
+                session,
+                actor_account_id=account.id,
+                action="media.access_denied",
+                object_type="media",
+                object_id=media.id,
+                detail={"reason": "participant_missing", "purpose": media.purpose},
+            )
+            session.commit()
             raise HTTPException(status.HTTP_403_FORBIDDEN, "参与者档案不存在")
         if media.purpose == "song_cover":
             allowed = session.scalar(
@@ -481,17 +491,28 @@ def read_media(media_id: UUID, account: CurrentAccount, session: DatabaseSession
                     BackingTrackVersion.normalized_media_id == media.id,
                 )
             )
-        elif media.purpose == "raw_voice":
-            allowed = session.scalar(
-                select(SingingSession.id).where(
-                    SingingSession.participant_id == participant.id,
-                    SingingSession.raw_voice_media_id == media.id,
-                )
-            )
         else:
             allowed = None
-        if allowed is None:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "没有访问该媒体的权限")
+    elif media.purpose in {
+        "song_cover",
+        "song_source",
+        "original_music",
+        "backing_track",
+        "separated_vocals",
+        "separated_no_vocals",
+    }:
+        allowed = media.id
+    if allowed is None:
+        record_audit(
+            session,
+            actor_account_id=account.id,
+            action="media.access_denied",
+            object_type="media",
+            object_id=media.id,
+            detail={"reason": "purpose_requires_audited_endpoint", "purpose": media.purpose},
+        )
+        session.commit()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "没有访问该媒体的权限")
     path = storage().path(media.storage_key)
     if not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "媒体文件不存在")

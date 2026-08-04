@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from vocaease_worker.mixing_worker import PlaybackMixWorker
 from vocaease_worker.separation import AudioSeparatorTwoTrack
 from vocaease_worker.separation_queue import SeparationQueue
 from vocaease_worker.separation_worker import SeparationWorker
+
+SINGLE_WORKER_MVP = True
 
 
 def main() -> None:
@@ -31,9 +34,16 @@ def main() -> None:
         mixer=FfmpegPlaybackMixer(),
         media_directory=media_directory,
     )
+    # 一期部署约束为单 Worker；启动时可安全地把上次崩溃遗留的未确认任务全部恢复。
+    if SINGLE_WORKER_MVP:
+        worker.queue.recover_processing()
+        mix_worker.queue.recover_processing()
     while True:
-        worker.run_once(timeout_seconds=1)
-        mix_worker.run_once(timeout_seconds=1)
+        for active_worker in (worker, mix_worker):
+            try:
+                active_worker.run_once(timeout_seconds=1)
+            except Exception:
+                logging.exception("异步任务循环发生异常，下一轮将继续消费")
 
 
 if __name__ == "__main__":

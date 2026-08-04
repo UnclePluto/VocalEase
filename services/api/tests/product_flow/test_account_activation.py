@@ -1,10 +1,14 @@
+import os
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from vocaease_api.app import create_app
 
-DATABASE_URL = "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease"
+DATABASE_URL = os.getenv(
+    "VOCAEASE_TEST_DATABASE_URL",
+    "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease",
+)
 
 
 def test_admin_creates_participant_and_participant_must_change_password(monkeypatch):

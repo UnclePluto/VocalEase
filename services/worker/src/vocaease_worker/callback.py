@@ -12,6 +12,10 @@ class StaleTaskError(Exception):
     pass
 
 
+class CallbackDeliveryError(Exception):
+    pass
+
+
 class SeparationCallbackClient:
     def __init__(self, api_base_url: str, token: str) -> None:
         self.api_base_url = api_base_url.rstrip("/")
@@ -34,7 +38,9 @@ class SeparationCallbackClient:
         except urllib.error.HTTPError as error:
             if error.code == 409:
                 raise StaleTaskError from error
-            raise RuntimeError(f"内部回调返回 {error.code}") from error
+            raise CallbackDeliveryError(f"内部回调返回 {error.code}") from error
+        except (urllib.error.URLError, OSError) as error:
+            raise CallbackDeliveryError("内部回调连接失败") from error
 
     def started(self, job_id: UUID, attempt: int) -> None:
         self._post(job_id, "started", {"attempt": attempt})
@@ -86,7 +92,9 @@ class PlaybackMixCallbackClient:
         except urllib.error.HTTPError as error:
             if error.code == 409:
                 raise StaleTaskError from error
-            raise RuntimeError(f"内部回调返回 {error.code}") from error
+            raise CallbackDeliveryError(f"内部回调返回 {error.code}") from error
+        except (urllib.error.URLError, OSError) as error:
+            raise CallbackDeliveryError("内部回调连接失败") from error
 
     def started(self, job_id: UUID, attempt: int) -> None:
         self._post(job_id, "started", {"attempt": attempt})

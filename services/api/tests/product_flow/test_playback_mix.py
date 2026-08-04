@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import wave
 from pathlib import Path
@@ -14,7 +15,10 @@ from vocaease_api.database import MediaFile
 from vocaease_api.mixing_models import PlaybackMixJob
 from vocaease_api.singing_models import AuditEvent
 
-DATABASE_URL = "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease"
+DATABASE_URL = os.getenv(
+    "VOCAEASE_TEST_DATABASE_URL",
+    "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease",
+)
 REDIS_URL = "redis://127.0.0.1:63799/13"
 INTERNAL_TOKEN = "mix-test-worker-token"
 QUEUE_NAME = "vocaease:playback-mix:pending"
@@ -168,6 +172,8 @@ def test_verified_voice_creates_idempotent_authorized_playback_mix(monkeypatch, 
             headers=owner_headers,
             json={
                 "song_id": song["id"],
+                "backing_track_id": track["id"],
+                "lyric_version_id": lyrics["id"],
                 "used_headphones": True,
                 "device_snapshot": snapshot(),
             },
@@ -251,10 +257,19 @@ def test_verified_voice_creates_idempotent_authorized_playback_mix(monkeypatch, 
         assert retry_task["backing_storage_key"] == task["backing_storage_key"]
         assert retry_task["accompaniment_start_frame"] == 24_000
 
-        client.post(
+        started_retry = client.post(
             f"/api/v1/internal/playback-mixes/{mix['id']}/started",
             headers=internal_headers,
             json={"attempt": 2},
+        )
+        assert started_retry.status_code == 204
+        assert (
+            client.post(
+                f"/api/v1/internal/playback-mixes/{mix['id']}/started",
+                headers=internal_headers,
+                json={"attempt": 2},
+            ).status_code
+            == 204
         )
         output_key = f"playback-mixes/{mix['id']}/mix.m4a"
         output = write_m4a(raw_voice, media_directory / output_key)
@@ -271,7 +286,7 @@ def test_verified_voice_creates_idempotent_authorized_playback_mix(monkeypatch, 
                 headers=internal_headers,
                 json={"attempt": 2, "output": output},
             ).status_code
-            == 409
+            == 204
         )
 
         assert (
@@ -328,7 +343,17 @@ def test_verified_voice_creates_idempotent_authorized_playback_mix(monkeypatch, 
             client.get(f"/api/v1/media/{output_media_id}", headers=owner_headers).status_code == 403
         )
         assert (
-            client.get(f"/api/v1/media/{output_media_id}", headers=admin_headers).status_code == 200
+            client.get(f"/api/v1/media/{output_media_id}", headers=admin_headers).status_code == 403
+        )
+        denied_audits = client.get(
+            "/api/v1/admin/audit-events",
+            headers=admin_headers,
+            params={"action": "media.access_denied"},
+        )
+        assert any(
+            event["object_id"] == str(output_media_id)
+            and event["detail"]["reason"] == "purpose_requires_audited_endpoint"
+            for event in denied_audits.json()
         )
         assert (
             client.patch(

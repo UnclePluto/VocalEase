@@ -299,20 +299,23 @@ class VoiceUploadWorker(
             enqueueCleanup(applicationContext, sessionId)
             Result.success()
         } catch (error: Throwable) {
-            if (runAttemptCount < MAX_RETRIES) {
-                store.updateStatus(
-                    sessionId,
-                    LocalUploadStatus.PENDING,
-                    error = "网络或服务暂不可用，将自动重试",
-                )
-                Result.retry()
-            } else {
-                store.updateStatus(
-                    sessionId,
-                    LocalUploadStatus.FAILED,
-                    error = error.message ?: "上传失败",
-                )
-                Result.failure()
+            when (uploadFailureDecision(runAttemptCount, MAX_RETRIES)) {
+                UploadFailureDecision.RETRY_AUTOMATICALLY -> {
+                    store.updateStatus(
+                        sessionId,
+                        LocalUploadStatus.PENDING,
+                        error = "网络或服务暂不可用，将自动重试",
+                    )
+                    Result.retry()
+                }
+                UploadFailureDecision.EXPOSE_MANUAL_RETRY -> {
+                    store.updateStatus(
+                        sessionId,
+                        LocalUploadStatus.FAILED,
+                        error = error.message ?: "上传失败",
+                    )
+                    Result.failure()
+                }
             }
         }
     }
@@ -335,7 +338,12 @@ class LocalRecordingCleanupWorker(
     }
 }
 
-fun enqueueVoiceUpload(context: Context, sessionId: String, baseUrl: String) {
+fun enqueueVoiceUpload(
+    context: Context,
+    sessionId: String,
+    baseUrl: String,
+    manualRetry: Boolean = false,
+) {
     val constraints = Constraints.Builder()
         .setRequiredNetworkType(NetworkType.CONNECTED)
         .build()
@@ -351,10 +359,16 @@ fun enqueueVoiceUpload(context: Context, sessionId: String, baseUrl: String) {
         .build()
     WorkManager.getInstance(context).enqueueUniqueWork(
         "voice-upload-$sessionId",
-        ExistingWorkPolicy.KEEP,
+        if (shouldReplaceUploadWork(manualRetry)) {
+            ExistingWorkPolicy.REPLACE
+        } else {
+            ExistingWorkPolicy.KEEP
+        },
         request,
     )
 }
+
+fun shouldReplaceUploadWork(manualRetry: Boolean): Boolean = manualRetry
 
 fun enqueueCleanup(context: Context, sessionId: String) {
     val request = OneTimeWorkRequestBuilder<LocalRecordingCleanupWorker>()
@@ -397,7 +411,7 @@ fun uploadStatusLabel(capture: PendingCapture?): String = when (capture?.status)
     LocalUploadStatus.UPLOADING -> "正在上传 ${capture.progress}%"
     LocalUploadStatus.VERIFYING -> "服务端正在校验"
     LocalUploadStatus.SUBMITTED -> "已提交"
-    LocalUploadStatus.FAILED -> "上传失败，将在重新进入后重试"
+    LocalUploadStatus.FAILED -> "上传失败，请手动重试"
     null -> "正在准备上传"
 }
 

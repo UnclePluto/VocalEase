@@ -181,3 +181,21 @@ def test_mix_worker_reports_missing_sources_and_algorithm_mismatch(tmp_path):
     )
     worker.process(mismatched)
     assert callback.events[-1][3] == "MIX_FAILED"
+
+
+def test_playback_mix_startup_recovers_unacknowledged_task(tmp_path):
+    media = tmp_path / "media"
+    queue = PlaybackMixQueue(REDIS_URL)
+    queue.clear()
+    task = make_task(media)
+    queue.enqueue(task)
+    unacknowledged = queue.take(timeout_seconds=1)
+    assert unacknowledged is not None
+
+    restarted_queue = PlaybackMixQueue(REDIS_URL)
+    assert restarted_queue.recover_processing() == 1
+    recovered = restarted_queue.take(timeout_seconds=1)
+
+    assert recovered is not None
+    assert recovered.job_id == task.job_id
+    restarted_queue.ack(recovered)

@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -22,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.unclepluto.vocaease.auth.AuthDestination
@@ -79,6 +82,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private data class SingingSelection(
+    val song: CatalogSong,
+    val accompanimentVolume: Float,
+)
+
 @Composable
 private fun ParticipantApp(
     gateway: ParticipantAuthGateway,
@@ -98,7 +106,7 @@ private fun ParticipantApp(
     var currentPassword by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var activeSingingSong by remember { mutableStateOf<CatalogSong?>(null) }
+    var singingSelection by remember { mutableStateOf<SingingSelection?>(null) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(token) {
@@ -158,14 +166,16 @@ private fun ParticipantApp(
                 },
             )
             AuthDestination.HOME -> {
-                val singingSong = activeSingingSong
-                if (singingSong == null) {
+                val selection = singingSelection
+                if (selection == null) {
                     CatalogScreen(
                         token = token.orEmpty(),
                         baseUrl = baseUrl,
                         gateway = catalogGateway,
                         playerFactory = playerFactory,
-                        onStartSinging = { activeSingingSong = it },
+                        onStartSinging = { song, volume ->
+                            singingSelection = SingingSelection(song, volume)
+                        },
                         onLogout = {
                             sessionStore.clear()
                             token = null
@@ -177,11 +187,12 @@ private fun ParticipantApp(
                         activity = activity,
                         token = token.orEmpty(),
                         baseUrl = baseUrl,
-                        song = singingSong,
+                        song = selection.song,
+                        accompanimentVolume = selection.accompanimentVolume,
                         catalogGateway = catalogGateway,
                         gateway = singingGateway,
                         interruptionRegistry = interruptionRegistry,
-                        onExit = { activeSingingSong = null },
+                        onExit = { singingSelection = null },
                     )
                 }
             }
@@ -202,46 +213,69 @@ private fun AppFrame(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun LoginScreen(error: String, busy: Boolean, onLogin: (String, String) -> Unit) {
+internal fun LoginScreen(error: String, busy: Boolean, onLogin: (String, String) -> Unit) {
     var phone by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    Text("参与者登录", style = MaterialTheme.typography.headlineMedium)
-    OutlinedTextField(phone, { phone = it }, label = { Text("手机号") }, modifier = Modifier.fillMaxWidth())
-    OutlinedTextField(
-        password,
-        { password = it },
-        label = { Text("密码") },
-        visualTransformation = PasswordVisualTransformation(),
-        modifier = Modifier.fillMaxWidth(),
-    )
-    if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
-    Button(onClick = { onLogin(phone, password) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text(if (busy) "登录中…" else "登录")
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("参与者登录", style = MaterialTheme.typography.headlineMedium)
+        OutlinedTextField(
+            phone,
+            { phone = it },
+            label = { Text("手机号") },
+            modifier = Modifier.fillMaxWidth().testTag("login-phone"),
+        )
+        OutlinedTextField(
+            password,
+            { password = it },
+            label = { Text("密码") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth().testTag("login-password"),
+        )
+        if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
+        Button(
+            onClick = { onLogin(phone, password) },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth().testTag("login-submit"),
+        ) {
+            Text(if (busy) "登录中…" else "登录")
+        }
     }
 }
 
 @Composable
-private fun ChangePasswordScreen(
+internal fun ChangePasswordScreen(
     error: String,
     busy: Boolean,
     onChange: (String) -> Unit,
     onLogout: () -> Unit,
 ) {
     var newPassword by remember { mutableStateOf("") }
-    Text("首次登录需要修改密码", style = MaterialTheme.typography.headlineMedium)
-    Text("新密码至少 10 位，不能继续使用 88888888。")
-    OutlinedTextField(
-        newPassword,
-        { newPassword = it },
-        label = { Text("新密码") },
-        visualTransformation = PasswordVisualTransformation(),
-        modifier = Modifier.fillMaxWidth(),
-    )
-    if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
-    Button(onClick = { onChange(newPassword) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text(if (busy) "提交中…" else "修改密码并进入")
-    }
-    Button(onClick = onLogout, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text("退出登录")
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("首次登录需要修改密码", style = MaterialTheme.typography.headlineMedium)
+        Text("新密码至少 10 位，不能继续使用 88888888。")
+        OutlinedTextField(
+            newPassword,
+            { newPassword = it },
+            label = { Text("新密码") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
+        Button(
+            onClick = { onChange(newPassword) },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (busy) "提交中…" else "修改密码并进入")
+        }
+        Button(onClick = onLogout, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("退出登录")
+        }
     }
 }

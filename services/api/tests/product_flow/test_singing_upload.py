@@ -1,9 +1,11 @@
 import hashlib
 import io
+import os
 import wave
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from vocaease_api.app import create_app
 from vocaease_api.database import (
     BackingTrackVersion,
@@ -13,7 +15,10 @@ from vocaease_api.database import (
     SongPublication,
 )
 
-DATABASE_URL = "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease"
+DATABASE_URL = os.getenv(
+    "VOCAEASE_TEST_DATABASE_URL",
+    "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease",
+)
 
 
 def silent_wav(seconds: int = 7) -> bytes:
@@ -26,7 +31,7 @@ def silent_wav(seconds: int = 7) -> bytes:
     return output.getvalue()
 
 
-def seed_published_song(app) -> str:
+def seed_published_song(app) -> dict[str, str]:
     suffix = uuid4().hex
     with app.state.session_factory() as session:
         source = MediaFile(
@@ -75,7 +80,54 @@ def seed_published_song(app) -> str:
             )
         )
         session.commit()
-        return str(song.id)
+        return {
+            "song_id": str(song.id),
+            "backing_track_id": str(track.id),
+            "lyric_version_id": str(lyrics.id),
+        }
+
+
+def republish_song(app, song_version: dict[str, str]) -> dict[str, str]:
+    with app.state.session_factory() as session:
+        publication = session.scalar(
+            select(SongPublication).where(
+                SongPublication.song_id == UUID(song_version["song_id"]),
+                SongPublication.active.is_(True),
+            )
+        )
+        old_track = session.get(
+            BackingTrackVersion, UUID(song_version["backing_track_id"])
+        )
+        assert publication is not None
+        assert old_track is not None
+        track = BackingTrackVersion(
+            song_id=old_track.song_id,
+            version=old_track.version + 1,
+            source_media_id=old_track.source_media_id,
+            normalized_media_id=old_track.normalized_media_id,
+            duration_ms=old_track.duration_ms,
+            sample_rate=old_track.sample_rate,
+            channels=old_track.channels,
+            review_status="approved",
+            source_kind=old_track.source_kind,
+        )
+        session.add(track)
+        session.flush()
+        lyrics = LyricVersion(
+            backing_track_id=track.id,
+            version=1,
+            lrc_text="[00:00.00]新版测试歌词",
+        )
+        session.add(lyrics)
+        session.flush()
+        publication.backing_track_id = track.id
+        publication.lyric_version_id = lyrics.id
+        session.commit()
+        return {
+            "song_id": song_version["song_id"],
+            "backing_track_id": str(track.id),
+            "lyric_version_id": str(lyrics.id),
+        }
 
 
 def authenticated_participant(
@@ -134,14 +186,14 @@ def test_continuous_session_and_resumable_voice_upload(monkeypatch, tmp_path):
     app = create_app()
 
     with TestClient(app) as client:
-        song_id = seed_published_song(app)
+        song_version = seed_published_song(app)
         admin_headers, headers, participant_id, phone = authenticated_participant(client)
 
         no_second_confirmation = client.post(
             "/api/v1/singing-sessions",
             headers=headers,
             json={
-                "song_id": song_id,
+                **song_version,
                 "used_headphones": False,
                 "headphone_risk_confirmed": False,
                 "device_snapshot": snapshot(),
@@ -154,18 +206,31 @@ def test_continuous_session_and_resumable_voice_upload(monkeypatch, tmp_path):
             "/api/v1/singing-sessions",
             headers=headers,
             json={
-                "song_id": song_id,
+                **song_version,
                 "used_headphones": True,
                 "device_snapshot": sensitive_snapshot,
             },
         )
         assert rejected_sensitive_field.status_code == 422
 
+        current_song_version = republish_song(app, song_version)
+        stale_version = client.post(
+            "/api/v1/singing-sessions",
+            headers=headers,
+            json={
+                **song_version,
+                "used_headphones": True,
+                "device_snapshot": snapshot(),
+            },
+        )
+        assert stale_version.status_code == 409
+        assert stale_version.json()["detail"] == "歌曲版本已更新，请刷新曲库后重试"
+
         created = client.post(
             "/api/v1/singing-sessions",
             headers=headers,
             json={
-                "song_id": song_id,
+                **current_song_version,
                 "used_headphones": False,
                 "headphone_risk_confirmed": True,
                 "device_snapshot": snapshot() | {"output_route": "speaker"},
@@ -275,8 +340,9 @@ def test_continuous_session_and_resumable_voice_upload(monkeypatch, tmp_path):
             f"/api/v1/singing-sessions/{singing_session['id']}", headers=headers
         ).json()
         assert session_detail["status"] == "submitted"
-        assert session_detail["raw_voice_url"].startswith("/api/v1/media/")
+        assert session_detail["raw_voice_url"].endswith("/raw-voice")
         raw_media_url = session_detail["raw_voice_url"]
+        assert client.get(raw_media_url, headers=headers).status_code == 200
 
         summaries = client.get("/api/v1/admin/singing-sessions/summary", headers=admin_headers)
         assert summaries.status_code == 200
@@ -303,6 +369,24 @@ def test_continuous_session_and_resumable_voice_upload(monkeypatch, tmp_path):
             params={"download": "true"},
         )
         assert "raw-voice-" in raw_download.headers["content-disposition"]
+        raw_access_audits = client.get(
+            "/api/v1/admin/audit-events",
+            headers=admin_headers,
+            params={"action": "raw_voice.played"},
+        )
+        assert any(
+            event["object_id"] == singing_session["id"]
+            for event in raw_access_audits.json()
+        )
+        spectrogram_audits = client.get(
+            "/api/v1/admin/audit-events",
+            headers=admin_headers,
+            params={"action": "spectrogram.viewed"},
+        )
+        assert any(
+            event["object_id"] == singing_session["id"]
+            for event in spectrogram_audits.json()
+        )
 
         preserve_recording = client.request(
             "DELETE",

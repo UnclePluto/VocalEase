@@ -1,0 +1,14 @@
+services:
+  database:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  api:
+    ports: !override
+      - "18000:8000"
+
+  admin-web:
+    ports: !override
+      - "18080:80"

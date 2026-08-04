@@ -15,7 +15,7 @@ from vocaease_api.database import (
     Song,
 )
 from vocaease_api.identity import CurrentAccount, DatabaseSession, require_role
-from vocaease_api.media import LocalMediaStorage, probe_audio, read_upload, sha256
+from vocaease_api.media import LocalMediaStorage, probe_audio, read_upload, sha256, sha256_file
 from vocaease_api.separation_models import SeparationJob
 from vocaease_api.separation_queue import SeparationQueue, SeparationTask
 from vocaease_api.settings import Settings
@@ -301,7 +301,13 @@ def worker_started(
     worker_token: Annotated[str | None, Header(alias="X-VocaEase-Worker-Token")] = None,
 ) -> None:
     require_internal_token(worker_token)
-    job = require_current_attempt(session.get(SeparationJob, job_id), payload.attempt, "queued")
+    job = session.get(SeparationJob, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "分离任务不存在")
+    if job.attempts != payload.attempt or job.status not in {"queued", "running"}:
+        raise HTTPException(status.HTTP_409_CONFLICT, "任务状态已经变化")
+    if job.status == "running":
+        return
     job.status = "running"
     job.updated_at = datetime.now(UTC)
     session.commit()
@@ -314,8 +320,7 @@ def validate_worker_output(job: SeparationJob, attempt: int, output: WorkerOutpu
     path = storage().path(output.storage_key)
     if not path.is_file():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "输出文件不存在")
-    content = path.read_bytes()
-    if len(content) != output.size_bytes or sha256(content) != output.sha256:
+    if path.stat().st_size != output.size_bytes or sha256_file(path) != output.sha256:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "输出文件校验失败")
     metadata = probe_audio(path)
     if metadata.sample_rate != 48000 or metadata.channels != 2:
@@ -334,7 +339,25 @@ def worker_completed(
     worker_token: Annotated[str | None, Header(alias="X-VocaEase-Worker-Token")] = None,
 ) -> None:
     require_internal_token(worker_token)
-    job = require_current_attempt(session.get(SeparationJob, job_id), payload.attempt, "running")
+    job = session.get(SeparationJob, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "分离任务不存在")
+    if job.attempts != payload.attempt:
+        raise HTTPException(status.HTTP_409_CONFLICT, "任务状态已经变化")
+    if job.status == "succeeded":
+        vocals = session.get(MediaFile, job.vocals_media_id)
+        no_vocals = session.get(MediaFile, job.no_vocals_media_id)
+        if (
+            vocals is not None
+            and no_vocals is not None
+            and vocals.storage_key == payload.vocals.storage_key
+            and vocals.sha256 == payload.vocals.sha256
+            and no_vocals.storage_key == payload.no_vocals.storage_key
+            and no_vocals.sha256 == payload.no_vocals.sha256
+        ):
+            return
+        raise HTTPException(status.HTTP_409_CONFLICT, "任务终态与回调结果不一致")
+    job = require_current_attempt(job, payload.attempt, "running")
     if payload.vocals.storage_key == payload.no_vocals.storage_key:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "两轨输出不能使用同一文件")
     validate_worker_output(job, payload.attempt, payload.vocals)
@@ -374,7 +397,15 @@ def worker_failed(
     worker_token: Annotated[str | None, Header(alias="X-VocaEase-Worker-Token")] = None,
 ) -> None:
     require_internal_token(worker_token)
-    job = require_current_attempt(session.get(SeparationJob, job_id), payload.attempt, "running")
+    job = session.get(SeparationJob, job_id)
+    if (
+        job is not None
+        and job.attempts == payload.attempt
+        and job.status == "failed"
+        and job.failure_code == payload.failure_code
+    ):
+        return
+    job = require_current_attempt(job, payload.attempt, "running")
     job.status = "failed"
     job.failure_code = payload.failure_code
     job.updated_at = datetime.now(UTC)

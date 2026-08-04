@@ -68,7 +68,17 @@ def require_admin_session(
     account: CurrentAccount,
     session: DatabaseSession,
 ) -> SingingSession:
-    require_role(account, AccountRole.ADMIN)
+    if account.role != AccountRole.ADMIN:
+        record_audit(
+            session,
+            actor_account_id=account.id,
+            action="singing_session.admin_access_denied",
+            object_type="singing_session",
+            object_id=singing_session_id,
+            detail={"reason": "admin_role_required"},
+        )
+        session.commit()
+        raise HTTPException(403, "需要管理员权限")
     singing_session = session.get(SingingSession, singing_session_id)
     if singing_session is None:
         raise HTTPException(404, "演唱会话不存在")
@@ -175,7 +185,7 @@ def sound_lab(
             for report in quality
         ],
         waveform=analysis.waveform,
-        spectrogram_url=f"/api/v1/media/{analysis.spectrogram_media_id}",
+        spectrogram_url=f"/api/v1/admin/singing-sessions/{item.id}/spectrogram",
         raw_voice_url=f"/api/v1/admin/singing-sessions/{item.id}/raw-voice",
         playback_mix_status=mix.status if mix else None,
     )
@@ -208,3 +218,32 @@ def read_raw_voice(
         media_type="audio/wav",
         filename=f"raw-voice-{item.id}.wav" if download else None,
     )
+
+
+@router.get("/admin/singing-sessions/{singing_session_id}/spectrogram")
+def read_spectrogram(
+    singing_session_id: UUID,
+    account: CurrentAccount,
+    session: DatabaseSession,
+) -> FileResponse:
+    item = require_admin_session(singing_session_id, account, session)
+    analysis = session.scalar(
+        select(SessionMediaAnalysis).where(
+            SessionMediaAnalysis.singing_session_id == item.id
+        )
+    )
+    media = session.get(MediaFile, analysis.spectrogram_media_id) if analysis else None
+    if media is None:
+        raise HTTPException(404, "频谱图不存在")
+    path = storage().path(media.storage_key)
+    if not path.is_file():
+        raise HTTPException(404, "频谱图文件不存在")
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="spectrogram.viewed",
+        object_type="singing_session",
+        object_id=item.id,
+    )
+    session.commit()
+    return FileResponse(path, media_type=media.content_type)

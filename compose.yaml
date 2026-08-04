@@ -66,6 +66,7 @@ services:
     build:
       context: .
       dockerfile: services/worker/Dockerfile
+    restart: unless-stopped
     environment:
       VOCAEASE_REDIS_URL: redis://redis:6379/1
       VOCAEASE_MEDIA_DIRECTORY: /data/media

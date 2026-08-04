@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
-from vocaease_worker.callback import StaleTaskError
+from vocaease_worker.callback import CallbackDeliveryError, StaleTaskError
 from vocaease_worker.mixing import FfmpegPlaybackMixer, MixingError, MixOutput, file_sha256
 from vocaease_worker.mixing_queue import PlaybackMixQueue, PlaybackMixTask
 
@@ -70,6 +70,10 @@ class PlaybackMixWorker:
                 task.attempt,
                 replace(output, storage_key=output_key),
             )
+        except StaleTaskError:
+            return
+        except CallbackDeliveryError:
+            raise
         except MixingError as error:
             self.callback.failed(task.job_id, task.attempt, error.failure_code)
         except Exception:
@@ -79,5 +83,10 @@ class PlaybackMixWorker:
         task = self.queue.take(timeout_seconds)
         if task is None:
             return False
-        self.process(task)
+        try:
+            self.process(task)
+        except Exception:
+            self.queue.release(task)
+            return True
+        self.queue.ack(task)
         return True

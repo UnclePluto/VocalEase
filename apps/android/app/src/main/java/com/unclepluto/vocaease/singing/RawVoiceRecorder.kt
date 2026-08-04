@@ -25,6 +25,7 @@ data class RecordingResult(
 
 data class RecordingStart(
     val monotonicNs: Long,
+    val actualInputType: String?,
 )
 
 class RawVoiceRecorder(
@@ -61,7 +62,14 @@ class RawVoiceRecorder(
             WavStreamWriter(target, parameters.sampleRate).use { writer ->
                 record.startRecording()
                 check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "麦克风启动失败" }
-                started.complete(RecordingStart(SystemClock.elapsedRealtimeNanos()))
+                started.complete(
+                    RecordingStart(
+                        monotonicNs = SystemClock.elapsedRealtimeNanos(),
+                        actualInputType = record.routedDevice?.type?.let {
+                            audioDeviceTypeLabel(it, output = false)
+                        },
+                    )
+                )
                 while (!shouldStop.get()) {
                     val count = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
                     when {
@@ -143,13 +151,13 @@ fun wavHeader(dataBytes: Long, sampleRate: Int = RAW_SAMPLE_RATE): ByteArray {
 }
 
 data class QualityThresholds(
-    val silenceAmplitude: Int = 160,
+    val silenceAmplitude: Int = 32,
     val lowRmsDbfs: Double = -42.0,
-    val clippingAmplitude: Int = 32_700,
-    val silenceRatioWarning: Double = 0.35,
-    val clippingRatioWarning: Double = 0.005,
+    val clippingAmplitude: Int = 32_734,
+    val silenceRatioWarning: Double = 0.8,
+    val clippingRatioWarning: Double = 0.01,
     val stageToleranceMs: Long = 250,
-    val markerWindowMs: Int = 250,
+    val markerWindowMs: Int = 500,
 )
 
 data class QualityMarker(
@@ -209,31 +217,44 @@ fun analyzeWav(
             val sampleRate = view.getInt(24)
             val bitDepth = view.getShort(34).toInt()
             val dataBytes = view.getInt(40).toLong() and 0xffff_ffffL
-            check(dataBytes <= file.length() - WAV_HEADER_BYTES)
+            check(
+                channels > 0 &&
+                    sampleRate > 0 &&
+                    bitDepth == 16 &&
+                    dataBytes <= file.length() - WAV_HEADER_BYTES &&
+                    dataBytes % 2L == 0L
+            )
             if (sampleRate != RAW_SAMPLE_RATE) warnings += "采样率不是 48 kHz"
             if (channels != 1) warnings += "声道数不是单声道"
-            if (bitDepth != 16) warnings += "位深不是 16-bit"
-            val samples = ShortArray((dataBytes / 2).toInt())
-            val bytes = ByteArray(samples.size * 2)
-            input.readFully(bytes)
-            ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(samples)
-            val durationMs = samples.size.toLong() * 1_000 / sampleRate.coerceAtLeast(1)
+            val stats = StreamingQualityStats(sampleRate, thresholds)
+            val buffer = ByteArray(STREAM_BUFFER_BYTES)
+            var remaining = dataBytes
+            var channelIndex = 0
+            while (remaining > 0) {
+                val count = minOf(buffer.size.toLong(), remaining).toInt()
+                input.readFully(buffer, 0, count)
+                val samples = ByteBuffer.wrap(buffer, 0, count)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .asShortBuffer()
+                while (samples.hasRemaining()) {
+                    val sample = samples.get()
+                    if (channelIndex == 0) stats.add(sample)
+                    channelIndex = (channelIndex + 1) % channels
+                }
+                remaining -= count
+            }
+            val metrics = stats.finish()
+            val frameCount = dataBytes / (RAW_BYTES_PER_FRAME * channels)
+            val durationMs = frameCount * 1_000 / sampleRate
             val stageComplete = abs(durationMs - expectedDurationMs) <= thresholds.stageToleranceMs
             if (!stageComplete) warnings += "录音时长与三阶段预期不一致"
-            val sumSquares = samples.fold(0.0) { sum, sample ->
-                val normalized = sample.toDouble() / Short.MAX_VALUE
-                sum + normalized * normalized
+            if (metrics.rmsDbfs < thresholds.lowRmsDbfs) warnings += "整体录音音量偏低"
+            if (metrics.silenceRatio >= thresholds.silenceRatioWarning) {
+                warnings += "静音占比较高"
             }
-            val rms = if (samples.isEmpty()) 0.0 else sqrt(sumSquares / samples.size)
-            val rmsDbfs = if (rms <= 0.0) -120.0 else 20 * log10(rms)
-            val silenceRatio = samples.count { abs(it.toInt()) <= thresholds.silenceAmplitude }
-                .toDouble() / samples.size.coerceAtLeast(1)
-            val clippingRatio = samples.count {
-                abs(it.toInt()) >= thresholds.clippingAmplitude
-            }.toDouble() / samples.size.coerceAtLeast(1)
-            if (rmsDbfs < thresholds.lowRmsDbfs) warnings += "整体录音音量偏低"
-            if (silenceRatio > thresholds.silenceRatioWarning) warnings += "静音占比较高"
-            if (clippingRatio > thresholds.clippingRatioWarning) warnings += "存在削波风险"
+            if (metrics.clippingRatio >= thresholds.clippingRatioWarning) {
+                warnings += "存在削波风险"
+            }
             if (!usedHeadphones) warnings += "无耳机录制可能包含伴奏串音"
             if (routeRisk) warnings += "录制期间检测到音频路由风险"
             ClientQualityReport(
@@ -244,14 +265,14 @@ fun analyzeWav(
                 channels = channels,
                 bitDepth = bitDepth,
                 durationMs = durationMs,
-                rmsDbfs = rmsDbfs,
-                silenceRatio = silenceRatio,
-                clippingRatio = clippingRatio,
+                rmsDbfs = metrics.rmsDbfs,
+                silenceRatio = metrics.silenceRatio,
+                clippingRatio = metrics.clippingRatio,
                 stageComplete = stageComplete,
                 usedHeadphones = usedHeadphones,
                 routeRisk = routeRisk,
                 fileWarnings = warnings,
-                markers = qualityMarkers(samples, sampleRate, thresholds),
+                markers = metrics.markers,
             )
         }
     }.getOrElse {
@@ -259,52 +280,81 @@ fun analyzeWav(
     }
 }
 
-private fun qualityMarkers(
-    samples: ShortArray,
-    sampleRate: Int,
+private data class StreamingMetrics(
+    val rmsDbfs: Double,
+    val silenceRatio: Double,
+    val clippingRatio: Double,
+    val markers: List<QualityMarker>,
+)
+
+private class StreamingQualityStats(
+    private val sampleRate: Int,
     thresholds: QualityThresholds,
-): List<QualityMarker> {
-    val windowSamples = sampleRate * thresholds.markerWindowMs / 1_000
-    if (windowSamples <= 0) return emptyList()
-    val markers = mutableListOf<QualityMarker>()
-    var start = 0
-    while (start < samples.size) {
-        val end = minOf(start + windowSamples, samples.size)
-        var silent = 0
-        var clipped = 0
-        for (index in start until end) {
-            val amplitude = abs(samples[index].toInt())
-            if (amplitude <= thresholds.silenceAmplitude) silent++
-            if (amplitude >= thresholds.clippingAmplitude) clipped++
-        }
-        val size = (end - start).coerceAtLeast(1)
-        val silenceRatio = silent.toDouble() / size
-        val clippingRatio = clipped.toDouble() / size
-        val kind: String
-        val value: Double
-        when {
-            clippingRatio > thresholds.clippingRatioWarning -> {
-                kind = "clipping"
-                value = clippingRatio
-            }
-            silenceRatio > 0.95 -> {
-                kind = "silence"
-                value = silenceRatio
-            }
-            else -> {
-                start = end
-                continue
-            }
-        }
-        markers += QualityMarker(
-            kind = kind,
-            startMs = start.toLong() * 1_000 / sampleRate,
-            endMs = end.toLong() * 1_000 / sampleRate,
-            value = value,
-        )
-        start = end
+) {
+    private val thresholds = thresholds
+    private val windowSamples =
+        maxOf(1, (sampleRate.toLong() * thresholds.markerWindowMs / 1_000).toInt())
+    private var sampleCount = 0L
+    private var silentCount = 0L
+    private var clippedCount = 0L
+    private var sumSquares = 0.0
+    private var windowStart = 0L
+    private var windowCount = 0
+    private var windowSilent = 0
+    private var windowClipped = 0
+    private var windowSumSquares = 0.0
+    private val markers = mutableListOf<QualityMarker>()
+
+    fun add(sample: Short) {
+        val numeric = sample.toDouble()
+        val amplitude = abs(sample.toInt())
+        sampleCount++
+        sumSquares += numeric * numeric
+        if (amplitude <= thresholds.silenceAmplitude) silentCount++
+        if (amplitude >= thresholds.clippingAmplitude) clippedCount++
+        windowCount++
+        windowSumSquares += numeric * numeric
+        if (amplitude <= thresholds.silenceAmplitude) windowSilent++
+        if (amplitude >= thresholds.clippingAmplitude) windowClipped++
+        if (windowCount == windowSamples) flushWindow()
     }
-    return markers
+
+    fun finish(): StreamingMetrics {
+        if (windowCount > 0) flushWindow()
+        return StreamingMetrics(
+            rmsDbfs = dbfs(sumSquares, sampleCount),
+            silenceRatio = silentCount.toDouble() / sampleCount.coerceAtLeast(1),
+            clippingRatio = clippedCount.toDouble() / sampleCount.coerceAtLeast(1),
+            markers = markers,
+        )
+    }
+
+    private fun flushWindow() {
+        val end = windowStart + windowCount
+        val silenceRatio = windowSilent.toDouble() / windowCount.coerceAtLeast(1)
+        val clippingRatio = windowClipped.toDouble() / windowCount.coerceAtLeast(1)
+        val rmsDbfs = dbfs(windowSumSquares, windowCount.toLong())
+        val startMs = Math.round(windowStart.toDouble() * 1_000 / sampleRate)
+        val endMs = Math.round(end.toDouble() * 1_000 / sampleRate)
+        if (silenceRatio >= 0.95) {
+            markers += QualityMarker("silence", startMs, endMs, silenceRatio)
+        } else if (rmsDbfs < thresholds.lowRmsDbfs) {
+            markers += QualityMarker("low_volume", startMs, endMs, rmsDbfs)
+        }
+        if (clippingRatio >= thresholds.clippingRatioWarning) {
+            markers += QualityMarker("clipping", startMs, endMs, clippingRatio)
+        }
+        windowStart = end
+        windowCount = 0
+        windowSilent = 0
+        windowClipped = 0
+        windowSumSquares = 0.0
+    }
+}
+
+private fun dbfs(sumSquares: Double, count: Long): Double {
+    if (count <= 0 || sumSquares <= 0.0) return -120.0
+    return 20 * log10(sqrt(sumSquares / count) / 32_768.0)
 }
 
 private fun invalidReport(
@@ -331,3 +381,4 @@ private fun invalidReport(
 )
 
 private const val WAV_HEADER_BYTES = 44
+private const val STREAM_BUFFER_BYTES = 64 * 1024

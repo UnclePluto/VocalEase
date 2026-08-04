@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
-from vocaease_worker.callback import StaleTaskError
+from vocaease_worker.callback import CallbackDeliveryError, StaleTaskError
 from vocaease_worker.separation import (
     OutputMissingError,
     SeparationError,
@@ -73,6 +73,10 @@ class SeparationWorker:
                 vocals = self.stored_output(task, "vocals", raw_outputs.vocals)
                 no_vocals = self.stored_output(task, "no-vocals", raw_outputs.no_vocals)
             self.callback.completed(task.job_id, task.attempt, vocals, no_vocals)
+        except StaleTaskError:
+            return
+        except CallbackDeliveryError:
+            raise
         except SeparationError as error:
             self.callback.failed(task.job_id, task.attempt, error.failure_code)
         except Exception:
@@ -82,5 +86,10 @@ class SeparationWorker:
         task = self.queue.take(timeout_seconds)
         if task is None:
             return False
-        self.process(task)
+        try:
+            self.process(task)
+        except Exception:
+            self.queue.release(task)
+            return True
+        self.queue.ack(task)
         return True

@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import wave
 from pathlib import Path
@@ -10,7 +11,10 @@ from fastapi.testclient import TestClient
 from redis import Redis
 from vocaease_api.app import create_app
 
-DATABASE_URL = "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease"
+DATABASE_URL = os.getenv(
+    "VOCAEASE_TEST_DATABASE_URL",
+    "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease",
+)
 REDIS_URL = "redis://127.0.0.1:63799/14"
 INTERNAL_TOKEN = "test-worker-token"
 QUEUE_NAME = "vocaease:separation:pending"
@@ -119,6 +123,14 @@ def test_admin_runs_reviews_retries_and_accepts_server_separation(monkeypatch, t
             json={"attempt": 1},
         )
         assert started.status_code == 204
+        assert (
+            client.post(
+                f"/api/v1/internal/separations/{job['id']}/started",
+                headers=internal_headers,
+                json={"attempt": 1},
+            ).status_code
+            == 204
+        )
 
         output_prefix = f"separations/{job['id']}/attempt-1"
         vocals_key = f"{output_prefix}/vocals.m4a"
@@ -141,6 +153,14 @@ def test_admin_runs_reviews_retries_and_accepts_server_separation(monkeypatch, t
             json={"attempt": 1, "vocals": vocals, "no_vocals": no_vocals},
         )
         assert completed.status_code == 204, completed.text
+        assert (
+            client.post(
+                f"/api/v1/internal/separations/{job['id']}/completed",
+                headers=internal_headers,
+                json={"attempt": 1, "vocals": vocals, "no_vocals": no_vocals},
+            ).status_code
+            == 204
+        )
 
         succeeded = client.get(
             f"/api/v1/admin/separations/{job['id']}", headers=admin_headers
@@ -198,6 +218,14 @@ def test_admin_runs_reviews_retries_and_accepts_server_separation(monkeypatch, t
             json={"attempt": 1, "failure_code": "OUTPUT_MISSING"},
         )
         assert failed.status_code == 204
+        assert (
+            client.post(
+                f"/api/v1/internal/separations/{failed_job['id']}/failed",
+                headers=internal_headers,
+                json={"attempt": 1, "failure_code": "OUTPUT_MISSING"},
+            ).status_code
+            == 204
+        )
         observed_failure = client.get(
             f"/api/v1/admin/separations/{failed_job['id']}",
             headers=admin_headers,

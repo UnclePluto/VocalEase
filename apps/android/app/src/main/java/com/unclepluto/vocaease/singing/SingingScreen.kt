@@ -6,7 +6,9 @@ import android.content.pm.PackageManager
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -96,6 +98,7 @@ fun SingingSessionScreen(
     token: String,
     baseUrl: String,
     song: CatalogSong,
+    accompanimentVolume: Float,
     catalogGateway: CatalogGateway,
     gateway: SingingGateway,
     interruptionRegistry: CaptureInterruptionRegistry,
@@ -131,7 +134,11 @@ fun SingingSessionScreen(
     var routeRisk by remember { mutableStateOf(false) }
     var qualitySummary by remember { mutableStateOf("") }
     var uploadStatus by remember { mutableStateOf<PendingCapture?>(null) }
+    var playbackMix by remember { mutableStateOf<PlaybackMix?>(null) }
+    var playbackMessage by remember { mutableStateOf("") }
+    var experiencePlayer by remember { mutableStateOf<ExoPlayer?>(null) }
     val interruptionStarted = remember { AtomicBoolean(false) }
+    val phaseMachine = remember { ThreePhaseStateMachine() }
 
     fun runPreflight() {
         state = SingingUiState.CHECKING
@@ -144,10 +151,10 @@ fun SingingSessionScreen(
             }.onSuccess {
                 preflight = it
                 usedHeadphones = it.route.hasHeadphones
-                state = if (it.route.hasHeadphones) {
-                    SingingUiState.READY
-                } else {
-                    SingingUiState.FIRST_HEADPHONE_WARNING
+                state = when (initialHeadphonePrompt(it.route.hasHeadphones)) {
+                    HeadphonePrompt.READY -> SingingUiState.READY
+                    HeadphonePrompt.FIRST_WARNING -> SingingUiState.FIRST_HEADPHONE_WARNING
+                    else -> error("非法耳机预检状态")
                 }
             }.onFailure {
                 error = it.message ?: "录制前检查失败"
@@ -168,6 +175,9 @@ fun SingingSessionScreen(
     fun interrupt(reason: InterruptionReason) {
         val id = sessionId ?: return
         if (!interruptionStarted.compareAndSet(false, true)) return
+        if (phaseMachine.phase !in setOf(CapturePhase.COMPLETED, CapturePhase.INTERRUPTED)) {
+            phaseMachine.transition(CaptureEvent.INTERRUPT)
+        }
         routeRisk = routeRisk || reason == InterruptionReason.ROUTE_CHANGED
         flowJob?.cancel()
         recorder?.stop()
@@ -197,6 +207,8 @@ fun SingingSessionScreen(
                     gateway.createSession(
                         token = token,
                         songId = song.id,
+                        backingTrackId = song.backingTrackId,
+                        lyricVersionId = song.lyricVersionId,
                         usedHeadphones = usedHeadphones,
                         headphoneRiskConfirmed = riskConfirmed,
                         snapshot = checked.snapshot,
@@ -215,7 +227,11 @@ fun SingingSessionScreen(
             store.markActive(remote.id, target)
             val rawRecorder = RawVoiceRecorder(target, checked.recordingParameters)
             recorder = rawRecorder
-            val localPlayer = localBackingPlayer(activity, checked.backingTrack)
+            val localPlayer = localBackingPlayer(
+                activity,
+                checked.backingTrack,
+                accompanimentVolume,
+            )
             player = localPlayer
             val playbackEnded = kotlinx.coroutines.CompletableDeferred<Unit>()
             localPlayer.addListener(
@@ -243,19 +259,28 @@ fun SingingSessionScreen(
             recordingJob = scope.async(Dispatchers.IO) { rawRecorder.record() }
             flowJob = scope.launch {
                 try {
-                    audioStartMonotonicNs = rawRecorder.started.await().monotonicNs
+                    val recordingStart = rawRecorder.started.await()
+                    audioStartMonotonicNs = recordingStart.monotonicNs
+                    if (recordingStart.actualInputType != checked.route.inputType) {
+                        interrupt(InterruptionReason.ROUTE_CHANGED)
+                        return@launch
+                    }
+                    phaseMachine.transition(CaptureEvent.RECORDING_STARTED)
                     state = SingingUiState.PRE
                     delay(remote.preDurationMs)
                     accompanimentStartFrame = rawRecorder.currentFrame()
                     accompanimentStartMonotonicNs = SystemClock.elapsedRealtimeNanos()
+                    phaseMachine.transition(CaptureEvent.PRE_FINISHED)
                     state = SingingUiState.SINGING
                     localPlayer.play()
                     playbackEnded.await()
+                    phaseMachine.transition(CaptureEvent.ACCOMPANIMENT_FINISHED)
                     state = SingingUiState.POST
                     delay(remote.postDurationMs)
                     rawRecorder.stop()
                     state = SingingUiState.PROCESSING
                     val result = recordingJob?.await() ?: error("录音任务不存在")
+                    phaseMachine.transition(CaptureEvent.POST_FINISHED)
                     localPlayer.release()
                     player = null
                     val report = withContext(Dispatchers.IO) {
@@ -303,6 +328,23 @@ fun SingingSessionScreen(
             delay(500)
         }
     }
+    LaunchedEffect(uploadStatus?.status, sessionId, playbackMix?.status) {
+        val id = sessionId ?: return@LaunchedEffect
+        if (uploadStatus?.status != LocalUploadStatus.SUBMITTED) return@LaunchedEffect
+        val mixClient = PlaybackMixClient(baseUrl)
+        while (state == SingingUiState.UPLOAD) {
+            runCatching {
+                withContext(Dispatchers.IO) { mixClient.status(token, id) }
+            }.onSuccess {
+                playbackMix = it
+                playbackMessage = ""
+            }.onFailure {
+                playbackMessage = "回放混音正在创建，请稍候…"
+            }
+            if (playbackMix?.status in setOf("succeeded", "failed")) break
+            delay(2_000)
+        }
+    }
 
     DisposableEffect(sessionId, state, preflight) {
         val isCapturing = state in setOf(
@@ -328,11 +370,38 @@ fun SingingSessionScreen(
                 }
             }
         }
-        if (isCapturing) audioManager.registerAudioDeviceCallback(callback, null)
+        val playbackCallback = object : AudioManager.AudioPlaybackCallback() {
+            override fun onPlaybackConfigChanged(
+                configs: MutableList<AudioPlaybackConfiguration>
+            ) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+                val actual = configs.firstOrNull {
+                    it.audioAttributes.usage == android.media.AudioAttributes.USAGE_MEDIA
+                }?.audioDeviceInfo ?: return
+                val actualLabel = audioDeviceTypeLabel(actual.type, output = true)
+                val expectedOutput = preflight?.route?.outputRoute ?: return
+                if (
+                    actualLabel != expectedOutput ||
+                    (usedHeadphones && !isHeadphoneDeviceType(actual.type))
+                ) {
+                    interrupt(InterruptionReason.ROUTE_CHANGED)
+                }
+            }
+        }
+        if (isCapturing) {
+            audioManager.registerAudioDeviceCallback(callback, null)
+            audioManager.registerAudioPlaybackCallback(playbackCallback, null)
+        }
         onDispose {
             interruptionRegistry.register(null)
-            if (isCapturing) runCatching { audioManager.unregisterAudioDeviceCallback(callback) }
+            if (isCapturing) {
+                runCatching { audioManager.unregisterAudioDeviceCallback(callback) }
+                runCatching { audioManager.unregisterAudioPlaybackCallback(playbackCallback) }
+            }
         }
+    }
+    DisposableEffect(Unit) {
+        onDispose { experiencePlayer?.release() }
     }
 
     Column(
@@ -349,11 +418,21 @@ fun SingingSessionScreen(
             SingingUiState.READY -> ReadyPanel(preflight, ::beginCapture, onExit)
             SingingUiState.FIRST_HEADPHONE_WARNING -> FirstHeadphoneWarning(
                 onRecheck = ::runPreflight,
-                onContinue = { state = SingingUiState.SECOND_HEADPHONE_WARNING },
+                onContinue = {
+                    check(
+                        continueWithoutHeadphones(HeadphonePrompt.FIRST_WARNING) ==
+                            HeadphonePrompt.SECOND_WARNING
+                    )
+                    state = SingingUiState.SECOND_HEADPHONE_WARNING
+                },
                 onExit = onExit,
             )
             SingingUiState.SECOND_HEADPHONE_WARNING -> SecondHeadphoneWarning(
                 onConfirm = {
+                    check(
+                        continueWithoutHeadphones(HeadphonePrompt.SECOND_WARNING) ==
+                            HeadphonePrompt.CONFIRMED_WITH_RISK
+                    )
                     usedHeadphones = false
                     riskConfirmed = true
                     beginCapture()
@@ -386,6 +465,41 @@ fun SingingSessionScreen(
             SingingUiState.UPLOAD -> UploadPanel(
                 summary = qualitySummary,
                 capture = uploadStatus,
+                mix = playbackMix,
+                playbackMessage = playbackMessage,
+                onPlayMix = {
+                    val id = sessionId ?: return@UploadPanel
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                PlaybackMixClient(baseUrl).access(token, id)
+                            }
+                        }.onSuccess { access ->
+                            experiencePlayer?.release()
+                            experiencePlayer = remoteExperiencePlayer(activity, access.url)
+                                .also { it.play() }
+                            playbackMessage =
+                                "正在回听体验混音，授权 ${access.expiresInSeconds} 秒内有效"
+                        }.onFailure {
+                            playbackMessage = it.message ?: "无法获取回听授权"
+                        }
+                    }
+                },
+                onRetryMix = {
+                    val id = sessionId ?: return@UploadPanel
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                PlaybackMixClient(baseUrl).retry(token, id)
+                            }
+                        }.onSuccess {
+                            playbackMix = it
+                            playbackMessage = "已重新提交回放混音"
+                        }.onFailure {
+                            playbackMessage = it.message ?: "无法重试回放混音"
+                        }
+                    }
+                },
                 onExit = onExit,
             )
             SingingUiState.INTERRUPTED -> InterruptedPanel(error, onExit)
@@ -509,14 +623,47 @@ private fun CapturePanel(
 private fun UploadPanel(
     summary: String,
     capture: PendingCapture?,
+    mix: PlaybackMix?,
+    playbackMessage: String,
+    onPlayMix: () -> Unit,
+    onRetryMix: () -> Unit,
     onExit: () -> Unit,
 ) {
-    Text(summary, style = MaterialTheme.typography.titleLarge)
-    Text(uploadStatusLabel(capture))
-    capture?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Text("这是录音技术质量检查，不是演唱评分、疾病判断或自动诊断。")
-    Text("服务端确认前，原始录音会保留在本机；确认 7 天后才会自动清理本地副本。")
-    Button(onClick = onExit, modifier = Modifier.fillMaxWidth()) { Text("返回曲库") }
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(summary, style = MaterialTheme.typography.titleLarge)
+        Text(uploadStatusLabel(capture))
+        capture?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (capture?.status == LocalUploadStatus.SUBMITTED) {
+            when (mix?.status) {
+                "succeeded" -> {
+                    Text("回放混音已生成，可申请短时授权回听。")
+                    Button(onClick = onPlayMix, modifier = Modifier.fillMaxWidth()) {
+                        Text("回听体验混音")
+                    }
+                }
+                "failed" -> {
+                    Text(
+                        mix.failureMessage ?: "回放混音生成失败",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    OutlinedButton(onClick = onRetryMix, modifier = Modifier.fillMaxWidth()) {
+                        Text("重新生成回放混音")
+                    }
+                }
+                else -> Text("回放混音正在处理中，请稍候…")
+            }
+        } else {
+            Text("原始录音提交成功后，将自动生成回放混音。")
+        }
+        if (playbackMessage.isNotEmpty()) Text(playbackMessage)
+        Text("回放混音仅用于体验，不是研究原始数据。")
+        Text("这是录音技术质量检查，不是演唱评分、疾病判断或自动诊断。")
+        Text("服务端确认前，原始录音会保留在本机；确认 7 天后才会自动清理本地副本。")
+        Button(onClick = onExit, modifier = Modifier.fillMaxWidth()) { Text("返回曲库") }
+    }
 }
 
 @Composable
@@ -537,7 +684,11 @@ private fun CenteredMessage(message: String) {
     }
 }
 
-private fun localBackingPlayer(activity: ComponentActivity, file: File): ExoPlayer =
+private fun localBackingPlayer(
+    activity: ComponentActivity,
+    file: File,
+    volume: Float,
+): ExoPlayer =
     ExoPlayer.Builder(activity)
         .build()
         .apply {
@@ -549,6 +700,22 @@ private fun localBackingPlayer(activity: ComponentActivity, file: File): ExoPlay
                 true,
             )
             setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+            this.volume = volume.coerceIn(0f, 1f)
+            prepare()
+        }
+
+private fun remoteExperiencePlayer(activity: ComponentActivity, url: String): ExoPlayer =
+    ExoPlayer.Builder(activity)
+        .build()
+        .apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                true,
+            )
+            setMediaItem(MediaItem.fromUri(url))
             prepare()
         }
 

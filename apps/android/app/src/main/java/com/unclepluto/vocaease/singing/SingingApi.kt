@@ -51,10 +51,23 @@ data class RemoteUpload(
     val qualityReport: JSONObject? = null,
 )
 
+data class PlaybackMix(
+    val status: String,
+    val mediaReady: Boolean,
+    val failureMessage: String?,
+)
+
+data class PlaybackAccess(
+    val url: String,
+    val expiresInSeconds: Int,
+)
+
 interface SingingGateway {
     fun createSession(
         token: String,
         songId: String,
+        backingTrackId: String,
+        lyricVersionId: String,
         usedHeadphones: Boolean,
         headphoneRiskConfirmed: Boolean,
         snapshot: DeviceSnapshot,
@@ -87,12 +100,16 @@ class HttpSingingGateway(
     override fun createSession(
         token: String,
         songId: String,
+        backingTrackId: String,
+        lyricVersionId: String,
         usedHeadphones: Boolean,
         headphoneRiskConfirmed: Boolean,
         snapshot: DeviceSnapshot,
     ): RemoteSingingSession {
         val payload = JSONObject()
             .put("song_id", songId)
+            .put("backing_track_id", backingTrackId)
+            .put("lyric_version_id", lyricVersionId)
             .put("used_headphones", usedHeadphones)
             .put("headphone_risk_confirmed", headphoneRiskConfirmed)
             .put("device_snapshot", snapshot.toJson())
@@ -280,6 +297,78 @@ class VoiceUploadClient(
         const val CHUNK_BYTES = 2 * 1024 * 1024
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private val OCTETS = "application/octet-stream".toMediaType()
+    }
+}
+
+class PlaybackMixClient(
+    private val baseUrl: String,
+    private val client: OkHttpClient = OkHttpClient(),
+) {
+    fun status(token: String, sessionId: String): PlaybackMix {
+        val request = request(
+            token,
+            "/api/v1/singing-sessions/$sessionId/playback-mix",
+            post = false,
+        )
+        val body = execute(request)
+        return PlaybackMix(
+            status = body.getString("status"),
+            mediaReady = body.getBoolean("media_ready"),
+            failureMessage = body.optString("failure_message").takeIf(String::isNotBlank),
+        )
+    }
+
+    fun retry(token: String, sessionId: String): PlaybackMix {
+        val body = execute(
+            request(
+                token,
+                "/api/v1/singing-sessions/$sessionId/playback-mix/retry",
+                post = true,
+            )
+        )
+        return PlaybackMix(
+            status = body.getString("status"),
+            mediaReady = body.getBoolean("media_ready"),
+            failureMessage = body.optString("failure_message").takeIf(String::isNotBlank),
+        )
+    }
+
+    fun access(token: String, sessionId: String): PlaybackAccess {
+        val body = execute(
+            request(
+                token,
+                "/api/v1/singing-sessions/$sessionId/playback-mix/access",
+                post = true,
+            )
+        )
+        val path = body.getString("url")
+        return PlaybackAccess(
+            url = java.net.URI(baseUrl.trimEnd('/') + "/").resolve(path).toString(),
+            expiresInSeconds = body.getInt("expires_in_seconds"),
+        )
+    }
+
+    private fun request(token: String, path: String, post: Boolean): Request {
+        val builder = Request.Builder()
+            .url(baseUrl.trimEnd('/') + path)
+            .header("Authorization", "Bearer $token")
+        return if (post) {
+            builder.post(ByteArray(0).toRequestBody(OCTETS)).build()
+        } else {
+            builder.get().build()
+        }
+    }
+
+    private fun execute(request: Request): JSONObject {
+        client.newCall(request).execute().use { response ->
+            val body = response.body.string()
+            check(response.isSuccessful) { apiError(response.code, body) }
+            return JSONObject(body)
+        }
+    }
+
+    private companion object {
+        val OCTETS = "application/octet-stream".toMediaType()
     }
 }
 

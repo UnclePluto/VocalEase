@@ -1,11 +1,15 @@
 import io
+import os
 import wave
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from vocaease_api.app import create_app
 
-DATABASE_URL = "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease"
+DATABASE_URL = os.getenv(
+    "VOCAEASE_TEST_DATABASE_URL",
+    "postgresql+psycopg://vocaease:vocaease_dev@127.0.0.1:54329/vocaease",
+)
 
 
 def wav_bytes(sample_rate: int = 44_100, seconds: int = 1) -> bytes:
@@ -111,6 +115,8 @@ def test_admin_publishes_versioned_backing_track_and_lrc(monkeypatch, tmp_path):
         visible = next(song for song in catalog.json() if song["id"] == song_id)
         assert visible["title"] == f"测试歌曲-{suffix}"
         assert visible["duration_ms"] >= 1_000
+        assert visible["backing_track_id"] == track["id"]
+        assert visible["lyric_version_id"] == lyrics.json()["id"]
         assert visible["lines"][0]["text"] == "准备开始"
         assert client.get(visible["backing_track_url"]).status_code == 401
         assert (

@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Header, HTTPException, status
+from fastapi import APIRouter, Body, Header, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -58,6 +59,8 @@ class DeviceSnapshot(BaseModel):
 
 class CreateSingingSessionRequest(BaseModel):
     song_id: UUID
+    backing_track_id: UUID
+    lyric_version_id: UUID
     used_headphones: bool
     headphone_risk_confirmed: bool = False
     device_snapshot: DeviceSnapshot
@@ -176,6 +179,15 @@ def ensure_session_access(
         return singing_session
     participant = participant_for(account, session)
     if singing_session.participant_id != participant.id:
+        record_audit(
+            session,
+            actor_account_id=account.id,
+            action="singing_session.access_denied",
+            object_type="singing_session",
+            object_id=singing_session.id,
+            detail={"reason": "owner_mismatch"},
+        )
+        session.commit()
         raise HTTPException(status.HTTP_403_FORBIDDEN, "没有访问该演唱会话的权限")
     return singing_session
 
@@ -256,7 +268,7 @@ def present_session(
         device_snapshot=singing_session.device_snapshot,
         upload_status=upload.status if upload else None,
         raw_voice_url=(
-            f"/api/v1/media/{singing_session.raw_voice_media_id}"
+            f"/api/v1/singing-sessions/{singing_session.id}/raw-voice"
             if singing_session.raw_voice_media_id
             else None
         ),
@@ -327,18 +339,25 @@ def create_singing_session(
     )
     if publication is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "歌曲未发布或已撤下")
-    lyrics = session.get(LyricVersion, publication.lyric_version_id)
+    if (
+        publication.backing_track_id != payload.backing_track_id
+        or publication.lyric_version_id != payload.lyric_version_id
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, "歌曲版本已更新，请刷新曲库后重试")
+    lyrics = session.get(LyricVersion, payload.lyric_version_id)
     if lyrics is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "歌曲歌词版本不可用")
     from vocaease_api.database import BackingTrackVersion
 
-    track = session.get(BackingTrackVersion, publication.backing_track_id)
-    if track is None:
+    track = session.get(BackingTrackVersion, payload.backing_track_id)
+    if track is None or track.song_id != payload.song_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "歌曲伴奏版本不可用")
+    if lyrics.backing_track_id != track.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "歌曲歌词版本不可用")
     singing_session = SingingSession(
         participant_id=participant.id,
         song_id=publication.song_id,
-        backing_track_id=publication.backing_track_id,
+        backing_track_id=payload.backing_track_id,
         lyric_version_id=lyrics.id,
         status="recording",
         used_headphones=payload.used_headphones,
@@ -433,6 +452,37 @@ def get_singing_session(
         session.get(SingingSession, singing_session_id), account, session
     )
     return present_session(singing_session, session)
+
+
+@router.get("/singing-sessions/{singing_session_id}/raw-voice")
+def read_session_raw_voice(
+    singing_session_id: UUID,
+    account: CurrentAccount,
+    session: DatabaseSession,
+    download: Annotated[bool, Query()] = False,
+) -> FileResponse:
+    singing_session = ensure_session_access(
+        session.get(SingingSession, singing_session_id), account, session
+    )
+    media = session.get(MediaFile, singing_session.raw_voice_media_id)
+    if media is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "原始人声不存在")
+    path = storage().path(media.storage_key)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "原始人声文件不存在")
+    record_audit(
+        session,
+        actor_account_id=account.id,
+        action="raw_voice.downloaded" if download else "raw_voice.played",
+        object_type="singing_session",
+        object_id=singing_session.id,
+    )
+    session.commit()
+    return FileResponse(
+        path,
+        media_type=media.content_type,
+        filename=f"raw-voice-{singing_session.id}.wav" if download else None,
+    )
 
 
 @router.post(
@@ -623,7 +673,7 @@ def complete_upload(
         ensure_mix_job(session, singing_session)
         return CompleteUploadResponse(
             **present_upload(upload, session).model_dump(),
-            media_url=f"/api/v1/media/{singing_session.raw_voice_media_id}",
+            media_url=f"/api/v1/singing-sessions/{singing_session.id}/raw-voice",
             quality_report=quality.metrics,
         )
     chunks = session.scalars(
@@ -650,8 +700,7 @@ def complete_upload(
             singing_session.status = "upload_failed"
             session.commit()
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "完整文件校验失败")
-        content = target_path.read_bytes()
-        report = analyze_pcm_wav(content, quality_thresholds())
+        report = analyze_pcm_wav(target_path, quality_thresholds())
         media = MediaFile(
             storage_key=target_key,
             content_type="audio/wav",
@@ -707,6 +756,6 @@ def complete_upload(
     session.commit()
     return CompleteUploadResponse(
         **present_upload(upload, session).model_dump(),
-        media_url=f"/api/v1/media/{media.id}",
+        media_url=f"/api/v1/singing-sessions/{singing_session.id}/raw-voice",
         quality_report=quality_metrics,
     )
