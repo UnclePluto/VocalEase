@@ -48,7 +48,8 @@ def test_qiniu_stat_uses_injected_official_bucket_manager_boundary():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_media_migration_upgrades_legacy_qiniu_ready_metadata_without_constraint_failure():
+def test_media_migration_upgrades_legacy_qiniu_and_local_ready_assets_at_every_boundary(tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = tmp_path / "legacy-media"
     SequenceCounter.objects.bulk_create([SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True)
     doctor = create_doctor(name="迁移医生", gender="male", phone="13600000771", department="康复科", title="医师")
     current_patient = create_patient(name="迁移患者", gender="female", enrollment_age=30, phone="13500000771", doctor=doctor, start_date="2026-01-01", cycle_weeks=1)
@@ -59,6 +60,16 @@ def test_media_migration_upgrades_legacy_qiniu_ready_metadata_without_constraint
     Media = old_apps.get_model("media", "MediaAsset")
     patient = Patient.objects.get(pk=current_patient.id)
     legacy = Media.objects.create(owner=patient, owner_type="patient", media_type="singing_audio", backend="qiniu", object_key="test/singing_audio/2026/08/14/legacy", mime="audio/mpeg", size=3, sha256="", status="ready", upload_expires_at="2026-08-14T00:00:00Z", metadata={"qiniu_etag": "legacy-etag"})
+    local_key = "test/singing_audio/2026/08/14/legacy-local"
+    local_content = b"old-local"
+    local_sha = __import__("hashlib").sha256(local_content).hexdigest()
+    local_asset = Media.objects.create(owner=patient, owner_type="patient", media_type="singing_audio", backend="local", object_key=local_key, mime="audio/mpeg", size=len(local_content), sha256=local_sha, status="ready", upload_expires_at="2026-08-14T00:00:00Z", metadata={})
+    legacy_path = settings.MEDIA_LOCAL_ROOT / local_key
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(local_content)
+    legacy_path.with_name(f".{legacy_path.name}.metadata.json").write_text(json.dumps({"mime": "audio/mpeg", "size": len(local_content), "sha256": local_sha}))
+    missing_local = Media.objects.create(owner=patient, owner_type="patient", media_type="singing_audio", backend="local", object_key="test/singing_audio/2026/08/14/missing-local", mime="audio/mpeg", size=3, sha256="a" * 64, status="ready", upload_expires_at="2026-08-14T00:00:00Z", metadata={})
+    uploading = Media.objects.create(owner=patient, owner_type="patient", media_type="singing_audio", backend="local", object_key="test/singing_audio/2026/08/14/uploading", mime="audio/mpeg", size=3, sha256="", status="uploading", upload_expires_at="2026-08-14T00:00:00Z", metadata={})
     connection.commit()
     executor.loader.build_graph()
     media_nodes = sorted(node for node in executor.loader.graph.node_map if node[0] == "media" and node[1] != "0001_initial")
@@ -70,10 +81,22 @@ def test_media_migration_upgrades_legacy_qiniu_ready_metadata_without_constraint
     upgraded = MediaAsset.objects.get(pk=legacy.pk)
     assert upgraded.etag == "legacy-etag"
     assert upgraded.status == "ready"
+    upgraded_local = MediaAsset.objects.get(pk=local_asset.pk)
+    assert upgraded_local.status == "ready"
+    assert upgraded_local.manifest_generation == local_asset.id.hex
+    assert MediaAsset.objects.get(pk=missing_local.pk).status == "failed"
+    assert MediaAsset.objects.get(pk=uploading.pk).status == "uploading"
+    __import__("apps.media.services", fromlist=["ensure_local_asset_layout"]).ensure_local_asset_layout(asset=upgraded_local)
+    local_backend = __import__("apps.media.backends.local", fromlist=["LocalStorageBackend"]).LocalStorageBackend(root=settings.MEDIA_LOCAL_ROOT, signing_secret=settings.SECRET_KEY, environment="test")
+    local_url = local_backend.create_private_url(local_key, ttl_seconds=600, asset_id=local_asset.id, expected_generation=local_asset.id.hex)
+    assert local_backend.read_private(local_url.token) == local_content
+    assert not legacy_path.exists()
     # 反向数据迁移先把 ETag 放回 legacy metadata，再安全撤销字段。
     executor.migrate([("media", "0001_initial")])
     old_apps = executor.loader.project_state([("media", "0001_initial")]).apps
     rolled_back = old_apps.get_model("media", "MediaAsset").objects.get(pk=legacy.pk)
     assert rolled_back.metadata["qiniu_etag"] == "legacy-etag"
+    assert old_apps.get_model("media", "MediaAsset").objects.get(pk=missing_local.pk).status == "ready"
+    assert legacy_path.read_bytes() == local_content
     executor = MigrationExecutor(connection)
     executor.migrate(executor.loader.graph.leaf_nodes())

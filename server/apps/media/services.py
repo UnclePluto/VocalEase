@@ -106,7 +106,7 @@ def complete_local_asset(*, asset: MediaAsset) -> MediaAsset:
             locked.sha256, locked.status = receipt.sha256, MediaAsset.Status.READY
             locked.save(update_fields=["sha256", "status", "updated_at"])
             completed = locked
-    backend.finalize_generation(completed.object_key, completed.manifest_generation)
+        backend.finalize_generation(completed.object_key, completed.manifest_generation, asset_id=completed.id)
     return completed
 
 
@@ -120,7 +120,7 @@ def claim_local_upload(*, asset: MediaAsset) -> UUID:
             backend = backend_for_asset(locked)
             if not isinstance(backend, LocalStorageBackend):
                 raise MediaConflict("上传租约后端不合法", code="media_upload_lease_invalid")
-            backend.recover_pending(locked.object_key, expected_generation=locked.manifest_generation)
+            backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
             locked.status = MediaAsset.Status.UPLOADING
             locked.upload_nonce = None
             locked.upload_lease_expires_at = None
@@ -157,7 +157,7 @@ def publish_local_upload(*, asset_id: UUID, nonce: UUID, prepared: PreparedLocal
                 or locked.upload_nonce != nonce or locked.upload_lease_expires_at <= timezone.now()
             ):
                 raise MediaConflict("上传租约已失效", code="media_upload_lease_invalid")
-            if prepared.object_key != locked.object_key or prepared.size != locked.size or prepared.mime != locked.mime:
+            if prepared.object_key != locked.object_key or prepared.asset_id != str(locked.id) or prepared.size != locked.size or prepared.mime != locked.mime:
                 raise MediaConflict("上传对象元数据与凭证不一致", code="media_metadata_mismatch")
             # 行锁覆盖版本核对、唯一一次 manifest replace 与 DB receipt 更新；流式 I/O 已在事务外完成。
             published = backend.publish_manifest(prepared, expected_generation=locked.manifest_generation)
@@ -169,14 +169,87 @@ def publish_local_upload(*, asset_id: UUID, nonce: UUID, prepared: PreparedLocal
             locked.save(update_fields=["status", "sha256", "manifest_generation", "upload_nonce", "upload_lease_expires_at", "updated_at"])
     except Exception as exc:
         if published is not None:
-            backend.compensate_publish(published)
+            # 不在 DB 锁释放后直接补偿；新事务重新取得同一行锁，再按统一文件锁协议恢复。
+            try:
+                recover_local_asset(asset_id=asset_id, backend=backend)
+            except Exception:
+                # 已 fsync 的 marker 保留，后续接管或 scanner 可继续恢复。
+                pass
         else:
             backend.discard_prepared(prepared)
         if isinstance(exc, StorageValidationError):
             raise MediaConflict(str(exc), code="media_manifest_conflict") from exc
         raise
-    backend.finalize_publish(published)
+    finalize_local_publish(asset_id=asset_id, generation=prepared.generation, backend=backend)
     return locked
+
+
+def recover_local_asset(*, asset_id: UUID, backend: LocalStorageBackend | None = None) -> MediaAsset:
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+        backend = backend or backend_for_asset(locked)
+        if locked.backend != "local" or not isinstance(backend, LocalStorageBackend):
+            raise MediaConflict("媒体恢复后端不合法", code="media_backend_invalid")
+        backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+        return locked
+
+
+def finalize_local_publish(*, asset_id: UUID, generation: str, backend: LocalStorageBackend | None = None) -> MediaAsset:
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+        backend = backend or backend_for_asset(locked)
+        if locked.backend != "local" or locked.manifest_generation != generation or not isinstance(backend, LocalStorageBackend):
+            raise MediaConflict("媒体清单完成状态不一致", code="media_manifest_conflict")
+        backend.finalize_generation(locked.object_key, generation, asset_id=locked.id)
+        return locked
+
+
+def ensure_local_asset_layout(*, asset: MediaAsset) -> MediaAsset:
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+        backend = backend_for_asset(locked)
+        if locked.backend != "local" or not isinstance(backend, LocalStorageBackend):
+            return locked
+        backend.migrate_legacy_layout(
+            object_key=locked.object_key, asset_id=locked.id, generation=locked.manifest_generation,
+            expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+        )
+        return locked
+
+
+def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
+    now = now or timezone.now()
+    stats = {"receiving_recovered": 0, "staged_finalized": 0, "ready_finalized": 0, "errors": 0, "unknown_markers": 0}
+    scanner_backend = storage_backend_for("local")
+    marker_claims, invalid_markers = scanner_backend.pending_marker_claims()
+    stats["unknown_markers"] = invalid_markers
+    candidate_ids = set(MediaAsset.objects.filter(backend="local", status__in=[MediaAsset.Status.RECEIVING, MediaAsset.Status.STAGED]).values_list("id", flat=True))
+    candidate_ids.update(asset_id for asset_id, _ in marker_claims)
+    for asset_id in candidate_ids:
+        try:
+            with transaction.atomic():
+                locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+                backend = backend_for_asset(locked)
+                if not isinstance(backend, LocalStorageBackend):
+                    raise MediaConflict("媒体恢复后端不合法")
+                if locked.status == MediaAsset.Status.RECEIVING and locked.upload_lease_expires_at and locked.upload_lease_expires_at <= now:
+                    backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+                    locked.status = MediaAsset.Status.UPLOADING
+                    locked.upload_nonce = None
+                    locked.upload_lease_expires_at = None
+                    locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
+                    stats["receiving_recovered"] += 1
+                elif locked.status == MediaAsset.Status.STAGED:
+                    backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
+                    stats["staged_finalized"] += 1
+                elif locked.status == MediaAsset.Status.READY:
+                    backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
+                    stats["ready_finalized"] += 1
+                elif locked.status == MediaAsset.Status.UPLOADING:
+                    backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+        except Exception:
+            stats["errors"] += 1
+    return stats
 
 
 def complete_qiniu_callback(*, payload: Mapping[str, Any], backend: QiniuStorageBackend) -> MediaAsset:

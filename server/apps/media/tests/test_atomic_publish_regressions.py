@@ -48,31 +48,32 @@ def test_local_manifest_rejects_path_escape_and_invalid_schema(tmp_path):
 def test_private_token_is_bound_to_manifest_generation_and_never_reads_replacement(tmp_path):
     backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
     grant = backend.create_upload_grant(owner_id=uuid4(), media_type="singing_audio", mime="audio/mpeg", size=3)
-    backend.write_upload(grant=grant, content=b"old", mime="audio/mpeg")
     asset_id = uuid4()
+    backend.write_upload(grant=grant, content=b"old", mime="audio/mpeg", asset_id=asset_id)
     old_url = backend.create_private_url(grant.object_key, ttl_seconds=600, asset_id=asset_id)
     already_open = backend.open_authorized_private(old_url.token, grant.object_key, asset_id=asset_id)
 
-    backend.write_upload(grant=grant, content=b"new", mime="audio/mpeg")
+    backend.write_upload(grant=grant, content=b"new", mime="audio/mpeg", asset_id=asset_id)
 
     with already_open:
         assert already_open.read() == b"old"
     with pytest.raises(StorageValidationError, match="版本"):
         backend.read_private(old_url.token)
-    current = backend.create_private_url(grant.object_key, ttl_seconds=600, asset_id=uuid4())
+    current = backend.create_private_url(grant.object_key, ttl_seconds=600, asset_id=asset_id)
     assert backend.read_private(current.token) == b"new"
     assert len(list((tmp_path / ".blobs").iterdir())) == 1
 
 
-def test_manifest_publish_compensation_restores_previous_generation(tmp_path):
+def test_manifest_recovery_restores_previous_generation(tmp_path):
     backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
-    grant = backend.create_upload_grant(owner_id=uuid4(), media_type="singing_audio", mime="audio/mpeg", size=3)
-    backend.write_upload(grant=grant, content=b"old", mime="audio/mpeg")
+    asset_id = uuid4()
+    grant = backend.create_upload_grant(owner_id=asset_id, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend.write_upload(grant=grant, content=b"old", mime="audio/mpeg", asset_id=asset_id)
     previous = backend.stat(grant.object_key)
-    prepared = backend.prepare_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg")
-    published = backend.publish_manifest(prepared, expected_generation=previous.generation)
+    prepared = backend.prepare_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg", asset_id=asset_id)
+    backend.publish_manifest(prepared, expected_generation=previous.generation)
 
-    backend.compensate_publish(published)
+    backend.recover_pending(grant.object_key, asset_id=asset_id, expected_generation=previous.generation)
 
     assert backend.stat(grant.object_key).sha256 == hashlib.sha256(b"old").hexdigest()
     assert len(list((tmp_path / ".blobs").iterdir())) == 1
@@ -86,7 +87,7 @@ def test_db_failure_after_manifest_replace_compensates_manifest_blob_and_marker(
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     backend = backend_for_asset(asset)
     nonce = claim_local_upload(asset=asset)
-    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"one"), mime="audio/mpeg")
+    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"one"), mime="audio/mpeg", asset_id=asset.id)
     original_save = MediaAsset.save
 
     def fail_staged_save(self, *args, **kwargs):
@@ -110,7 +111,7 @@ def test_expired_receiving_lease_recovers_blob_completed_before_publish(qiniu_pa
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     backend = backend_for_asset(asset)
     nonce_a = claim_local_upload(asset=asset)
-    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg")
+    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg", asset_id=asset.id)
     assert prepared.pending_marker.exists()
     MediaAsset.objects.filter(pk=asset.pk).update(upload_lease_expires_at=timezone.now() - timedelta(seconds=1))
 
@@ -129,7 +130,7 @@ def test_expired_lease_recovers_manifest_visible_before_db_commit(qiniu_patient,
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     backend = backend_for_asset(asset)
     nonce_a = claim_local_upload(asset=asset)
-    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg")
+    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg", asset_id=asset.id)
     published = backend.publish_manifest(prepared, expected_generation="")
     assert backend.stat(asset.object_key).generation == prepared.generation
     MediaAsset.objects.filter(pk=asset.pk).update(upload_lease_expires_at=timezone.now() - timedelta(seconds=1))
@@ -150,7 +151,7 @@ def test_complete_recovers_cleanup_marker_after_db_commit_before_finalize(qiniu_
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     backend = backend_for_asset(asset)
     nonce = claim_local_upload(asset=asset)
-    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"one"), mime="audio/mpeg")
+    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"one"), mime="audio/mpeg", asset_id=asset.id)
     published = backend.publish_manifest(prepared, expected_generation="")
     MediaAsset.objects.filter(pk=asset.pk).update(
         status=MediaAsset.Status.STAGED, sha256=prepared.sha256, manifest_generation=prepared.generation,

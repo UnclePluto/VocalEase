@@ -247,11 +247,11 @@ def test_postgresql_local_upload_lease_rejects_second_writer_and_expired_nonce_c
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     backend = backend_for_asset(asset)
     nonce_a = claim_local_upload(asset=asset)
-    prepared_a = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg")
+    prepared_a = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg", asset_id=asset.id)
     MediaAsset.objects.filter(pk=asset.pk).update(upload_lease_expires_at=timezone.now() - timedelta(seconds=1))
     nonce_b = claim_local_upload(asset=asset)
     assert nonce_a != nonce_b
-    prepared_b = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg")
+    prepared_b = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg", asset_id=asset.id)
     publish_local_upload(asset_id=asset.id, nonce=nonce_b, prepared=prepared_b, backend=backend)
     with pytest.raises(MediaConflict, match="上传租约已失效"):
         publish_local_upload(asset_id=asset.id, nonce=nonce_a, prepared=prepared_a, backend=backend)
