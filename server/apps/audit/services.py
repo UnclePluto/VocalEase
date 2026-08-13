@@ -22,6 +22,13 @@ SENSITIVE_FIELDS = {
     "accesstoken",
     "accesstokens",
     "authorization",
+    "signature",
+    "signatures",
+    "privateurl",
+    "privateurls",
+    "sha256",
+    "hash",
+    "hashes",
 }
 MEDICAL_NOTE_FIELDS = {"medicalnote", "medicalnotes", "clinicalnote", "clinicalnotes"}
 
@@ -47,6 +54,11 @@ def redact_value(value: Any) -> Any:
                 or normalized.endswith("passwords")
                 or normalized.endswith("token")
                 or normalized.endswith("tokens")
+                or normalized.endswith("signature")
+                or normalized.endswith("signatures")
+                or normalized.endswith("privateurl")
+                or normalized.endswith("privateurls")
+                or normalized in {"sha256", "hash", "hashes"}
                 or "authorization" in normalized
             ):
                 result[key] = "[REDACTED]"

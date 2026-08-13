@@ -11,6 +11,7 @@ settings_module = os.getenv("DJANGO_SETTINGS_MODULE", "")
 if not SECRET_KEY and settings_module not in {
     "vocaease.settings.local",
     "vocaease.settings.test",
+    "vocaease.settings.postgresql_test",
 }:
     raise ImproperlyConfigured("生产环境必须配置 DJANGO_SECRET_KEY")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
@@ -28,6 +29,7 @@ INSTALLED_APPS = [
     "apps.audit",
     "apps.doctors",
     "apps.patients",
+    "apps.media",
 ]
 
 MIDDLEWARE = [
@@ -128,6 +130,25 @@ USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+MEDIA_BACKEND = os.getenv("MEDIA_BACKEND", "qiniu")
+MEDIA_ENVIRONMENT = os.getenv("MEDIA_ENVIRONMENT", "production")
+MEDIA_LOCAL_ROOT = os.getenv("MEDIA_LOCAL_ROOT", str(BASE_DIR / "private-media"))
+MEDIA_UPLOAD_GRANT_TTL_SECONDS = int(os.getenv("MEDIA_UPLOAD_GRANT_TTL_SECONDS", "900"))
+MEDIA_PRIVATE_URL_TTL_SECONDS = int(os.getenv("MEDIA_PRIVATE_URL_TTL_SECONDS", "600"))
+MEDIA_AUDIO_MAX_BYTES = int(os.getenv("MEDIA_AUDIO_MAX_BYTES", str(50 * 1024 * 1024)))
+MEDIA_VIDEO_MAX_BYTES = int(os.getenv("MEDIA_VIDEO_MAX_BYTES", str(500 * 1024 * 1024)))
+MEDIA_OTHER_MAX_BYTES = int(os.getenv("MEDIA_OTHER_MAX_BYTES", str(10 * 1024 * 1024)))
+QINIU_ACCESS_KEY = os.getenv("QINIU_ACCESS_KEY", "")
+QINIU_SECRET_KEY = os.getenv("QINIU_SECRET_KEY", "")
+QINIU_BUCKET = os.getenv("QINIU_BUCKET", "")
+QINIU_DOMAIN = os.getenv("QINIU_DOMAIN", "")
+QINIU_CALLBACK_URL = os.getenv("QINIU_CALLBACK_URL", "")
+QINIU_UPLOAD_URL = os.getenv("QINIU_UPLOAD_URL", "https://up.qiniup.com")
+
+if settings_module not in {"vocaease.settings.local", "vocaease.settings.test", "vocaease.settings.postgresql_test"}:
+    if MEDIA_BACKEND != "qiniu" or not all((QINIU_ACCESS_KEY, QINIU_SECRET_KEY, QINIU_BUCKET, QINIU_DOMAIN, QINIU_CALLBACK_URL)):
+        raise ImproperlyConfigured("生产环境必须配置七牛私有空间凭据、域名和回调地址")
 
 LOGGING = {
     "version": 1,
