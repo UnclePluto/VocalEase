@@ -223,12 +223,23 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
     scanner_backend = storage_backend_for("local")
     marker_claims, invalid_markers = scanner_backend.pending_marker_claims()
     stats["unknown_markers"] = invalid_markers
+    claims_by_asset: dict[UUID, set[str]] = {}
+    for asset_id, object_key in marker_claims:
+        claims_by_asset.setdefault(asset_id, set()).add(object_key)
     candidate_ids = set(MediaAsset.objects.filter(backend="local", status__in=[MediaAsset.Status.RECEIVING, MediaAsset.Status.STAGED]).values_list("id", flat=True))
     candidate_ids.update(asset_id for asset_id, _ in marker_claims)
     for asset_id in candidate_ids:
         try:
             with transaction.atomic():
                 locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+                claimed_keys = claims_by_asset.get(asset_id, set())
+                mismatches = {key for key in claimed_keys if key != locked.object_key}
+                if mismatches:
+                    stats["unknown_markers"] += len(mismatches)
+                has_matching_marker = locked.object_key in claimed_keys
+                if locked.backend != "local":
+                    stats["unknown_markers"] += int(has_matching_marker)
+                    continue
                 backend = backend_for_asset(locked)
                 if not isinstance(backend, LocalStorageBackend):
                     raise MediaConflict("媒体恢复后端不合法")
@@ -239,14 +250,20 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                     locked.upload_lease_expires_at = None
                     locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
                     stats["receiving_recovered"] += 1
-                elif locked.status == MediaAsset.Status.STAGED:
-                    backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
-                    stats["staged_finalized"] += 1
-                elif locked.status == MediaAsset.Status.READY:
-                    backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
-                    stats["ready_finalized"] += 1
+                elif locked.status == MediaAsset.Status.STAGED and has_matching_marker:
+                    recovered = backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+                    finalized = backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
+                    if recovered or finalized:
+                        stats["staged_finalized"] += 1
+                elif locked.status == MediaAsset.Status.READY and has_matching_marker:
+                    recovered = backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+                    finalized = backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
+                    if recovered or finalized:
+                        stats["ready_finalized"] += 1
                 elif locked.status == MediaAsset.Status.UPLOADING:
                     backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+        except MediaAsset.DoesNotExist:
+            stats["unknown_markers"] += max(1, len(claims_by_asset.get(asset_id, set())))
         except Exception:
             stats["errors"] += 1
     return stats

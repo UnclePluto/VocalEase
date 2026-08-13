@@ -3,26 +3,111 @@
 import hashlib
 import json
 import os
+import re
+import stat
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from django.conf import settings
 from django.db import migrations, models
+from django.db.migrations.exceptions import IrreversibleError
+
+
+OLD_MANIFEST_FIELDS = {"version", "generation", "blob", "mime", "size", "sha256"}
+
+
+def _safe_existing_path(root, path, *, file=False):
+    if not root.exists():
+        raise ValueError("missing root")
+    root_info = root.lstat()
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise ValueError("unsafe root")
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError("symlink")
+        if current != path and not stat.S_ISDIR(info.st_mode):
+            raise ValueError("unsafe parent")
+    final = path.lstat()
+    if file and not stat.S_ISREG(final.st_mode):
+        raise ValueError("not file")
+
+
+def _upgrade_old_immutable(root, asset):
+    manifest_path = root / ".manifests" / f"{asset.object_key}.json"
+    _safe_existing_path(root, manifest_path, file=True)
+    with manifest_path.open(encoding="utf-8") as source:
+        old = json.load(source)
+    if (
+        not isinstance(old, dict) or set(old) != OLD_MANIFEST_FIELDS or old.get("version") != 1
+        or not re.fullmatch(r"[0-9a-f]{32}", str(old.get("generation", "")))
+        or not re.fullmatch(r"[0-9a-f]{32}", str(old.get("blob", "")))
+        or old.get("mime") != asset.mime or old.get("size") != asset.size or old.get("sha256") != asset.sha256
+    ):
+        raise ValueError("old manifest mismatch")
+    old_blob = root / ".blobs" / old["blob"]
+    _safe_existing_path(root, old_blob, file=True)
+    digest = hashlib.sha256(); size = 0
+    with old_blob.open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            size += len(chunk); digest.update(chunk)
+    if size != asset.size or digest.hexdigest() != asset.sha256:
+        raise ValueError("old blob mismatch")
+    object_digest = hashlib.sha256(asset.object_key.encode()).hexdigest()
+    new_blob_name = f"{object_digest[:16]}-{old['generation']}"
+    new_blob = root / ".blobs" / new_blob_name
+    temporary = NamedTemporaryFile(dir=new_blob.parent, prefix=f".migration-{object_digest[:16]}-", delete=False)
+    try:
+        with temporary, old_blob.open("rb") as source:
+            while chunk := source.read(64 * 1024):
+                temporary.write(chunk)
+            temporary.flush(); os.fsync(temporary.fileno())
+        os.replace(temporary.name, new_blob)
+        upgraded = {
+            "version": 1, "object_key": asset.object_key, "asset_id": str(asset.id),
+            "generation": old["generation"], "blob": new_blob_name, "mime": asset.mime,
+            "size": asset.size, "sha256": asset.sha256,
+        }
+        manifest_temp = NamedTemporaryFile(dir=manifest_path.parent, prefix=f".migration-manifest-{object_digest}-", delete=False, mode="w", encoding="utf-8")
+        with manifest_temp:
+            json.dump(upgraded, manifest_temp, separators=(",", ":")); manifest_temp.flush(); os.fsync(manifest_temp.fileno())
+        os.replace(manifest_temp.name, manifest_path)
+        if old_blob != new_blob:
+            old_blob.unlink(missing_ok=True)
+    except Exception:
+        Path(temporary.name).unlink(missing_ok=True)
+        try:
+            new_manifest_visible = manifest_path.is_file() and json.loads(manifest_path.read_text()).get("object_key") == asset.object_key
+        except (OSError, ValueError, TypeError, AttributeError):
+            new_manifest_visible = False
+        if not new_manifest_visible:
+            new_blob.unlink(missing_ok=True)
+        raise
+    return old["generation"]
 
 
 def backfill_legacy_local_ready(apps, schema_editor):
     MediaAsset = apps.get_model("media", "MediaAsset")
-    root = Path(settings.MEDIA_LOCAL_ROOT).resolve()
+    root = Path(settings.MEDIA_LOCAL_ROOT).absolute()
     for asset in MediaAsset.objects.filter(backend="local", status="ready"):
         metadata = dict(asset.metadata or {})
         try:
             parts = asset.object_key.split("/")
             if not asset.object_key or asset.object_key.startswith("/") or "\\" in asset.object_key or "%" in asset.object_key or any(part in {"", ".", ".."} for part in parts):
                 raise ValueError("unsafe key")
-            data_path = (root / asset.object_key).resolve()
-            if root not in data_path.parents:
-                raise ValueError("escaped key")
+            manifest_path = root / ".manifests" / f"{asset.object_key}.json"
+            if manifest_path.exists() or manifest_path.is_symlink():
+                asset.manifest_generation = _upgrade_old_immutable(root, asset)
+                metadata["local_layout"] = "immutable_v2"
+                asset.metadata = metadata
+                asset.save(update_fields=["manifest_generation", "metadata"])
+                continue
+            data_path = root / asset.object_key
+            _safe_existing_path(root, data_path, file=True)
             sidecar_path = data_path.with_name(f".{data_path.name}.metadata.json")
+            _safe_existing_path(root, sidecar_path, file=True)
             with sidecar_path.open(encoding="utf-8") as source:
                 sidecar = json.load(source)
             if set(sidecar) != {"mime", "size", "sha256"} or sidecar != {"mime": asset.mime, "size": asset.size, "sha256": asset.sha256} or not data_path.is_file() or data_path.stat().st_size != asset.size:
@@ -47,45 +132,11 @@ def backfill_legacy_local_ready(apps, schema_editor):
 
 
 def reverse_legacy_local_ready(apps, schema_editor):
+    # 0007 已能表达通用 owner；仅允许退到该结构用于中断续跑。若存在旧 0001
+    # 无法承载的 owner，则在首个反向边界立即拒绝，保证数据库仍停留 latest。
     MediaAsset = apps.get_model("media", "MediaAsset")
-    for asset in MediaAsset.objects.filter(backend="local"):
-        metadata = dict(asset.metadata or {})
-        if metadata.get("local_layout") == "legacy_sidecar_v1":
-            root = Path(settings.MEDIA_LOCAL_ROOT).resolve()
-            data_path = (root / asset.object_key).resolve()
-            manifest_path = root / ".manifests" / f"{asset.object_key}.json"
-            if not data_path.exists() and manifest_path.is_file() and root in data_path.parents:
-                try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    blob_path = (root / ".blobs" / manifest["blob"]).resolve()
-                    if (
-                        manifest.get("object_key") != asset.object_key or manifest.get("asset_id") != str(asset.id)
-                        or manifest.get("generation") != asset.manifest_generation or manifest.get("sha256") != asset.sha256
-                        or manifest.get("size") != asset.size or manifest.get("mime") != asset.mime
-                        or blob_path.parent != (root / ".blobs").resolve() or not blob_path.is_file()
-                    ):
-                        raise ValueError("manifest mismatch")
-                    data_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = NamedTemporaryFile(dir=data_path.parent, prefix=".legacy-rollback-", delete=False)
-                    digest = hashlib.sha256(); size = 0
-                    with temporary, blob_path.open("rb") as source:
-                        while chunk := source.read(64 * 1024):
-                            size += len(chunk); digest.update(chunk); temporary.write(chunk)
-                        temporary.flush(); os.fsync(temporary.fileno())
-                    if size != asset.size or digest.hexdigest() != asset.sha256:
-                        raise ValueError("blob mismatch")
-                    os.replace(temporary.name, data_path)
-                    sidecar_path = data_path.with_name(f".{data_path.name}.metadata.json")
-                    sidecar_path.write_text(json.dumps({"mime": asset.mime, "size": asset.size, "sha256": asset.sha256}), encoding="utf-8")
-                except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-                    # 无法无损恢复旧布局时拒绝伪造 READY；回退后的旧应用会看到 failed。
-                    asset.status = "failed"
-        if metadata.pop("local_migration_previous_status", None) == "ready":
-            asset.status = "ready"
-        metadata.pop("local_migration_reason", None)
-        metadata.pop("local_layout", None)
-        asset.metadata = metadata
-        asset.save(update_fields=["status", "metadata"])
+    if MediaAsset.objects.exclude(owner_type="patient").exists():
+        raise IrreversibleError("媒体所有权无法无损降级到 0001")
 
 
 class Migration(migrations.Migration):

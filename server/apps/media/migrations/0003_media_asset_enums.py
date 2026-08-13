@@ -1,4 +1,5 @@
 from django.db import migrations
+from django.db.migrations.exceptions import IrreversibleError
 
 
 def backfill_qiniu_etag(apps, schema_editor):
@@ -12,11 +13,9 @@ def backfill_qiniu_etag(apps, schema_editor):
 
 def reverse_backfill_qiniu_etag(apps, schema_editor):
     MediaAsset = apps.get_model("media", "MediaAsset")
-    for asset in MediaAsset.objects.filter(backend="qiniu").exclude(etag=""):
-        metadata = dict(asset.metadata or {})
-        metadata["qiniu_etag"] = asset.etag
-        asset.metadata = metadata
-        asset.save(update_fields=["metadata"])
+    # 空库允许测试/部署中断后退回结构边界；任何真实媒体数据均拒绝伪回退。
+    if MediaAsset.objects.exists():
+        raise IrreversibleError("通用媒体所有权与可信回执无法无损降级")
 
 
 class Migration(migrations.Migration):

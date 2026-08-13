@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib.parse import parse_qs
 
 from django.conf import settings
@@ -22,6 +23,9 @@ from apps.media.models import MediaAsset
 from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, ensure_local_asset_layout, publish_local_upload, release_local_upload, storage_backend_for
 from apps.patients.models import PatientProfile
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
+
+
+logger = logging.getLogger(__name__)
 
 
 def _patient_for_user(user) -> PatientProfile:
@@ -169,10 +173,18 @@ def _private_url_response(request, asset):
 class LocalPrivateDownloadView(APIView):
     permission_classes = [AllowAny]
     def get(self, request, object_key):
-        asset = get_object_or_404(MediaAsset, object_key=object_key, backend="local", deleted_at__isnull=True)
+        try:
+            backend = storage_backend_for("local")
+            if not isinstance(backend, LocalStorageBackend):
+                raise StorageValidationError("下载后端不可用")
+            claim = backend.verify_private_token(request.query_params.get("signature", ""), object_key)
+        except StorageValidationError as exc:
+            raise PermissionDenied("私有下载凭证无效", code="media_private_url_invalid") from exc
+        asset = get_object_or_404(
+            MediaAsset, pk=claim["asset_id"], object_key=object_key, backend="local", deleted_at__isnull=True,
+        )
         if asset.status != MediaAsset.Status.READY:
             raise Http404
-        asset = ensure_local_asset_layout(asset=asset)
         backend = backend_for_asset(asset)
         if not isinstance(backend, LocalStorageBackend):
             raise Http404
@@ -193,12 +205,23 @@ class QiniuCallbackView(APIView):
         if raw_path_query.startswith(request.get_host()):
             raw_path_query = raw_path_query[len(request.get_host()):]
         # 验签仅依赖七牛独立配置及原始请求，不解析 payload、不查询资产。
+        verifier_failed = False
         try:
             backend = storage_backend_for("qiniu")
             signature_valid = isinstance(backend, QiniuStorageBackend) and backend.verify_callback_signature(authorization=request.headers.get("Authorization", ""), content_type=request.content_type or "", raw_path_query=raw_path_query, body=raw_body)
-        except Exception:
+        except Exception as exc:
+            verifier_failed = True
+            logger.error(
+                "qiniu_callback_verifier_unavailable request_id=%s exception=%s",
+                getattr(request, "request_id", ""), exc.__class__.__name__,
+            )
             signature_valid = False
         if not signature_valid:
+            if not verifier_failed:
+                logger.warning(
+                    "qiniu_callback_signature_invalid request_id=%s",
+                    getattr(request, "request_id", ""),
+                )
             raise PermissionDenied("七牛回调验签失败", code="qiniu_callback_invalid")
         try:
             parsed = parse_qs(raw_body.decode("utf-8"), strict_parsing=True, keep_blank_values=True)

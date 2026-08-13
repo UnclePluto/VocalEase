@@ -1,7 +1,9 @@
 import hashlib
 import io
 import json
+import os
 from datetime import timedelta
+from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
 
@@ -114,6 +116,22 @@ def test_marker_schema_and_object_binding_cannot_delete_other_asset_blob(tmp_pat
     assert backend.stat(grant_b.object_key).sha256 == hashlib.sha256(b"bbb").hexdigest()
 
 
+def test_manifest_temp_is_bound_to_object_asset_and_generation(tmp_path):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    asset_a, asset_b = uuid4(), uuid4()
+    grant_a = backend.create_upload_grant(owner_id=asset_a, media_type="singing_audio", mime="audio/mpeg", size=3)
+    grant_b = backend.create_upload_grant(owner_id=asset_b, media_type="singing_audio", mime="audio/mpeg", size=3)
+    prepared_a = backend.prepare_authorized_stream(object_key=grant_a.object_key, token=grant_a.upload_token, stream=io.BytesIO(b"aaa"), mime="audio/mpeg", asset_id=asset_a)
+    prepared_b = backend.prepare_authorized_stream(object_key=grant_b.object_key, token=grant_b.upload_token, stream=io.BytesIO(b"bbb"), mime="audio/mpeg", asset_id=asset_b)
+    marker_a = json.loads(prepared_a.pending_marker.read_text())
+    marker_a["manifest_temp"] = prepared_b.manifest_temp.name
+    prepared_a.pending_marker.write_text(json.dumps(marker_a))
+
+    with pytest.raises(StorageValidationError, match="临时文件"):
+        backend.recover_pending(grant_a.object_key, asset_id=asset_a, expected_generation="")
+    assert prepared_b.manifest_temp.exists()
+
+
 def test_verify_and_open_private_returns_open_fd_that_survives_unlink(tmp_path):
     backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
     asset_id = uuid4()
@@ -141,6 +159,25 @@ def test_bad_qiniu_signature_is_same_403_without_configuration_or_database_looku
     monkeypatch.setitem(media_services.STORAGE_BACKEND_FACTORIES, "qiniu", lambda: (_ for _ in ()).throw(RuntimeError("SDK init failed")))
     sdk_failure = client.post("/api/v1/media/qiniu/callback/", b"not-a-form", content_type="application/x-www-form-urlencoded", HTTP_AUTHORIZATION="QBox malformed")
     assert (sdk_failure.status_code, sdk_failure.json()["code"]) == (403, "qiniu_callback_invalid")
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local", QINIU_ACCESS_KEY="", QINIU_SECRET_KEY="", QINIU_BUCKET="", QINIU_DOMAIN="", QINIU_CALLBACK_URL="")
+def test_qiniu_verifier_failures_log_only_safe_diagnostics(caplog):
+    secret = "QBox super-secret-authorization"
+    body = b"key=private%2Fpatient-key&token=body-secret"
+    with caplog.at_level("WARNING", logger="apps.media.views"):
+        response = APIClient().post(
+            "/api/v1/media/qiniu/callback/", body,
+            content_type="application/x-www-form-urlencoded", HTTP_AUTHORIZATION=secret,
+            HTTP_X_REQUEST_ID="req-safe-42",
+        )
+    assert response.status_code == 403
+    rendered = " ".join(record.getMessage() for record in caplog.records)
+    assert "qiniu_callback_verifier_unavailable" in rendered
+    assert "req-safe-42" in rendered
+    assert "StorageValidationError" in rendered
+    assert secret not in rendered and "patient-key" not in rendered and "body-secret" not in rendered
 
 
 @pytest.mark.django_db
@@ -185,3 +222,142 @@ def test_stale_scanner_finalizes_staged_marker_and_ignores_unknown_temp(patient,
     assert stats["staged_finalized"] == 1
     assert not prepared.pending_marker.exists()
     assert unknown_temp.read_bytes() == b"do not delete"
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_scanner_rejects_marker_claiming_real_asset_with_another_object_key(patient, tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    asset, grant = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend = media_services.backend_for_asset(asset)
+    forged_key = asset.object_key[:-32] + uuid4().hex
+    # marker 自身完全合法，但其 asset_id 故意指向另一个 object_key 的真实 DB 资产。
+    prepared = backend._prepare_stream(
+        object_key=forged_key, stream=io.BytesIO(b"one"), mime="audio/mpeg", asset_id=asset.id,
+        expected_size=3,
+    )
+
+    stats = media_services.recover_stale_local_uploads(now=timezone.now())
+
+    asset.refresh_from_db()
+    assert stats["unknown_markers"] == 1
+    assert stats["ready_finalized"] == stats["staged_finalized"] == 0
+    assert asset.object_key != forged_key and prepared.pending_marker.exists()
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_scanner_completes_prepared_manifest_when_database_already_has_generation(patient, tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    asset, grant = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend = media_services.backend_for_asset(asset)
+    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"one"), mime="audio/mpeg", asset_id=asset.id)
+    # 模拟：数据库事务已提交 generation，但进程在 manifest replace 前硬崩溃。
+    MediaAsset.objects.filter(pk=asset.pk).update(
+        status=MediaAsset.Status.READY, sha256=prepared.sha256,
+        manifest_generation=prepared.generation, upload_nonce=None, upload_lease_expires_at=None,
+    )
+    assert not backend._manifest_path(asset.object_key).exists()
+
+    stats = media_services.recover_stale_local_uploads(now=timezone.now())
+
+    assert stats["ready_finalized"] == 1
+    assert backend.read_private(
+        backend.create_private_url(asset.object_key, ttl_seconds=600, asset_id=asset.id, expected_generation=prepared.generation).token
+    ) == b"one"
+    assert not prepared.pending_marker.exists() and not prepared.manifest_temp.exists()
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_scanner_recovers_legacy_conversion_crash_between_marker_and_manifest_replace(patient, tmp_path, settings, monkeypatch):
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    asset, _ = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
+    generation = asset.id.hex
+    digest = hashlib.sha256(b"old").hexdigest()
+    MediaAsset.objects.filter(pk=asset.pk).update(status=MediaAsset.Status.READY, sha256=digest, manifest_generation=generation)
+    asset.refresh_from_db()
+    legacy = tmp_path / asset.object_key; legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"old")
+    legacy.with_name(f".{legacy.name}.metadata.json").write_text(json.dumps({"mime": "audio/mpeg", "size": 3, "sha256": digest}))
+    backend = media_services.backend_for_asset(asset)
+    original_replace = os.replace
+
+    class HardCrash(BaseException):
+        pass
+
+    def crash_before_manifest(source, destination):
+        if Path(destination) == backend._manifest_path(asset.object_key):
+            raise HardCrash
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("apps.media.backends.local.os.replace", crash_before_manifest)
+    with pytest.raises(HardCrash):
+        backend.migrate_legacy_layout(
+            object_key=asset.object_key, asset_id=asset.id, generation=generation,
+            expected_size=3, expected_mime="audio/mpeg", expected_sha256=digest,
+        )
+    monkeypatch.setattr("apps.media.backends.local.os.replace", original_replace)
+
+    stats = media_services.recover_stale_local_uploads(now=timezone.now())
+
+    assert stats["ready_finalized"] == 1
+    private = backend.create_private_url(asset.object_key, ttl_seconds=600, asset_id=asset.id, expected_generation=generation)
+    assert backend.read_private(private.token) == b"old"
+
+
+def test_legacy_object_parent_symlink_is_rejected_without_external_write(tmp_path):
+    root = tmp_path / "media"; root.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    (root / "test").symlink_to(outside, target_is_directory=True)
+    backend = LocalStorageBackend(root=root, signing_secret="secret", environment="test")
+    with pytest.raises(StorageValidationError):
+        backend.migrate_legacy_layout(
+            object_key=f"test/singing_audio/2026/08/14/{uuid4().hex}", asset_id=uuid4(), generation=uuid4().hex,
+            expected_size=3, expected_mime="audio/mpeg", expected_sha256=hashlib.sha256(b"old").hexdigest(),
+        )
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("special", [".manifests", ".blobs", ".locks", ".pending"])
+def test_local_backend_rejects_symlinked_internal_directories(tmp_path, special):
+    outside = tmp_path / "outside"
+    root = tmp_path / "media"
+    outside.mkdir(); root.mkdir()
+    (root / special).symlink_to(outside, target_is_directory=True)
+    backend = LocalStorageBackend(root=root, signing_secret="secret", environment="test")
+    asset_id = uuid4()
+    grant = backend.create_upload_grant(owner_id=asset_id, media_type="singing_audio", mime="audio/mpeg", size=3)
+    with pytest.raises(StorageValidationError):
+        backend.prepare_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"one"), mime="audio/mpeg", asset_id=asset_id)
+    with pytest.raises(StorageValidationError):
+        backend.stat(grant.object_key)
+    with pytest.raises(StorageValidationError):
+        backend.migrate_legacy_layout(
+            object_key=grant.object_key, asset_id=asset_id, generation=asset_id.hex,
+            expected_size=3, expected_mime="audio/mpeg", expected_sha256=hashlib.sha256(b"one").hexdigest(),
+        )
+    with pytest.raises(StorageValidationError):
+        backend.pending_marker_claims()
+    assert list(outside.iterdir()) == []
+
+
+def test_local_backend_rejects_symlinked_storage_root(tmp_path):
+    outside = tmp_path / "outside"; outside.mkdir()
+    linked = tmp_path / "media"; linked.symlink_to(outside, target_is_directory=True)
+    backend = LocalStorageBackend(root=linked, signing_secret="secret", environment="test")
+    with pytest.raises(StorageValidationError):
+        backend.pending_marker_claims()
+    with pytest.raises(StorageValidationError):
+        backend.stat(f"test/singing_audio/2026/08/14/{uuid4().hex}")
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_bad_private_download_token_is_rejected_before_database_or_legacy_conversion(monkeypatch, tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    monkeypatch.setattr("apps.media.views.get_object_or_404", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("DB must not be queried")))
+    monkeypatch.setattr("apps.media.views.ensure_local_asset_layout", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("layout must not change")))
+    response = APIClient().get("/api/v1/media/private/test/singing_audio/2026/08/14/00000000000000000000000000000000?signature=bad")
+    assert (response.status_code, response.json()["code"]) == (403, "media_private_url_invalid")
