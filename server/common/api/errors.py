@@ -10,5 +10,10 @@ def exception_handler(exc, context):
     request = context.get("request")
     request_id = getattr(request, "request_id", "")
     detail = response.data.get("detail", "请求处理失败") if isinstance(response.data, dict) else "请求处理失败"
-    response.data = {"code": "error", "message": str(detail), "data": None, "request_id": request_id}
+    error_code = "error"
+    if hasattr(exc, "get_codes"):
+        codes = exc.get_codes()
+        if isinstance(codes, str):
+            error_code = codes
+    response.data = {"code": error_code, "message": str(detail), "data": None, "request_id": request_id}
     return response

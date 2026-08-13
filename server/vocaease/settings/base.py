@@ -15,6 +15,8 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "apps.accounts",
+    "apps.audit",
 ]
 
 MIDDLEWARE = [
@@ -62,7 +64,35 @@ CACHES = {
     }
 }
 
-REST_FRAMEWORK = {"EXCEPTION_HANDLER": "common.api.errors.exception_handler"}
+AUTH_USER_MODEL = "accounts.User"
+
+AUTH_REFRESH_COOKIE_NAME = "refresh_token"
+AUTH_REFRESH_COOKIE_SECURE = not DEBUG
+
+REST_FRAMEWORK = {
+    "EXCEPTION_HANDLER": "common.api.errors.exception_handler",
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "apps.accounts.tokens.ActiveUserJWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+        "common.api.permissions.MustChangePasswordPermission",
+    ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min",
+        "user": "120/min",
+        "auth_login": "10/min",
+        "auth_refresh": "30/min",
+        "auth_change_password": "10/min",
+        "auth_logout": "30/min",
+        "auth_reset_password": "5/min",
+        "credential_upload": "10/min",
+    },
+}
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
