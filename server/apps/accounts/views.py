@@ -42,7 +42,7 @@ def set_refresh_cookie(response: Response, raw_refresh: str) -> None:
         httponly=False,
         secure=settings.AUTH_REFRESH_COOKIE_SECURE,
         samesite="Lax",
-        path="/api/v1/auth/",
+        path="/",
     )
 
 
@@ -185,7 +185,7 @@ class LogoutView(APIView):
         response.delete_cookie(settings.AUTH_REFRESH_COOKIE_NAME, path="/api/v1/auth/", samesite="Lax")
         response.delete_cookie(
             settings.AUTH_REFRESH_CSRF_COOKIE_NAME,
-            path="/api/v1/auth/",
+            path="/",
             samesite="Lax",
         )
         return response

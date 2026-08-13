@@ -99,12 +99,16 @@ def test_web_login_sets_http_only_refresh_cookie_and_records_request_audit(api_c
     assert response.status_code == 200
     assert response.json()["request_id"] == "login-request-1"
     assert "refresh" not in response.json()["data"]
-    cookie = response.cookies["refresh_token"]
-    assert cookie["httponly"]
-    assert cookie["samesite"] == "Lax"
-    assert cookie["secure"]
-    assert response.cookies["refresh_csrf_token"]["samesite"] == "Lax"
-    assert not response.cookies["refresh_csrf_token"]["httponly"]
+    refresh_cookie = response.cookies["refresh_token"]
+    assert refresh_cookie["path"] == "/api/v1/auth/"
+    assert refresh_cookie["httponly"]
+    assert refresh_cookie["samesite"] == "Lax"
+    assert refresh_cookie["secure"]
+    csrf_cookie = response.cookies["refresh_csrf_token"]
+    assert csrf_cookie["path"] == "/"
+    assert not csrf_cookie["httponly"]
+    assert csrf_cookie["samesite"] == "Lax"
+    assert csrf_cookie["secure"]
     audit = AuditLog.objects.get(action="auth.login")
     assert audit.actor == doctor_user
     assert audit.request_id == "login-request-1"
@@ -365,6 +369,7 @@ def test_http_local_environment_keeps_refresh_cookie_secure_flag_disabled(api_cl
 
     assert response.status_code == 200
     assert not response.cookies["refresh_token"]["secure"]
+    assert not response.cookies["refresh_csrf_token"]["secure"]
 
 
 @pytest.mark.django_db
