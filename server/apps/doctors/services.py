@@ -1,3 +1,4 @@
+import os
 import time
 
 from django.db import IntegrityError, OperationalError, transaction
@@ -19,20 +20,41 @@ class DoctorHasActivePatients(APIException):
 
 def next_sequence(prefix: str, width: int) -> str:
     """Issue a never-reused number while holding the persistent counter row lock."""
-    for attempt in range(20):
+    with transaction.atomic():
+        counter = SequenceCounter.objects.select_for_update().get(prefix=prefix)
+        counter.value += 1
+        counter.save(update_fields=["value"])
+        return f"{prefix}{counter.value:0{width}d}"
+
+
+def _postgres_sqlstate(exc) -> str | None:
+    cause = getattr(exc, "__cause__", None)
+    return getattr(cause, "sqlstate", None) or getattr(cause, "pgcode", None)
+
+
+def _is_retryable_database_error(exc) -> bool:
+    if transaction.get_connection().vendor == "postgresql":
+        return _postgres_sqlstate(exc) in {"40001", "40P01", "55P03"}
+    is_sqlite_test = (
+        transaction.get_connection().vendor == "sqlite"
+        and os.getenv("DJANGO_SETTINGS_MODULE") == "vocaease.settings.test"
+    )
+    return bool(
+        is_sqlite_test
+        and isinstance(exc, OperationalError)
+        and exc.args == ("database is locked",)
+    )
+
+
+def run_with_database_retry(operation, *, attempts: int = 4):
+    for attempt in range(attempts):
         try:
-            with transaction.atomic():
-                counter, _ = SequenceCounter.objects.select_for_update().get_or_create(
-                    prefix=prefix, defaults={"value": 0}
-                )
-                counter.value += 1
-                counter.save(update_fields=["value"])
-                return f"{prefix}{counter.value:0{width}d}"
-        except (IntegrityError, OperationalError):
-            if attempt == 19:
+            return operation()
+        except (IntegrityError, OperationalError) as exc:
+            if not _is_retryable_database_error(exc) or attempt == attempts - 1:
                 raise
             time.sleep(0.01 * (attempt + 1))
-    raise RuntimeError("编号生成失败")
+    raise RuntimeError("数据库操作重试失败")
 
 
 def _create_doctor_once(*, name, gender, phone, department, title, actor, request_id):
@@ -59,17 +81,12 @@ def _create_doctor_once(*, name, gender, phone, department, title, actor, reques
 
 
 def create_doctor(*, name, gender, phone, department, title, actor=None, request_id=""):
-    for attempt in range(20):
-        try:
-            return _create_doctor_once(
+    return run_with_database_retry(
+        lambda: _create_doctor_once(
                 name=name, gender=gender, phone=phone, department=department, title=title,
                 actor=actor, request_id=request_id,
-            )
-        except OperationalError:
-            if attempt == 19:
-                raise
-            time.sleep(0.01 * (attempt + 1))
-    raise RuntimeError("医生创建失败")
+        )
+    )
 
 
 def update_doctor(*, actor, doctor, request_id: str, **changes):
@@ -95,6 +112,7 @@ def soft_delete_doctor(*, actor, doctor, request_id: str):
             patient__primary_doctor=locked,
             patient__deleted_at__isnull=True,
             status=TreatmentPlan.Status.ACTIVE,
+            deleted_at__isnull=True,
         ).exists():
             raise DoctorHasActivePatients()
         update_account_security_state(actor=actor, target=locked.user, is_active=False, deleted=True, request_id=request_id)

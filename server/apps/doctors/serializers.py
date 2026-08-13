@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from common.api.pagination import PaginationQuerySerializer
+
 from .models import DoctorProfile, Gender
 
 
@@ -15,3 +17,8 @@ class DoctorReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = DoctorProfile
         fields = ("id", "employee_no", "name", "gender", "phone", "department", "title")
+
+
+class DoctorListQuerySerializer(PaginationQuerySerializer):
+    keyword = serializers.CharField(required=False, allow_blank=True, default="")
+    department = serializers.CharField(required=False, allow_blank=True, default="")

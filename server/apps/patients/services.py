@@ -1,18 +1,39 @@
-import time
-
-from django.db import OperationalError, transaction
+from django.db import transaction
 from django.utils import timezone
+from rest_framework.exceptions import APIException, ValidationError
 
 from apps.accounts.models import Role, User
 from apps.accounts.services import update_account_security_state
 from apps.audit.services import record
-from apps.doctors.services import next_sequence
+from apps.doctors.models import DoctorProfile
+from apps.doctors.services import next_sequence, run_with_database_retry
 
 from .models import PatientProfile, TreatmentPlan
 
 
+class PatientHasNoCurrentTreatmentPlan(APIException):
+    status_code = 409
+    default_detail = "患者没有可更新的当前治疗计划"
+    default_code = "patient_has_no_current_treatment_plan"
+
+
+def _lock_active_doctor(doctor_id):
+    try:
+        doctor = DoctorProfile.objects.select_for_update().get(
+            pk=doctor_id,
+            deleted_at__isnull=True,
+        )
+    except DoctorProfile.DoesNotExist:
+        raise ValidationError({"primary_doctor": "主治医生不存在或不可用"})
+    user = doctor.user
+    if user.role != Role.DOCTOR or not user.is_active or user.deleted_at is not None:
+        raise ValidationError({"primary_doctor": "主治医生不存在或不可用"})
+    return doctor
+
+
 def _create_patient_once(*, name, gender, enrollment_age, phone, doctor, start_date, cycle_weeks, notes, actor, request_id):
     with transaction.atomic():
+        locked_doctor = _lock_active_doctor(doctor.pk)
         medical_record_no = next_sequence("P", width=6)
         user = User.objects.create_user(login_id=medical_record_no, role=Role.PATIENT, password="888888")
         patient = PatientProfile.objects.create(
@@ -22,7 +43,7 @@ def _create_patient_once(*, name, gender, enrollment_age, phone, doctor, start_d
             gender=gender,
             enrollment_age=enrollment_age,
             phone=phone,
-            primary_doctor=doctor,
+            primary_doctor=locked_doctor,
             notes=notes,
         )
         TreatmentPlan.objects.create(
@@ -36,32 +57,33 @@ def _create_patient_once(*, name, gender, enrollment_age, phone, doctor, start_d
             actor=actor,
             action="patient.create",
             target=patient,
-            changes={"medical_record_no": medical_record_no, "name": name, "gender": gender, "enrollment_age": enrollment_age, "phone": phone, "primary_doctor": str(doctor.id), "medical_notes": notes},
+            changes={"medical_record_no": medical_record_no, "name": name, "gender": gender, "enrollment_age": enrollment_age, "phone": phone, "primary_doctor": str(locked_doctor.id), "medical_notes": notes},
             request_id=request_id,
         )
         return patient
 
 
 def create_patient(*, name, gender, enrollment_age, phone, doctor, start_date, cycle_weeks, notes="", actor=None, request_id=""):
-    for attempt in range(20):
-        try:
-            return _create_patient_once(
+    return run_with_database_retry(
+        lambda: _create_patient_once(
                 name=name, gender=gender, enrollment_age=enrollment_age, phone=phone, doctor=doctor,
                 start_date=start_date, cycle_weeks=cycle_weeks, notes=notes, actor=actor, request_id=request_id,
-            )
-        except OperationalError:
-            if attempt == 19:
-                raise
-            time.sleep(0.01 * (attempt + 1))
-    raise RuntimeError("患者创建失败")
+        )
+    )
 
 
 def update_patient(*, actor, patient, request_id: str, **changes):
     editable = {key: value for key, value in changes.items() if key in {"name", "gender", "enrollment_age", "phone", "primary_doctor", "notes"}}
-    if not editable:
+    plan_changes = {key: value for key, value in changes.items() if key in {"start_date", "cycle_weeks"}}
+    if not editable and not plan_changes:
         return patient
     with transaction.atomic():
+        requested_doctor = editable.get("primary_doctor")
+        doctor_id = requested_doctor.pk if requested_doctor is not None else patient.primary_doctor_id
+        locked_doctor = _lock_active_doctor(doctor_id)
         locked = PatientProfile.objects.select_for_update().get(pk=patient.pk, deleted_at__isnull=True)
+        if "primary_doctor" in editable:
+            editable["primary_doctor"] = locked_doctor
         before = {key: str(getattr(locked, f"{key}_id")) if key == "primary_doctor" else getattr(locked, key) for key in editable}
         for key, value in editable.items():
             setattr(locked, key, value)
@@ -73,7 +95,31 @@ def update_patient(*, actor, patient, request_id: str, **changes):
         }
         if "notes" in editable:
             audit_changes["medical_notes"] = {"from": before["notes"], "to": editable["notes"]}
-        record(actor=actor, action="patient.update", target=locked, changes=audit_changes, request_id=request_id)
+        if audit_changes:
+            record(actor=actor, action="patient.update", target=locked, changes=audit_changes, request_id=request_id)
+        if plan_changes:
+            plan = TreatmentPlan.objects.select_for_update().filter(
+                patient=locked,
+                deleted_at__isnull=True,
+                status__in=[TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE],
+            ).order_by("-start_date", "-created_at").first()
+            if plan is None:
+                raise PatientHasNoCurrentTreatmentPlan()
+            plan_before = {key: getattr(plan, key) for key in plan_changes}
+            for key, value in plan_changes.items():
+                setattr(plan, key, value)
+            update_fields = [*plan_changes.keys(), "updated_at"]
+            if "cycle_weeks" in plan_changes:
+                plan.target_session_count = plan_changes["cycle_weeks"] * 3
+                update_fields.append("target_session_count")
+            plan.save(update_fields=update_fields)
+            record(
+                actor=actor,
+                action="treatment_plan.update",
+                target=plan,
+                changes={key: {"from": str(plan_before[key]), "to": str(plan_changes[key])} for key in plan_changes},
+                request_id=request_id,
+            )
         return locked
 
 

@@ -1,19 +1,28 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from django.db import IntegrityError, OperationalError, connection
 from rest_framework.test import APIClient
 
 from apps.accounts.models import RefreshToken, Role, User
 from apps.accounts.tokens import issue_token_pair
 from apps.audit.models import AuditLog
-from apps.doctors.models import DoctorProfile
-from apps.doctors.services import create_doctor, soft_delete_doctor
+from apps.doctors.models import DoctorProfile, SequenceCounter
+from apps.doctors.services import create_doctor, next_sequence, soft_delete_doctor
 from apps.patients.services import create_patient
 
 
 @pytest.fixture
 def api_client():
     return APIClient()
+
+
+@pytest.fixture(autouse=True)
+def ensure_sequence_counters(db):
+    SequenceCounter.objects.bulk_create(
+        [SequenceCounter(prefix="D"), SequenceCounter(prefix="P")],
+        ignore_conflicts=True,
+    )
 
 
 @pytest.fixture
@@ -66,7 +75,10 @@ def test_create_doctor_generates_non_reusable_employee_number_initial_password_a
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.postgresql
 def test_concurrent_doctor_number_generation_does_not_duplicate_numbers():
+    if connection.vendor != "postgresql":
+        pytest.skip("并发编号由真实 PostgreSQL 行锁测试证明")
     def create(index):
         return create_doctor(
             name=f"并发医生{index}", gender="male", phone=f"13900000{index:03d}", department="康复科", title="医师",
@@ -76,6 +88,41 @@ def test_concurrent_doctor_number_generation_does_not_duplicate_numbers():
         numbers = list(executor.map(create, range(1, 5)))
 
     assert sorted(numbers) == ["D0001", "D0002", "D0003", "D0004"]
+
+
+@pytest.mark.django_db
+def test_deleted_doctor_number_is_not_reused(admin_user):
+    first = create_doctor(name="一号医生", gender="male", phone="13810000001", department="康复科", title="医师")
+    soft_delete_doctor(actor=admin_user, doctor=first, request_id="delete-first-doctor")
+
+    second = create_doctor(name="二号医生", gender="female", phone="13810000002", department="康复科", title="医师")
+
+    assert first.employee_no == "D0001"
+    assert second.employee_no == "D0002"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (IntegrityError("counter constraint failed"), "counter constraint failed"),
+        (OperationalError("disk I/O error"), "disk I/O error"),
+    ],
+)
+def test_sequence_does_not_retry_non_retryable_database_errors(monkeypatch, error, message):
+    calls = 0
+
+    def fail_save(instance, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise error
+
+    monkeypatch.setattr(SequenceCounter, "save", fail_save)
+
+    with pytest.raises(type(error), match=message):
+        next_sequence("D", width=4)
+
+    assert calls == 1
 
 
 @pytest.mark.django_db
@@ -92,6 +139,18 @@ def test_doctor_list_supports_keyword_filter_and_pagination(api_client, admin_us
     assert len(body["results"]) == 1
     assert body["page"] == 1
     assert body["page_size"] == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("query", "field"), [("page=not-a-number", "page"), ("page_size=0", "page_size")])
+def test_doctor_list_rejects_invalid_pagination(api_client, admin_user, query, field):
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.get(f"/api/v1/admin/doctors/?{query}")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    assert field in response.json()["data"]
 
 
 @pytest.mark.django_db
@@ -135,3 +194,20 @@ def test_delete_doctor_with_active_patients_returns_stable_error(api_client, adm
     assert response.json()["code"] == "doctor_has_active_patients"
     doctor.refresh_from_db()
     assert doctor.deleted_at is None
+
+
+@pytest.mark.django_db
+def test_deleted_active_plan_does_not_block_doctor_deletion(api_client, admin_user, doctor):
+    patient = create_patient(
+        name="历史患者", gender="male", enrollment_age=30, phone="13700000009", doctor=doctor,
+        start_date="2026-01-01", cycle_weeks=4,
+    )
+    plan = patient.treatment_plans.get()
+    plan.status = "active"
+    plan.deleted_at = __import__("django.utils.timezone", fromlist=["now"]).now()
+    plan.save(update_fields=["status", "deleted_at"])
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.delete(f"/api/v1/admin/doctors/{doctor.id}/")
+
+    assert response.status_code == 204

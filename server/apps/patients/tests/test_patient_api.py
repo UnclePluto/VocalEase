@@ -1,20 +1,29 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from rest_framework.test import APIClient
 
 from apps.accounts.models import RefreshToken, Role, User
 from apps.accounts.tokens import issue_token_pair
 from apps.audit.models import AuditLog
+from apps.doctors.models import SequenceCounter
 from apps.doctors.services import create_doctor
 from apps.patients.models import PatientProfile, TreatmentPlan
-from apps.patients.services import create_patient, soft_delete_patient
+from apps.patients.services import create_patient, soft_delete_patient, update_patient
 
 
 @pytest.fixture
 def api_client():
     return APIClient()
+
+
+@pytest.fixture(autouse=True)
+def ensure_sequence_counters(db):
+    SequenceCounter.objects.bulk_create(
+        [SequenceCounter(prefix="D"), SequenceCounter(prefix="P")],
+        ignore_conflicts=True,
+    )
 
 
 @pytest.fixture
@@ -68,7 +77,10 @@ def test_create_patient_generates_medical_record_number_plan_target_and_audit(ap
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.postgresql
 def test_concurrent_patient_number_generation_does_not_duplicate_numbers(doctor):
+    if connection.vendor != "postgresql":
+        pytest.skip("并发编号由真实 PostgreSQL 行锁测试证明")
     def create(index):
         return create_patient(
             name=f"并发患者{index}", gender="male", enrollment_age=20 + index,
@@ -79,6 +91,23 @@ def test_concurrent_patient_number_generation_does_not_duplicate_numbers(doctor)
         numbers = list(executor.map(create, range(1, 5)))
 
     assert sorted(numbers) == ["P000001", "P000002", "P000003", "P000004"]
+
+
+@pytest.mark.django_db
+def test_deleted_patient_number_is_not_reused(admin_user, doctor):
+    first = create_patient(
+        name="一号患者", gender="male", enrollment_age=20, phone="13510000001", doctor=doctor,
+        start_date="2026-01-01", cycle_weeks=1,
+    )
+    soft_delete_patient(actor=admin_user, patient=first, request_id="delete-first-patient")
+
+    second = create_patient(
+        name="二号患者", gender="female", enrollment_age=21, phone="13510000002", doctor=doctor,
+        start_date="2026-01-02", cycle_weeks=1,
+    )
+
+    assert first.medical_record_no == "P000001"
+    assert second.medical_record_no == "P000002"
 
 
 @pytest.mark.django_db
@@ -105,6 +134,21 @@ def test_patient_list_supports_filters_and_pagination(api_client, admin_user, pa
     assert body["results"][0]["name"] == "患者乙"
     assert body["page"] == 1
     assert body["page_size"] == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "field"),
+    [("page=bad", "page"), ("page_size=101", "page_size"), ("primary_doctor=bad-uuid", "primary_doctor")],
+)
+def test_patient_list_rejects_invalid_query_values(api_client, admin_user, query, field):
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.get(f"/api/v1/admin/patients/?{query}")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    assert field in response.json()["data"]
 
 
 @pytest.mark.django_db
@@ -136,6 +180,54 @@ def test_patient_update_rejects_deleted_primary_doctor(api_client, admin_user, p
     response = api_client.patch(f"/api/v1/admin/patients/{patient.id}/", {"primary_doctor": str(doctor.id)}, format="json")
 
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("unsafe_state", "value"), [("is_active", False), ("role", Role.PATIENT)])
+def test_patient_service_revalidates_primary_doctor_inside_transaction(patient, doctor, unsafe_state, value):
+    setattr(doctor.user, unsafe_state, value)
+    doctor.user.save(update_fields=[unsafe_state])
+
+    with pytest.raises(Exception):
+        update_patient(actor=None, patient=patient, request_id="unsafe-doctor", primary_doctor=doctor)
+
+    patient.refresh_from_db()
+    assert patient.primary_doctor_id == doctor.id
+
+
+@pytest.mark.django_db
+def test_patient_patch_updates_current_plan_and_recalculates_target(api_client, doctor_user, patient):
+    plan = patient.treatment_plans.get()
+    plan.status = "active"
+    plan.save(update_fields=["status"])
+    api_client.force_authenticate(doctor_user)
+
+    response = api_client.patch(
+        f"/api/v1/admin/patients/{patient.id}/",
+        {"start_date": "2026-04-01", "cycle_weeks": 8},
+        format="json",
+        HTTP_X_REQUEST_ID="plan-update-1",
+    )
+
+    assert response.status_code == 200
+    plan.refresh_from_db()
+    assert str(plan.start_date) == "2026-04-01"
+    assert plan.cycle_weeks == 8
+    assert plan.target_session_count == 24
+    assert AuditLog.objects.filter(action="treatment_plan.update", target_id=plan.id, request_id="plan-update-1").exists()
+
+
+@pytest.mark.django_db
+def test_patient_patch_plan_fields_returns_stable_error_without_current_plan(api_client, doctor_user, patient):
+    patient.treatment_plans.update(status="completed")
+    api_client.force_authenticate(doctor_user)
+
+    response = api_client.patch(
+        f"/api/v1/admin/patients/{patient.id}/", {"cycle_weeks": 8}, format="json"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "patient_has_no_current_treatment_plan"
 
 
 @pytest.mark.django_db

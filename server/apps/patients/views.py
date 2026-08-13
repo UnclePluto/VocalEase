@@ -4,30 +4,25 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.views import api_response
+from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser
 
 from .selectors import patients_for_list
-from .serializers import PatientReadSerializer, PatientWriteSerializer
+from .serializers import PatientListQuerySerializer, PatientReadSerializer, PatientWriteSerializer
 from .services import create_patient, soft_delete_patient, update_patient
-
-
-def _page(request, queryset):
-    page = max(int(request.query_params.get("page", 1)), 1)
-    page_size = min(max(int(request.query_params.get("page_size", 20)), 1), 100)
-    count = queryset.count()
-    return {"count": count, "page": page, "page_size": page_size, "results": queryset[(page - 1) * page_size: page * page_size]}
 
 
 class PatientListView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
     def get(self, request):
+        query = validated_query(request, PatientListQuerySerializer)
         queryset = patients_for_list(
-            keyword=request.query_params.get("keyword", ""),
-            gender=request.query_params.get("gender", ""),
-            primary_doctor=request.query_params.get("primary_doctor", ""),
+            keyword=query["keyword"],
+            gender=query["gender"],
+            primary_doctor=query["primary_doctor"],
         )
-        data = _page(request, queryset)
+        data = paginated_data(queryset, page=query["page"], page_size=query["page_size"])
         data["results"] = PatientReadSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 

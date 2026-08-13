@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from apps.doctors.models import DoctorProfile, Gender
+from common.api.pagination import PaginationQuerySerializer
 
 from .models import PatientProfile, TreatmentPlan
 
@@ -18,7 +19,11 @@ class PatientWriteSerializer(serializers.Serializer):
     def validate_primary_doctor(self, value):
         try:
             return DoctorProfile.objects.select_related("user").get(
-                pk=value, deleted_at__isnull=True, user__is_active=True, user__deleted_at__isnull=True
+                pk=value,
+                deleted_at__isnull=True,
+                user__is_active=True,
+                user__deleted_at__isnull=True,
+                user__role="doctor",
             )
         except DoctorProfile.DoesNotExist:
             raise serializers.ValidationError("主治医生不存在或不可用")
@@ -49,3 +54,9 @@ class PatientReadSerializer(serializers.ModelSerializer):
     def get_treatment_plan(self, obj):
         plan = obj.treatment_plans.first()
         return TreatmentPlanReadSerializer(plan).data if plan else None
+
+
+class PatientListQuerySerializer(PaginationQuerySerializer):
+    keyword = serializers.CharField(required=False, allow_blank=True, default="")
+    gender = serializers.ChoiceField(choices=Gender.choices, required=False, allow_blank=True, default="")
+    primary_doctor = serializers.UUIDField(required=False, allow_null=True, default=None)
