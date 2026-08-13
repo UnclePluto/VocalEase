@@ -1,11 +1,27 @@
-from django.db import migrations, models
+from django.db import migrations
+
+
+def backfill_qiniu_etag(apps, schema_editor):
+    MediaAsset = apps.get_model("media", "MediaAsset")
+    for asset in MediaAsset.objects.filter(backend="qiniu", status="ready", etag=""):
+        legacy = (asset.metadata or {}).get("qiniu_etag", "")
+        if legacy:
+            asset.etag = legacy
+            asset.save(update_fields=["etag"])
+
+
+def reverse_backfill_qiniu_etag(apps, schema_editor):
+    MediaAsset = apps.get_model("media", "MediaAsset")
+    for asset in MediaAsset.objects.filter(backend="qiniu").exclude(etag=""):
+        metadata = dict(asset.metadata or {})
+        metadata["qiniu_etag"] = asset.etag
+        asset.metadata = metadata
+        asset.save(update_fields=["metadata"])
 
 
 class Migration(migrations.Migration):
     dependencies = [("media", "0002_asset_owner_contract_and_receipt_constraints")]
 
     operations = [
-        migrations.RenameIndex(model_name="mediaasset", new_name="media_media_patient_5ee947_idx", old_name="media_asset_patient_status_idx"),
-        migrations.AlterField(model_name="mediaasset", name="backend", field=models.CharField(choices=[("local", "本地"), ("qiniu", "七牛")], max_length=16)),
-        migrations.AlterField(model_name="mediaasset", name="media_type", field=models.CharField(choices=[("song_source", "song_source"), ("song_accompaniment", "song_accompaniment"), ("song_vocal", "song_vocal"), ("lyrics", "lyrics"), ("singing_audio", "singing_audio"), ("singing_video", "singing_video"), ("waveform", "waveform"), ("export", "export")], max_length=32)),
+        migrations.RunPython(backfill_qiniu_etag, reverse_backfill_qiniu_etag),
     ]

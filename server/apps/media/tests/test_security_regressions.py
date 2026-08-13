@@ -22,7 +22,7 @@ from apps.media.contracts import ObjectMetadata, StorageValidationError, build_o
 from apps.media.models import MediaAsset
 from apps.media.services import (backend_for_asset, claim_local_upload,
     complete_qiniu_callback, create_upload_grant, mark_asset_for_cleanup,
-    MediaConflict, release_local_upload, verify_local_upload_lease)
+    MediaConflict, publish_local_upload)
 from apps.patients.services import create_patient
 
 
@@ -118,6 +118,8 @@ def test_local_stat_is_streaming_and_preserves_trusted_mime(tmp_path, monkeypatc
     grant = backend.create_upload_grant(owner_id=__import__("uuid").uuid4(), media_type="singing_audio", mime="audio/mpeg", size=1024 * 1024 + 3)
     backend.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"x" * (1024 * 1024 + 3)), mime="audio/mpeg")
     monkeypatch.setattr(__import__("pathlib").Path, "read_bytes", lambda *_: (_ for _ in ()).throw(AssertionError("must stream")))
+    original_open = __import__("pathlib").Path.open
+    monkeypatch.setattr(__import__("pathlib").Path, "open", lambda path, *args, **kwargs: (_ for _ in ()).throw(AssertionError("stat must not open blob")) if path.parent.name == ".blobs" else original_open(path, *args, **kwargs))
 
     stat = backend.stat(grant.object_key)
 
@@ -204,15 +206,15 @@ def test_postgresql_local_upload_lease_rejects_second_writer_and_expired_nonce_c
     }, format="json")
     assert grant_response.status_code == 201
     upload_url = grant_response.data["data"]["upload_url"]
-    entered, continue_writer = Event(), Event()
-    original_write = LocalStorageBackend.write_authorized_stream
+    entered, continue_writer, second_started, second_finished = Event(), Event(), Event(), Event()
+    original_publish = LocalStorageBackend.publish_manifest
 
-    def paused_write(self, **kwargs):
+    def paused_publish(self, *args, **kwargs):
         entered.set()
         assert continue_writer.wait(10)
-        return original_write(self, **kwargs)
+        return original_publish(self, *args, **kwargs)
 
-    monkeypatch.setattr(LocalStorageBackend, "write_authorized_stream", paused_write)
+    monkeypatch.setattr(LocalStorageBackend, "publish_manifest", paused_publish)
     outcome = {}
 
     def first_writer():
@@ -223,11 +225,20 @@ def test_postgresql_local_upload_lease_rejects_second_writer_and_expired_nonce_c
     thread = Thread(target=first_writer)
     thread.start()
     assert entered.wait(10)
-    second = client.put(upload_url, b"two", content_type="audio/mpeg")
-    assert second.status_code == 409
+    def second_writer():
+        second_started.set()
+        local_client = APIClient(); local_client.force_authenticate(qiniu_patient.user)
+        outcome["second"] = local_client.put(upload_url, b"two", content_type="audio/mpeg").status_code
+        second_finished.set(); connections.close_all()
+
+    second_thread = Thread(target=second_writer)
+    second_thread.start(); assert second_started.wait(10)
+    assert not second_finished.wait(0.25), "第二个 writer 应阻塞在 PostgreSQL 行锁"
     continue_writer.set(); thread.join(10)
-    assert not thread.is_alive()
+    second_thread.join(10)
+    assert not thread.is_alive() and not second_thread.is_alive()
     assert outcome["first"] == 204
+    assert outcome["second"] == 409
     asset_id = grant_response.data["data"]["asset_id"]
     assert client.post(f"/api/v1/patient/media/{asset_id}/complete/", {}, format="json").status_code == 200
     assert client.put(upload_url, b"two", content_type="audio/mpeg").status_code == 409
@@ -236,11 +247,14 @@ def test_postgresql_local_upload_lease_rejects_second_writer_and_expired_nonce_c
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     backend = backend_for_asset(asset)
     nonce_a = claim_local_upload(asset=asset)
+    prepared_a = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg")
     MediaAsset.objects.filter(pk=asset.pk).update(upload_lease_expires_at=timezone.now() - timedelta(seconds=1))
     nonce_b = claim_local_upload(asset=asset)
     assert nonce_a != nonce_b
-    backend.write_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg", before_publish=lambda: verify_local_upload_lease(asset_id=asset.id, nonce=nonce_b))
-    release_local_upload(asset_id=asset.id, nonce=nonce_b, success=True)
+    prepared_b = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg")
+    publish_local_upload(asset_id=asset.id, nonce=nonce_b, prepared=prepared_b, backend=backend)
     with pytest.raises(MediaConflict, match="上传租约已失效"):
-        backend.write_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg", before_publish=lambda: verify_local_upload_lease(asset_id=asset.id, nonce=nonce_a))
+        publish_local_upload(asset_id=asset.id, nonce=nonce_a, prepared=prepared_a, backend=backend)
     assert backend.stat(asset.object_key).sha256 == hashlib.sha256(b"new").hexdigest()
+    assert len(list((tmp_path / ".blobs").iterdir())) == 2  # 首个已完成资产 + 当前接管资产
+    assert not list((tmp_path / ".pending").glob("*.json"))

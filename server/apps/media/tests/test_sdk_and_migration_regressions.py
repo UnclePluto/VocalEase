@@ -21,6 +21,30 @@ def test_qiniu_upload_token_is_produced_by_official_sdk_not_reimplemented(monkey
     grant = backend.create_upload_grant(owner_id=uuid4(), media_type="singing_audio", mime="audio/mpeg", size=3)
     expected = Auth("ak", "sk").upload_token("bucket", grant.object_key, expires=settings.MEDIA_UPLOAD_GRANT_TTL_SECONDS, policy=backend.last_policy, strict_policy=True)
     assert grant.upload_token == expected
+    private_url = backend.create_private_url(grant.object_key, ttl_seconds=600)
+    expected_private_url = Auth("ak", "sk").private_download_url(f"https://cdn.example.test/{grant.object_key}", expires=600)
+    assert private_url.url == expected_private_url
+
+
+@override_settings(QINIU_ACCESS_KEY="ak", QINIU_SECRET_KEY="sk", QINIU_BUCKET="bucket", QINIU_DOMAIN="https://cdn.example.test", QINIU_CALLBACK_URL="https://api.example.test/callback", MEDIA_ENVIRONMENT="prod")
+def test_qiniu_production_factory_initializes_official_sdk_clients():
+    backend = QiniuStorageBackend.from_settings()
+    assert isinstance(backend.auth, Auth)
+    assert backend.bucket_manager.auth is backend.auth
+
+
+def test_qiniu_stat_uses_injected_official_bucket_manager_boundary():
+    calls = []
+
+    class FakeBucketManager:
+        def stat(self, bucket, key):
+            calls.append((bucket, key))
+            return {"fsize": 3, "mimeType": "audio/mpeg", "hash": "etag"}, None
+
+    backend = QiniuStorageBackend(access_key="ak", secret_key="sk", bucket="bucket", domain="https://cdn.example.test", callback_url="https://api.example.test/callback", environment="prod", bucket_manager=FakeBucketManager())
+    metadata = backend.stat("prod/singing_audio/2026/08/14/object")
+    assert calls == [("bucket", "prod/singing_audio/2026/08/14/object")]
+    assert metadata.etag == "etag"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -35,11 +59,21 @@ def test_media_migration_upgrades_legacy_qiniu_ready_metadata_without_constraint
     Media = old_apps.get_model("media", "MediaAsset")
     patient = Patient.objects.get(pk=current_patient.id)
     legacy = Media.objects.create(owner=patient, owner_type="patient", media_type="singing_audio", backend="qiniu", object_key="test/singing_audio/2026/08/14/legacy", mime="audio/mpeg", size=3, sha256="", status="ready", upload_expires_at="2026-08-14T00:00:00Z", metadata={"qiniu_etag": "legacy-etag"})
-    # PostgreSQL 在同一事务中有未提交的 FK 触发器时禁止 ALTER TABLE；真实升级前先提交旧数据。
     connection.commit()
     executor.loader.build_graph()
+    media_nodes = sorted(node for node in executor.loader.graph.node_map if node[0] == "media" and node[1] != "0001_initial")
+    for node in media_nodes:
+        executor.migrate([node])
+        executor = MigrationExecutor(connection)
     executor.migrate(executor.loader.graph.leaf_nodes())
     from apps.media.models import MediaAsset
     upgraded = MediaAsset.objects.get(pk=legacy.pk)
     assert upgraded.etag == "legacy-etag"
     assert upgraded.status == "ready"
+    # 反向数据迁移先把 ETag 放回 legacy metadata，再安全撤销字段。
+    executor.migrate([("media", "0001_initial")])
+    old_apps = executor.loader.project_state([("media", "0001_initial")]).apps
+    rolled_back = old_apps.get_model("media", "MediaAsset").objects.get(pk=legacy.pk)
+    assert rolled_back.metadata["qiniu_etag"] == "legacy-etag"
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())

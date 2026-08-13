@@ -22,6 +22,12 @@ MEDIA_TYPES: dict[str, frozenset[str]] = {
     "export": frozenset({"text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),
 }
 PATIENT_MEDIA_TYPES = frozenset({"singing_audio", "singing_video"})
+OWNER_MEDIA_TYPES: dict[str, frozenset[str]] = {
+    "patient": PATIENT_MEDIA_TYPES,
+    "song": frozenset({"song_source", "song_accompaniment", "song_vocal", "lyrics"}),
+    "system": frozenset({"waveform", "song_accompaniment", "song_vocal", "lyrics"}),
+    "export": frozenset({"export"}),
+}
 BACKENDS = frozenset({"local", "qiniu"})
 OWNER_TYPES = frozenset({"patient", "song", "system", "export"})
 _ENVIRONMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -73,6 +79,8 @@ class ObjectMetadata:
     mime: str
     sha256: str = ""
     etag: str = ""
+    generation: str = ""
+    blob: str = ""
 
 
 @dataclass(frozen=True)

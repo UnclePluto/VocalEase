@@ -10,9 +10,9 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
 
-from apps.media.backends.local import LocalStorageBackend
+from apps.media.backends.local import LocalStorageBackend, PreparedLocalUpload
 from apps.media.backends.qiniu import QiniuStorageBackend
-from apps.media.contracts import BACKENDS, StorageBackend, StorageValidationError, UploadGrant, UploadReceipt, validate_media_request
+from apps.media.contracts import BACKENDS, OWNER_MEDIA_TYPES, StorageBackend, StorageValidationError, UploadGrant, UploadReceipt, validate_media_request
 from apps.media.models import MediaAsset
 from apps.patients.models import PatientProfile
 
@@ -23,12 +23,17 @@ class MediaConflict(APIException):
     default_detail = "媒体当前状态不允许此操作"
 
 
+STORAGE_BACKEND_FACTORIES = {
+    "local": lambda: LocalStorageBackend(root=settings.MEDIA_LOCAL_ROOT, signing_secret=settings.SECRET_KEY, environment=settings.MEDIA_ENVIRONMENT),
+    "qiniu": lambda: QiniuStorageBackend.from_settings(),
+}
+
+
 def storage_backend_for(name: str) -> StorageBackend:
-    if name == "local":
-        return LocalStorageBackend(root=settings.MEDIA_LOCAL_ROOT, signing_secret=settings.SECRET_KEY, environment=settings.MEDIA_ENVIRONMENT)
-    if name == "qiniu":
-        return QiniuStorageBackend.from_settings()
-    raise StorageValidationError("未知媒体存储后端")
+    try:
+        return STORAGE_BACKEND_FACTORIES[name]()
+    except KeyError as exc:
+        raise StorageValidationError("未知媒体存储后端") from exc
 
 
 def get_storage_backend() -> StorageBackend:
@@ -56,13 +61,7 @@ def create_upload_grant(*, owner: PatientProfile | None = None, owner_type: str 
         owner_type, owner_id = MediaAsset.OwnerType.PATIENT, owner.id
     if owner_id is None:
         raise ValidationError({"owner_id": "媒体所有者不能为空"}, code="invalid_media_owner")
-    allowed_types = {
-        "patient": {"singing_audio", "singing_video"},
-        "song": {"song_source", "song_accompaniment", "song_vocal", "lyrics"},
-        "export": {"export"},
-        "system": {"waveform", "song_accompaniment", "song_vocal", "lyrics"},
-    }
-    if media_type not in allowed_types.get(owner_type, set()):
+    if media_type not in OWNER_MEDIA_TYPES.get(owner_type, frozenset()):
         raise ValidationError({"media_type": "媒体类型与所有者类型不匹配"}, code="invalid_media_owner")
     try:
         validate_media_request(media_type=media_type, mime=mime, size=size)
@@ -77,8 +76,11 @@ def create_upload_grant(*, owner: PatientProfile | None = None, owner_type: str 
 def _check_receipt(asset: MediaAsset, receipt: UploadReceipt) -> None:
     if receipt.object_key != asset.object_key or receipt.size != asset.size or receipt.mime != asset.mime:
         raise MediaConflict("上传对象元数据与凭证不一致", code="media_metadata_mismatch")
-    if asset.backend == "local" and len(receipt.sha256) != 64:
-        raise MediaConflict("本地媒体缺少可信哈希", code="media_hash_invalid")
+    if asset.backend == "local" and (
+        len(receipt.sha256) != 64 or receipt.sha256 != asset.sha256
+        or receipt.generation != asset.manifest_generation
+    ):
+        raise MediaConflict("本地媒体可信清单与暂存回执不一致", code="media_hash_invalid")
     if asset.backend == "qiniu" and not receipt.etag:
         raise MediaConflict("七牛媒体缺少可信 ETag", code="media_etag_invalid")
 
@@ -92,22 +94,20 @@ def complete_local_asset(*, asset: MediaAsset) -> MediaAsset:
         if locked.status == MediaAsset.Status.FAILED:
             raise MediaConflict()
         if locked.status == MediaAsset.Status.READY:
-            return locked
-        if locked.status not in {MediaAsset.Status.UPLOADING, MediaAsset.Status.RECEIVING} or locked.upload_expires_at <= timezone.now():
-            if locked.status == MediaAsset.Status.RECEIVING:
-                locked.status = MediaAsset.Status.UPLOADING
-                locked.upload_nonce = None
-                locked.upload_lease_expires_at = None
-                locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
-            raise MediaConflict("上传凭证已过期或状态不可用", code="media_grant_expired")
-        try:
-            receipt = backend.verify_completion(locked.object_key)
-        except StorageValidationError as exc:
-            raise MediaConflict(str(exc), code="media_verification_failed") from exc
-        _check_receipt(locked, receipt)
-        locked.sha256, locked.status = receipt.sha256, MediaAsset.Status.READY
-        locked.save(update_fields=["sha256", "status", "updated_at"])
-        return locked
+            completed = locked
+        else:
+            if locked.status != MediaAsset.Status.STAGED or locked.upload_expires_at <= timezone.now():
+                raise MediaConflict("上传凭证已过期或状态不可用", code="media_grant_expired")
+            try:
+                receipt = backend.verify_completion(locked.object_key, expected_generation=locked.manifest_generation)
+            except StorageValidationError as exc:
+                raise MediaConflict(str(exc), code="media_verification_failed") from exc
+            _check_receipt(locked, receipt)
+            locked.sha256, locked.status = receipt.sha256, MediaAsset.Status.READY
+            locked.save(update_fields=["sha256", "status", "updated_at"])
+            completed = locked
+    backend.finalize_generation(completed.object_key, completed.manifest_generation)
+    return completed
 
 
 def claim_local_upload(*, asset: MediaAsset) -> UUID:
@@ -117,6 +117,10 @@ def claim_local_upload(*, asset: MediaAsset) -> UUID:
         # 租约过期时允许新的请求接管；旧 writer 发布前会再次校验 nonce，
         # 因而不能覆盖后来者的 manifest。
         if locked.status == MediaAsset.Status.RECEIVING and locked.upload_lease_expires_at and locked.upload_lease_expires_at <= now:
+            backend = backend_for_asset(locked)
+            if not isinstance(backend, LocalStorageBackend):
+                raise MediaConflict("上传租约后端不合法", code="media_upload_lease_invalid")
+            backend.recover_pending(locked.object_key, expected_generation=locked.manifest_generation)
             locked.status = MediaAsset.Status.UPLOADING
             locked.upload_nonce = None
             locked.upload_lease_expires_at = None
@@ -131,22 +135,48 @@ def claim_local_upload(*, asset: MediaAsset) -> UUID:
 
 
 def release_local_upload(*, asset_id: UUID, nonce: UUID, success: bool) -> None:
+    if success:
+        raise MediaConflict("成功上传必须通过原子清单发布", code="media_upload_publish_required")
     with transaction.atomic():
         locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
         if locked.upload_nonce != nonce:
             raise MediaConflict("上传租约不匹配", code="media_upload_lease_invalid")
-        if not success:
-            locked.status = MediaAsset.Status.UPLOADING
+        locked.status = MediaAsset.Status.UPLOADING
         locked.upload_nonce = None
         locked.upload_lease_expires_at = None
         locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
 
 
-def verify_local_upload_lease(*, asset_id: UUID, nonce: UUID) -> None:
-    with transaction.atomic():
-        locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
-        if locked.status != MediaAsset.Status.RECEIVING or locked.upload_nonce != nonce or locked.upload_lease_expires_at <= timezone.now():
-            raise MediaConflict("上传租约已失效", code="media_upload_lease_invalid")
+def publish_local_upload(*, asset_id: UUID, nonce: UUID, prepared: PreparedLocalUpload, backend: LocalStorageBackend) -> MediaAsset:
+    published = None
+    try:
+        with transaction.atomic():
+            locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+            if (
+                locked.backend != "local" or locked.status != MediaAsset.Status.RECEIVING
+                or locked.upload_nonce != nonce or locked.upload_lease_expires_at <= timezone.now()
+            ):
+                raise MediaConflict("上传租约已失效", code="media_upload_lease_invalid")
+            if prepared.object_key != locked.object_key or prepared.size != locked.size or prepared.mime != locked.mime:
+                raise MediaConflict("上传对象元数据与凭证不一致", code="media_metadata_mismatch")
+            # 行锁覆盖版本核对、唯一一次 manifest replace 与 DB receipt 更新；流式 I/O 已在事务外完成。
+            published = backend.publish_manifest(prepared, expected_generation=locked.manifest_generation)
+            locked.status = MediaAsset.Status.STAGED
+            locked.sha256 = prepared.sha256
+            locked.manifest_generation = prepared.generation
+            locked.upload_nonce = None
+            locked.upload_lease_expires_at = None
+            locked.save(update_fields=["status", "sha256", "manifest_generation", "upload_nonce", "upload_lease_expires_at", "updated_at"])
+    except Exception as exc:
+        if published is not None:
+            backend.compensate_publish(published)
+        else:
+            backend.discard_prepared(prepared)
+        if isinstance(exc, StorageValidationError):
+            raise MediaConflict(str(exc), code="media_manifest_conflict") from exc
+        raise
+    backend.finalize_publish(published)
+    return locked
 
 
 def complete_qiniu_callback(*, payload: Mapping[str, Any], backend: QiniuStorageBackend) -> MediaAsset:
@@ -180,5 +210,7 @@ def mark_asset_for_cleanup(*, asset: MediaAsset) -> MediaAsset:
         if locked.status == MediaAsset.Status.PENDING_CLEANUP:
             return locked
         locked.status = MediaAsset.Status.PENDING_CLEANUP
-        locked.save(update_fields=["status", "updated_at"])
+        locked.upload_nonce = None
+        locked.upload_lease_expires_at = None
+        locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
         return locked

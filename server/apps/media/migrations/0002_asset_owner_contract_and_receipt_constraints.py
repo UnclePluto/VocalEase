@@ -1,29 +1,8 @@
 from django.db import migrations, models
 
 
-def backfill_qiniu_etag(apps, schema_editor):
-    MediaAsset = apps.get_model("media", "MediaAsset")
-    for asset in MediaAsset.objects.filter(backend="qiniu", status="ready", etag=""):
-        legacy = (asset.metadata or {}).get("qiniu_etag", "")
-        if legacy:
-            asset.etag = legacy
-            asset.save(update_fields=["etag"])
-
-
-def reverse_backfill_qiniu_etag(apps, schema_editor):
-    MediaAsset = apps.get_model("media", "MediaAsset")
-    for asset in MediaAsset.objects.filter(backend="qiniu").exclude(etag=""):
-        metadata = dict(asset.metadata or {})
-        metadata.setdefault("qiniu_etag", asset.etag)
-        asset.metadata = metadata
-        asset.save(update_fields=["metadata"])
-
-
 class Migration(migrations.Migration):
     dependencies = [("media", "0001_initial")]
-    # PostgreSQL 对外键字段变更保留 deferred trigger 时不能在同一事务内再加 CHECK。
-    # 本迁移在本分支尚未发布，按操作提交可保证历史数据回填后再建立约束。
-    atomic = False
 
     operations = [
         migrations.RemoveIndex(model_name="mediaasset", name="media_media_owner_i_f272bb_idx"),
@@ -34,10 +13,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(model_name="mediaasset", name="patient_owner", field=models.ForeignKey(blank=True, null=True, on_delete=models.PROTECT, related_name="media_assets", to="patients.patientprofile")),
         migrations.AlterField(model_name="mediaasset", name="owner_id", field=models.UUIDField()),
         migrations.AlterField(model_name="mediaasset", name="owner_type", field=models.CharField(choices=[("patient", "患者"), ("song", "歌曲"), ("system", "系统"), ("export", "导出")], max_length=16)),
-        migrations.AddIndex(model_name="mediaasset", index=models.Index(fields=["patient_owner", "status"], name="media_asset_patient_status_idx")),
-        migrations.RunPython(backfill_qiniu_etag, reverse_backfill_qiniu_etag),
-        migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=models.Q(("backend__in", ["local", "qiniu"])), name="media_asset_backend_valid")),
-        migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=models.Q(("owner_type__in", ["patient", "song", "system", "export"])), name="media_asset_owner_type_valid")),
-        migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=models.Q(("status__in", ["uploading", "ready", "failed", "pending_cleanup"])), name="media_asset_status_valid")),
-        migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=(models.Q(("backend", "local"), ("sha256__regex", "^[0-9a-f]{64}$"), ("status", "ready")) | models.Q(("backend", "qiniu"), ("etag__gt", ""), ("status", "ready")) | ~models.Q(("status", "ready"))), name="media_asset_ready_receipt_valid")),
+        migrations.AddIndex(model_name="mediaasset", index=models.Index(fields=["patient_owner", "status"], name="media_media_patient_5ee947_idx")),
+        migrations.AlterField(model_name="mediaasset", name="backend", field=models.CharField(choices=[("local", "本地"), ("qiniu", "七牛")], max_length=16)),
+        migrations.AlterField(model_name="mediaasset", name="media_type", field=models.CharField(choices=[("song_source", "song_source"), ("song_accompaniment", "song_accompaniment"), ("song_vocal", "song_vocal"), ("lyrics", "lyrics"), ("singing_audio", "singing_audio"), ("singing_video", "singing_video"), ("waveform", "waveform"), ("export", "export")], max_length=32)),
     ]

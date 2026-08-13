@@ -16,7 +16,7 @@ from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import ObjectMetadata
 from qiniu import Auth
 from apps.media.models import MediaAsset
-from apps.media.services import create_upload_grant
+from apps.media.services import STORAGE_BACKEND_FACTORIES, create_upload_grant
 from apps.patients.services import create_patient
 
 
@@ -89,7 +89,7 @@ def qiniu_patient(db):
 def test_qiniu_callback_is_idempotent_and_cannot_confirm_wrong_or_failed_asset(qiniu_patient, monkeypatch):
     backend = QiniuStorageBackend.from_settings(stat_transport=lambda _: ObjectMetadata("", 3, "audio/mpeg", "", "etag-value"))
     # 回调从已定位资产的 backend 分派，即使全局默认已改为 local 仍应走七牛验签与 stat。
-    monkeypatch.setattr("apps.media.services.QiniuStorageBackend.from_settings", lambda: backend)
+    monkeypatch.setitem(STORAGE_BACKEND_FACTORIES, "qiniu", lambda: backend)
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3, backend=backend)
     body = urlencode({"key": grant.object_key, "hash": "etag-value", "fsize": 3, "mime": "audio/mpeg"}).encode()
     authorization = qiniu_callback_authorization(

@@ -19,7 +19,7 @@ from apps.media.backends.local import LocalStorageBackend
 from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import PATIENT_MEDIA_TYPES, StorageValidationError
 from apps.media.models import MediaAsset
-from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, get_storage_backend, release_local_upload, verify_local_upload_lease
+from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, publish_local_upload, release_local_upload, storage_backend_for
 from apps.patients.models import PatientProfile
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 
@@ -109,14 +109,14 @@ class LocalUploadView(APIView):
             raise PermissionDenied("上传凭证不可用", code="media_upload_not_available")
         nonce = claim_local_upload(asset=asset)
         try:
-            backend.write_authorized_stream(object_key=asset.object_key, token=request.query_params.get("signature", ""), stream=request.stream, mime=request.content_type or "", before_publish=lambda: verify_local_upload_lease(asset_id=asset.id, nonce=nonce))
-            release_local_upload(asset_id=asset.id, nonce=nonce, success=True)
+            prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=request.query_params.get("signature", ""), stream=request.stream, mime=request.content_type or "")
         except StorageValidationError as exc:
             release_local_upload(asset_id=asset.id, nonce=nonce, success=False)
             raise PermissionDenied(str(exc), code="media_upload_rejected") from exc
         except Exception:
             release_local_upload(asset_id=asset.id, nonce=nonce, success=False)
             raise
+        publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=prepared, backend=backend)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -155,7 +155,11 @@ class AdminPrivateUrlView(AdminAssetMixin, APIView):
 def _private_url_response(request, asset):
     if asset.status != MediaAsset.Status.READY:
         raise PermissionDenied("媒体尚不可访问", code="media_not_ready")
-    private_url = backend_for_asset(asset).create_private_url(asset.object_key, ttl_seconds=settings.MEDIA_PRIVATE_URL_TTL_SECONDS)
+    backend = backend_for_asset(asset)
+    if isinstance(backend, LocalStorageBackend):
+        private_url = backend.create_private_url(asset.object_key, ttl_seconds=settings.MEDIA_PRIVATE_URL_TTL_SECONDS, asset_id=asset.id, expected_generation=asset.manifest_generation)
+    else:
+        private_url = backend.create_private_url(asset.object_key, ttl_seconds=settings.MEDIA_PRIVATE_URL_TTL_SECONDS)
     record(actor=request.user, action="media.private_url", target=asset, changes={"media_type": asset.media_type, "backend": asset.backend}, request_id=request.request_id)
     return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)
 
@@ -168,10 +172,10 @@ class LocalPrivateDownloadView(APIView):
         if asset.status != MediaAsset.Status.READY or not isinstance(backend, LocalStorageBackend):
             raise Http404
         try:
-            path = backend.authorize_private(request.query_params.get("signature", ""), object_key)
+            source = backend.open_authorized_private(request.query_params.get("signature", ""), object_key, asset_id=asset.id, expected_generation=asset.manifest_generation)
         except StorageValidationError as exc:
             raise PermissionDenied(str(exc), code="media_private_url_invalid") from exc
-        return FileResponse(path.open("rb"), content_type="application/octet-stream", as_attachment=False)
+        return FileResponse(source, content_type="application/octet-stream", as_attachment=False)
 
 
 class QiniuCallbackView(APIView):
@@ -183,6 +187,10 @@ class QiniuCallbackView(APIView):
         raw_path_query = raw_uri.split("://", 1)[-1] if raw_uri.startswith(("http://", "https://")) else raw_uri
         if raw_path_query.startswith(request.get_host()):
             raw_path_query = raw_path_query[len(request.get_host()):]
+        # 验签仅依赖七牛独立配置及原始请求，不解析 payload、不查询资产。
+        backend = storage_backend_for("qiniu")
+        if not isinstance(backend, QiniuStorageBackend) or not backend.verify_callback_signature(authorization=request.headers.get("Authorization", ""), content_type=request.content_type or "", raw_path_query=raw_path_query, body=raw_body):
+            raise PermissionDenied("七牛回调验签失败", code="qiniu_callback_invalid")
         try:
             parsed = parse_qs(raw_body.decode("utf-8"), strict_parsing=True, keep_blank_values=True)
             payload = {key: values[0] for key, values in parsed.items() if len(values) == 1}
@@ -192,9 +200,6 @@ class QiniuCallbackView(APIView):
         except (UnicodeDecodeError, ValueError, KeyError) as exc:
             raise ValidationError({"callback": "七牛回调表单不合法"}) from exc
         asset = get_object_or_404(MediaAsset, object_key=payload["key"], backend="qiniu", deleted_at__isnull=True)
-        backend = backend_for_asset(asset)
-        if not isinstance(backend, QiniuStorageBackend) or not backend.verify_callback_signature(authorization=request.headers.get("Authorization", ""), content_type=request.content_type or "", raw_path_query=raw_path_query, body=raw_body):
-            raise PermissionDenied("七牛回调验签失败", code="qiniu_callback_invalid")
         completed = complete_qiniu_callback(payload=payload, backend=backend)
         record(actor=None, action="media.qiniu_callback", target=completed, changes={"media_type": completed.media_type, "size": completed.size, "status": completed.status}, request_id=request.request_id)
         return api_response(data={"asset_id": str(completed.id), "status": completed.status}, request_id=request.request_id)
