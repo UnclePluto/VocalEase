@@ -24,4 +24,7 @@ class SystemAdminPermission(BasePermission):
             request.user
             and request.user.is_authenticated
             and request.user.role == Role.SYSTEM_ADMIN
+            and request.user.is_active
+            and request.user.deleted_at is None
+            and not request.user.must_change_password
         )

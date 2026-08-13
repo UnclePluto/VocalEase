@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
@@ -56,6 +57,14 @@ class User(AbstractBaseUser, PermissionsMixin, UUIDSoftDeleteModel):
 class RefreshToken(UUIDSoftDeleteModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="refresh_tokens")
     token_hash = models.CharField(max_length=64, unique=True)
+    family_id = models.UUIDField(default=uuid.uuid4, db_index=True)
+    parent = models.OneToOneField(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="successor",
+    )
     expires_at = models.DateTimeField()
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

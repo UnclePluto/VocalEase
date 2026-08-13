@@ -12,7 +12,12 @@ class RequestIdMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        request.request_id = request.META.get(self.header_name) or uuid.uuid4().hex
+        supplied_request_id = request.META.get(self.header_name, "")
+        request.request_id = (
+            supplied_request_id
+            if supplied_request_id and len(supplied_request_id) <= 64
+            else uuid.uuid4().hex
+        )
         token = _request_id.set(request.request_id)
         try:
             response = self.get_response(request)

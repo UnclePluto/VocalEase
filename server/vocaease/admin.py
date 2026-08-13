@@ -9,7 +9,11 @@ class SystemAdminSite(AdminSite):
 
     def has_permission(self, request):
         return bool(
-            request.user.is_authenticated and request.user.role == Role.SYSTEM_ADMIN
+            request.user.is_authenticated
+            and request.user.role == Role.SYSTEM_ADMIN
+            and request.user.is_active
+            and request.user.deleted_at is None
+            and not request.user.must_change_password
         )
 
     def admin_view(self, view, cacheable=False):

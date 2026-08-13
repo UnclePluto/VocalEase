@@ -5,9 +5,11 @@ class LoginSerializer(serializers.Serializer):
     login_id = serializers.CharField(max_length=32)
     password = serializers.CharField(trim_whitespace=False)
     client_kind = serializers.ChoiceField(choices=("web", "android"))
+    remember_me = serializers.BooleanField(default=False)
 
 
 class RefreshSerializer(serializers.Serializer):
+    client_kind = serializers.ChoiceField(choices=("web", "android"))
     refresh = serializers.CharField(required=False, allow_blank=False)
 
 
@@ -17,4 +19,5 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 
 class LogoutSerializer(serializers.Serializer):
+    client_kind = serializers.ChoiceField(choices=("web", "android"))
     refresh = serializers.CharField(required=False, allow_blank=False)

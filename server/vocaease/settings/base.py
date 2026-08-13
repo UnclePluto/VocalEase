@@ -1,9 +1,18 @@
 import os
+from datetime import timedelta
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-me")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
+settings_module = os.getenv("DJANGO_SETTINGS_MODULE", "")
+if not SECRET_KEY and settings_module not in {
+    "vocaease.settings.local",
+    "vocaease.settings.test",
+}:
+    raise ImproperlyConfigured("生产环境必须配置 DJANGO_SECRET_KEY")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host]
 
@@ -67,7 +76,18 @@ CACHES = {
 AUTH_USER_MODEL = "accounts.User"
 
 AUTH_REFRESH_COOKIE_NAME = "refresh_token"
+AUTH_REFRESH_CSRF_COOKIE_NAME = "refresh_csrf_token"
 AUTH_REFRESH_COOKIE_SECURE = not DEBUG
+AUTH_WEB_ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("AUTH_WEB_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+}
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "common.api.errors.exception_handler",
