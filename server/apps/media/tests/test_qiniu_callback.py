@@ -89,6 +89,7 @@ def qiniu_patient(db):
 def test_qiniu_callback_is_idempotent_and_cannot_confirm_wrong_or_failed_asset(qiniu_patient, monkeypatch):
     backend = QiniuStorageBackend.from_settings(stat_transport=lambda _: ObjectMetadata("", 3, "audio/mpeg", "", "etag-value"))
     monkeypatch.setattr("apps.media.views.get_storage_backend", lambda: backend)
+    monkeypatch.setattr("apps.media.views.backend_for_asset", lambda _: backend)
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3, backend=backend)
     body = urlencode({"key": grant.object_key, "hash": "etag-value", "fsize": 3, "mime": "audio/mpeg"}).encode()
     authorization = qiniu_callback_authorization(

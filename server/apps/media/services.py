@@ -56,6 +56,14 @@ def create_upload_grant(*, owner: PatientProfile | None = None, owner_type: str 
         owner_type, owner_id = MediaAsset.OwnerType.PATIENT, owner.id
     if owner_id is None:
         raise ValidationError({"owner_id": "媒体所有者不能为空"}, code="invalid_media_owner")
+    allowed_types = {
+        "patient": {"singing_audio", "singing_video"},
+        "song": {"song_source", "song_accompaniment", "song_vocal", "lyrics"},
+        "export": {"export"},
+        "system": {"waveform", "song_accompaniment", "song_vocal", "lyrics"},
+    }
+    if media_type not in allowed_types.get(owner_type, set()):
+        raise ValidationError({"media_type": "媒体类型与所有者类型不匹配"}, code="invalid_media_owner")
     try:
         validate_media_request(media_type=media_type, mime=mime, size=size)
     except StorageValidationError as exc:
@@ -157,7 +165,6 @@ def mark_asset_for_cleanup(*, asset: MediaAsset) -> MediaAsset:
         locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
         if locked.status == MediaAsset.Status.PENDING_CLEANUP:
             return locked
-        backend_for_asset(locked).mark_for_cleanup(locked.object_key)
         locked.status = MediaAsset.Status.PENDING_CLEANUP
         locked.save(update_fields=["status", "updated_at"])
         return locked

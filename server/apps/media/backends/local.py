@@ -146,5 +146,5 @@ class LocalStorageBackend:
             return source.read()
 
     def mark_for_cleanup(self, object_key: str) -> None:
-        self._path(object_key).unlink(missing_ok=True)
-        self._metadata_path(object_key).unlink(missing_ok=True)
+        # 仅由服务层持久化待清理标记；实际删除交给未来受限 worker。
+        self._path(object_key)

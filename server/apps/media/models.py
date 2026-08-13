@@ -40,6 +40,8 @@ class MediaAsset(UUIDSoftDeleteModel):
         constraints = [
             models.CheckConstraint(condition=models.Q(backend__in=["local", "qiniu"]), name="media_asset_backend_valid"),
             models.CheckConstraint(condition=models.Q(owner_type__in=["patient", "song", "system", "export"]), name="media_asset_owner_type_valid"),
+            models.CheckConstraint(condition=(models.Q(("owner_type", "patient"), ("patient_owner__isnull", False), ("owner_id", models.F("patient_owner_id"))) | ~models.Q(("owner_type", "patient"))), name="media_asset_patient_owner_consistent"),
+            models.CheckConstraint(condition=(models.Q(owner_type__in=["song", "system", "export"], patient_owner__isnull=True) | models.Q(owner_type="patient")), name="media_asset_nonpatient_owner_null"),
             models.CheckConstraint(condition=models.Q(status__in=["uploading", "receiving", "ready", "failed", "pending_cleanup"]), name="media_asset_status_valid"),
             models.CheckConstraint(condition=(models.Q(status="ready", backend="local", sha256__regex=r"^[0-9a-f]{64}$") | models.Q(status="ready", backend="qiniu", etag__gt="") | ~models.Q(status="ready")), name="media_asset_ready_receipt_valid"),
         ]

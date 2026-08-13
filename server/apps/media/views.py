@@ -69,7 +69,9 @@ class AdminUploadGrantView(GrantMixin, APIView):
     throttle_scope = "credential_upload"
 
     def post(self, request):
-        owner_type, owner_id = request.data.get("owner_type", "patient"), request.data.get("owner_id")
+        owner_type, owner_id = request.data.get("owner_type"), request.data.get("owner_id")
+        if not owner_type or not owner_id:
+            raise ValidationError({"owner_type": "管理端必须明确指定 owner_type 和 owner_id"})
         if owner_type == "patient":
             get_object_or_404(PatientProfile, pk=owner_id, deleted_at__isnull=True)
         return self.issue(request, owner_type=owner_type, owner_id=owner_id)
@@ -161,8 +163,9 @@ def _private_url_response(request, asset):
 class LocalPrivateDownloadView(APIView):
     permission_classes = [AllowAny]
     def get(self, request, object_key):
-        backend = get_storage_backend()
-        if not isinstance(backend, LocalStorageBackend):
+        asset = get_object_or_404(MediaAsset, object_key=object_key, backend="local", deleted_at__isnull=True)
+        backend = backend_for_asset(asset)
+        if asset.status != MediaAsset.Status.READY or not isinstance(backend, LocalStorageBackend):
             raise Http404
         try:
             path = backend.authorize_private(request.query_params.get("signature", ""), object_key)
@@ -175,16 +178,11 @@ class QiniuCallbackView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
     def post(self, request):
-        backend = get_storage_backend()
-        if not isinstance(backend, QiniuStorageBackend):
-            raise Http404
         raw_body = request.body
         raw_uri = request.META.get("RAW_URI") or request.get_full_path()
         raw_path_query = raw_uri.split("://", 1)[-1] if raw_uri.startswith(("http://", "https://")) else raw_uri
         if raw_path_query.startswith(request.get_host()):
             raw_path_query = raw_path_query[len(request.get_host()):]
-        if not backend.verify_callback_signature(authorization=request.headers.get("Authorization", ""), content_type=request.content_type or "", raw_path_query=raw_path_query, body=raw_body):
-            raise PermissionDenied("七牛回调验签失败", code="qiniu_callback_invalid")
         try:
             parsed = parse_qs(raw_body.decode("utf-8"), strict_parsing=True, keep_blank_values=True)
             payload = {key: values[0] for key, values in parsed.items() if len(values) == 1}
@@ -193,6 +191,10 @@ class QiniuCallbackView(APIView):
             payload["fsize"] = int(payload["fsize"])
         except (UnicodeDecodeError, ValueError, KeyError) as exc:
             raise ValidationError({"callback": "七牛回调表单不合法"}) from exc
+        asset = get_object_or_404(MediaAsset, object_key=payload["key"], backend="qiniu", deleted_at__isnull=True)
+        backend = backend_for_asset(asset)
+        if not isinstance(backend, QiniuStorageBackend) or not backend.verify_callback_signature(authorization=request.headers.get("Authorization", ""), content_type=request.content_type or "", raw_path_query=raw_path_query, body=raw_body):
+            raise PermissionDenied("七牛回调验签失败", code="qiniu_callback_invalid")
         completed = complete_qiniu_callback(payload=payload, backend=backend)
         record(actor=None, action="media.qiniu_callback", target=completed, changes={"media_type": completed.media_type, "size": completed.size, "status": completed.status}, request_id=request.request_id)
         return api_response(data={"asset_id": str(completed.id), "status": completed.status}, request_id=request.request_id)
