@@ -1,31 +1,27 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Mapping
-from urllib.parse import urlencode
+from tempfile import NamedTemporaryFile
+from typing import Any, BinaryIO, Mapping
+from urllib.parse import quote, urlencode
 from uuid import UUID
 
-from django.core import signing
 from django.conf import settings
+from django.core import signing
 from django.utils import timezone
 
-from apps.media.contracts import (
-    ObjectMetadata,
-    PrivateUrl,
-    StorageValidationError,
-    UploadGrant,
-    UploadReceipt,
-    build_object_key,
-    validate_media_request,
-)
+from apps.media.contracts import ObjectMetadata, PrivateUrl, StorageValidationError, UploadGrant, UploadReceipt, build_object_key, validate_media_request
 
 
 class LocalStorageBackend:
-    """受控本地对象存储；MEDIA_ROOT 永不作为静态目录暴露。"""
+    """不暴露文件根目录、完全由签名 API 控制的本地对象存储。"""
 
     signing_salt = "vocaease.media.local"
+    chunk_size = 64 * 1024
 
     def __init__(self, *, root: str | Path, signing_secret: str, environment: str):
         self.root = Path(root).resolve()
@@ -33,18 +29,24 @@ class LocalStorageBackend:
         self.environment = environment
 
     def _path(self, object_key: str) -> Path:
-        if not object_key or object_key.startswith("/") or "\\" in object_key or any(part in {"", ".", ".."} for part in object_key.split("/")):
+        segments = object_key.split("/")
+        if (
+            not object_key or object_key.startswith("/") or "\\" in object_key or "%" in object_key
+            or any(part in {"", ".", ".."} or any(char.isspace() or ord(char) < 32 for char in part) for part in segments)
+        ):
             raise StorageValidationError("对象键不合法")
         path = (self.root / object_key).resolve()
         if self.root != path and self.root not in path.parents:
             raise StorageValidationError("对象键越界")
         return path
 
-    def _issue_token(self, value: Mapping[str, Any], ttl_seconds: int) -> tuple[str, object]:
+    def _metadata_path(self, object_key: str) -> Path:
+        path = self._path(object_key)
+        return path.with_name(f".{path.name}.metadata.json")
+
+    def _issue_token(self, value: Mapping[str, Any], ttl_seconds: int):
         expires_at = timezone.now() + timedelta(seconds=ttl_seconds)
-        payload = dict(value)
-        payload["expires_at"] = expires_at.timestamp()
-        return self.signer.sign_object(payload), expires_at
+        return self.signer.sign_object({**value, "expires_at": expires_at.timestamp()}), expires_at
 
     def _read_token(self, token: str) -> dict[str, Any]:
         try:
@@ -64,47 +66,85 @@ class LocalStorageBackend:
         )
         return UploadGrant(object_key=key, expires_at=expires_at, upload_token=token)
 
-    def write_upload(self, *, grant: UploadGrant, content: bytes, mime: str) -> None:
-        payload = self._read_token(grant.upload_token)
-        if payload["object_key"] != grant.object_key or payload["mime"] != mime or payload["size"] != len(content):
+    def write_authorized_stream(self, *, object_key: str, token: str, stream: BinaryIO, mime: str) -> None:
+        claim = self._read_token(token)
+        if claim.get("object_key") != object_key or claim.get("mime") != mime:
             raise StorageValidationError("上传内容与凭证不一致")
-        path = self._path(grant.object_key)
+        path = self._path(object_key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        temporary = NamedTemporaryFile(dir=path.parent, prefix=".upload-", delete=False)
+        temporary_path = Path(temporary.name)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with temporary:
+                while chunk := stream.read(self.chunk_size):
+                    size += len(chunk)
+                    if size > claim["size"]:
+                        raise StorageValidationError("上传文件大小超出凭证限制")
+                    digest.update(chunk)
+                    temporary.write(chunk)
+            if size != claim["size"]:
+                raise StorageValidationError("上传文件大小与凭证不一致")
+            os.replace(temporary_path, path)
+            metadata_temporary = NamedTemporaryFile(dir=path.parent, prefix=".metadata-", delete=False, mode="w", encoding="utf-8")
+            with metadata_temporary:
+                json.dump({"mime": mime, "size": size, "sha256": digest.hexdigest()}, metadata_temporary)
+            os.replace(metadata_temporary.name, self._metadata_path(object_key))
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
 
-    def write_authorized_upload(self, *, object_key: str, token: str, content: bytes, mime: str) -> None:
-        grant_payload = self._read_token(token)
-        if grant_payload["object_key"] != object_key:
-            raise StorageValidationError("上传对象不匹配")
-        grant = UploadGrant(object_key=object_key, expires_at=timezone.now(), upload_token=token)
-        self.write_upload(grant=grant, content=content, mime=mime)
+    def write_upload(self, *, grant: UploadGrant, content: bytes, mime: str) -> None:
+        """仅供契约测试使用；HTTP 层一律传递流。"""
+        from io import BytesIO
+        self.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=BytesIO(content), mime=mime)
 
     def stat(self, object_key: str) -> ObjectMetadata:
         path = self._path(object_key)
-        if not path.is_file():
+        metadata_path = self._metadata_path(object_key)
+        if not path.is_file() or not metadata_path.is_file():
             raise StorageValidationError("媒体对象不存在")
-        content = path.read_bytes()
-        return ObjectMetadata(object_key=object_key, size=len(content), mime="", sha256=hashlib.sha256(content).hexdigest())
+        try:
+            with metadata_path.open(encoding="utf-8") as metadata_file:
+                stored = json.load(metadata_file)
+        except (OSError, ValueError, TypeError) as exc:
+            raise StorageValidationError("媒体对象元数据损坏") from exc
+        size = path.stat().st_size
+        if size != stored.get("size") or not stored.get("mime") or len(stored.get("sha256", "")) != 64:
+            raise StorageValidationError("媒体对象元数据不一致")
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(self.chunk_size):
+                digest.update(chunk)
+        if digest.hexdigest() != stored["sha256"]:
+            raise StorageValidationError("媒体对象哈希不一致")
+        return ObjectMetadata(object_key=object_key, size=size, mime=stored["mime"], sha256=stored["sha256"])
 
-    def verify_completion(self, object_key: str, payload: Mapping[str, Any]) -> UploadReceipt:
+    def verify_completion(self, object_key: str, payload: Mapping[str, Any] | None = None) -> UploadReceipt:
         metadata = self.stat(object_key)
-        if int(payload.get("size", -1)) != metadata.size:
-            raise StorageValidationError("对象大小不一致")
-        sha256 = str(payload.get("sha256", ""))
-        if sha256 != metadata.sha256:
-            raise StorageValidationError("对象哈希不一致")
-        mime = str(payload.get("mime", ""))
-        if not mime:
-            raise StorageValidationError("缺少对象 MIME 类型")
-        return UploadReceipt(object_key=object_key, size=metadata.size, mime=mime, sha256=metadata.sha256)
+        return UploadReceipt(**metadata.__dict__)
 
     def create_private_url(self, object_key: str, *, ttl_seconds: int) -> PrivateUrl:
         self._path(object_key)
         token, expires_at = self._issue_token({"object_key": object_key, "kind": "private"}, ttl_seconds)
-        return PrivateUrl(url=f"/api/v1/media/private/{object_key}?{urlencode({'signature': token})}", expires_at=expires_at, token=token)
+        segments = "/".join(quote(segment, safe="") for segment in object_key.split("/"))
+        return PrivateUrl(url=f"/api/v1/media/private/{segments}?{urlencode({'signature': token})}", expires_at=expires_at, token=token)
+
+    def authorize_private(self, token: str, object_key: str) -> Path:
+        payload = self._read_token(token)
+        if payload.get("kind") != "private" or payload.get("object_key") != object_key:
+            raise StorageValidationError("下载签名无效")
+        return self._path(object_key)
 
     def read_private(self, token: str) -> bytes:
+        """兼容旧契约测试；生产下载端点不会调用此方法。"""
         payload = self._read_token(token)
         if payload.get("kind") != "private":
             raise StorageValidationError("下载签名无效")
-        return self._path(str(payload["object_key"])).read_bytes()
+        with self._path(payload["object_key"]).open("rb") as source:
+            return source.read()
+
+    def mark_for_cleanup(self, object_key: str) -> None:
+        self._path(object_key).unlink(missing_ok=True)
+        self._metadata_path(object_key).unlink(missing_ok=True)

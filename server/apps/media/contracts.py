@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import Any, Mapping, Protocol
 from uuid import UUID, uuid4
 
@@ -20,6 +21,10 @@ MEDIA_TYPES: dict[str, frozenset[str]] = {
     "waveform": frozenset({"application/json"}),
     "export": frozenset({"text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),
 }
+PATIENT_MEDIA_TYPES = frozenset({"singing_audio", "singing_video"})
+BACKENDS = frozenset({"local", "qiniu"})
+OWNER_TYPES = frozenset({"patient", "song", "system", "export"})
+_ENVIRONMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class StorageValidationError(ValueError):
@@ -28,7 +33,7 @@ class StorageValidationError(ValueError):
 
 def max_size_for(media_type: str) -> int:
     if media_type in {"song_source", "song_accompaniment", "song_vocal", "singing_audio"}:
-        return int(getattr(settings, "MEDIA_AUDIO_MAX_BYTES", 50 * MEBIBYTE))
+        return min(int(getattr(settings, "MEDIA_AUDIO_MAX_BYTES", 50 * MEBIBYTE)), 50 * MEBIBYTE)
     if media_type == "singing_video":
         return int(getattr(settings, "MEDIA_VIDEO_MAX_BYTES", 500 * MEBIBYTE))
     return int(getattr(settings, "MEDIA_OTHER_MAX_BYTES", 10 * MEBIBYTE))
@@ -46,7 +51,7 @@ def validate_media_request(*, media_type: str, mime: str, size: int) -> None:
 def build_object_key(environment: str, media_type: str, now: datetime | None = None) -> str:
     if media_type not in MEDIA_TYPES:
         raise StorageValidationError("不支持的媒体类型")
-    if not environment or any(part in environment for part in ("/", "\\", "..")):
+    if not _ENVIRONMENT_RE.fullmatch(environment):
         raise StorageValidationError("存储环境标识不合法")
     now = now or timezone.now()
     return f"{environment}/{media_type}/{now:%Y/%m/%d}/{uuid4().hex}"
@@ -66,7 +71,8 @@ class ObjectMetadata:
     object_key: str
     size: int
     mime: str
-    sha256: str
+    sha256: str = ""
+    etag: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,8 +90,10 @@ class PrivateUrl:
 class StorageBackend(Protocol):
     def create_upload_grant(self, *, owner_id: UUID, media_type: str, mime: str, size: int) -> UploadGrant: ...
 
-    def verify_completion(self, object_key: str, payload: Mapping[str, Any]) -> UploadReceipt: ...
+    def verify_completion(self, object_key: str, payload: Mapping[str, Any] | None = None) -> UploadReceipt: ...
 
     def create_private_url(self, object_key: str, *, ttl_seconds: int) -> PrivateUrl: ...
 
     def stat(self, object_key: str) -> ObjectMetadata: ...
+
+    def mark_for_cleanup(self, object_key: str) -> None: ...

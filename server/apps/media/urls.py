@@ -4,23 +4,25 @@ from .views import (
     AdminUploadGrantView,
     LocalPrivateDownloadView,
     LocalUploadView,
-    MediaCompleteView,
+    AdminCompleteView,
     PatientUploadGrantView,
-    PrivateUrlView,
+    AdminPrivateUrlView,
+    PatientCompleteView,
+    PatientPrivateUrlView,
     QiniuCallbackView,
 )
 
 
 patient_urlpatterns = [
     path("upload-grants/", PatientUploadGrantView.as_view(), name="patient-media-upload-grant"),
-    path("<uuid:asset_id>/complete/", MediaCompleteView.as_view(), name="patient-media-complete"),
-    path("<uuid:asset_id>/private-url/", PrivateUrlView.as_view(), name="patient-media-private-url"),
+    path("<uuid:asset_id>/complete/", PatientCompleteView.as_view(), name="patient-media-complete"),
+    path("<uuid:asset_id>/private-url/", PatientPrivateUrlView.as_view(), name="patient-media-private-url"),
 ]
 
 admin_urlpatterns = [
     path("upload-grants/", AdminUploadGrantView.as_view(), name="admin-media-upload-grant"),
-    path("<uuid:asset_id>/complete/", MediaCompleteView.as_view(), name="admin-media-complete"),
-    path("<uuid:asset_id>/private-url/", PrivateUrlView.as_view(), name="admin-media-private-url"),
+    path("<uuid:asset_id>/complete/", AdminCompleteView.as_view(), name="admin-media-complete"),
+    path("<uuid:asset_id>/private-url/", AdminPrivateUrlView.as_view(), name="admin-media-private-url"),
 ]
 
 public_urlpatterns = [
