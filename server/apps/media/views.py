@@ -19,7 +19,7 @@ from apps.media.backends.local import LocalStorageBackend
 from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import PATIENT_MEDIA_TYPES, StorageValidationError
 from apps.media.models import MediaAsset
-from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, get_storage_backend, release_local_upload
+from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, get_storage_backend, release_local_upload, verify_local_upload_lease
 from apps.patients.models import PatientProfile
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 
@@ -109,7 +109,7 @@ class LocalUploadView(APIView):
             raise PermissionDenied("上传凭证不可用", code="media_upload_not_available")
         nonce = claim_local_upload(asset=asset)
         try:
-            backend.write_authorized_stream(object_key=asset.object_key, token=request.query_params.get("signature", ""), stream=request.stream, mime=request.content_type or "")
+            backend.write_authorized_stream(object_key=asset.object_key, token=request.query_params.get("signature", ""), stream=request.stream, mime=request.content_type or "", before_publish=lambda: verify_local_upload_lease(asset_id=asset.id, nonce=nonce))
             release_local_upload(asset_id=asset.id, nonce=nonce, success=True)
         except StorageValidationError as exc:
             release_local_upload(asset_id=asset.id, nonce=nonce, success=False)

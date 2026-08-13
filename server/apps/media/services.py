@@ -135,6 +135,13 @@ def release_local_upload(*, asset_id: UUID, nonce: UUID, success: bool) -> None:
         locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
 
 
+def verify_local_upload_lease(*, asset_id: UUID, nonce: UUID) -> None:
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+        if locked.status != MediaAsset.Status.RECEIVING or locked.upload_nonce != nonce or locked.upload_lease_expires_at <= timezone.now():
+            raise MediaConflict("上传租约已失效", code="media_upload_lease_invalid")
+
+
 def complete_qiniu_callback(*, payload: Mapping[str, Any], backend: QiniuStorageBackend) -> MediaAsset:
     object_key = str(payload.get("key", ""))
     with transaction.atomic():

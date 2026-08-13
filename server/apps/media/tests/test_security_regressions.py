@@ -1,5 +1,6 @@
 import hashlib
 import io
+from uuid import uuid4
 import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -118,6 +119,20 @@ def test_local_stat_is_streaming_and_preserves_trusted_mime(tmp_path, monkeypatc
     assert stat.size == 1024 * 1024 + 3
     assert stat.mime == "audio/mpeg"
     assert stat.sha256 == hashlib.sha256(b"x" * (1024 * 1024 + 3)).hexdigest()
+
+
+def test_manifest_publish_failure_keeps_previous_download_and_removes_orphan_blob(tmp_path, monkeypatch):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="s", environment="test")
+    grant = backend.create_upload_grant(owner_id=uuid4(), media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg")
+    original = backend.stat(grant.object_key)
+    import os
+    original_replace = os.replace
+    monkeypatch.setattr("apps.media.backends.local.os.replace", lambda source, target: (_ for _ in ()).throw(OSError("manifest failure")) if ".manifests" in str(target) else original_replace(source, target))
+    with pytest.raises(OSError):
+        backend.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg")
+    assert backend.stat(grant.object_key).sha256 == original.sha256
+    assert not list((tmp_path / ".blobs").glob(".upload-*"))
 
 
 @pytest.mark.parametrize("environment", ["prod/evil", "prod?x", "prod#x", "prod%2f", "prod space", "..", ""])

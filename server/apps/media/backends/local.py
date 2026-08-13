@@ -70,7 +70,7 @@ class LocalStorageBackend:
         )
         return UploadGrant(object_key=key, expires_at=expires_at, upload_token=token)
 
-    def write_authorized_stream(self, *, object_key: str, token: str, stream: BinaryIO, mime: str) -> None:
+    def write_authorized_stream(self, *, object_key: str, token: str, stream: BinaryIO, mime: str, before_publish=None) -> None:
         claim = self._read_token(token)
         if claim.get("object_key") != object_key or claim.get("mime") != mime:
             raise StorageValidationError("上传内容与凭证不一致")
@@ -94,6 +94,8 @@ class LocalStorageBackend:
             blob_id = uuid4().hex
             blob_path = self._blob_path(blob_id)
             os.replace(temporary_path, blob_path)
+            if before_publish:
+                before_publish()
             manifest_tmp = NamedTemporaryFile(dir=self._manifest_path(object_key).parent, prefix=".manifest-", delete=False, mode="w", encoding="utf-8")
             with manifest_tmp:
                 json.dump({"blob": blob_id, "mime": mime, "size": size, "sha256": digest.hexdigest()}, manifest_tmp)
@@ -101,6 +103,8 @@ class LocalStorageBackend:
             os.replace(manifest_tmp.name, self._manifest_path(object_key))
         except Exception:
             temporary_path.unlink(missing_ok=True)
+            if 'blob_path' in locals():
+                blob_path.unlink(missing_ok=True)
             raise
 
     def write_upload(self, *, grant: UploadGrant, content: bytes, mime: str) -> None:
