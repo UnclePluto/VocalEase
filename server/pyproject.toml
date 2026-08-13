@@ -1,0 +1,21 @@
+[project]
+name = "vocaease-server"
+version = "0.1.0"
+description = "VocaEase server"
+requires-python = ">=3.12"
+dependencies = [
+    "celery[redis]>=5.5,<6",
+    "Django>=5.2,<5.3",
+    "djangorestframework>=3.16,<4",
+    "psycopg[binary]>=3.2,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-django>=4.9,<5",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "vocaease.settings.test"
+python_files = ["test_*.py"]
