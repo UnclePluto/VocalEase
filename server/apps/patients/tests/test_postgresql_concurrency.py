@@ -1,10 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
-from threading import Event
+from threading import Barrier, Event
 from time import monotonic, sleep
 
 import pytest
-from django.db import connection, connections
+from django.db import connection, connections, transaction
 from rest_framework.exceptions import ValidationError
 
 from apps.accounts.models import Role, User
@@ -75,23 +75,92 @@ def test_postgresql_sequence_rows_are_preseeded_and_concurrent_numbers_are_uniqu
 
     assert set(SequenceCounter.objects.values_list("prefix", flat=True)) == {"D", "P"}
 
+    def create_numbered_doctor(index):
+        try:
+            return _doctor(index).employee_no
+        finally:
+            connections.close_all()
+
     with ThreadPoolExecutor(max_workers=4) as executor:
-        numbers = list(executor.map(lambda index: _doctor(index).employee_no, range(1, 5)))
+        numbers = list(executor.map(create_numbered_doctor, range(1, 5)))
 
     assert sorted(numbers) == ["D0001", "D0002", "D0003", "D0004"]
 
     doctors = list(DoctorProfile.objects.order_by("employee_no"))
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        patient_numbers = list(executor.map(
-            lambda item: create_patient(
+    start_barrier = Barrier(5)
+    contender_pids = Queue(maxsize=4)
+
+    def create_numbered_patient(item):
+        try:
+            contender_pids.put(_current_backend_pid(), timeout=LOCK_TIMEOUT_SECONDS)
+            start_barrier.wait(timeout=LOCK_TIMEOUT_SECONDS)
+            return create_patient(
                 name=f"编号患者{item[0]}", gender="female", enrollment_age=20 + item[0],
                 phone=f"13780000{item[0]:03d}", doctor=item[1],
                 start_date="2026-01-01", cycle_weeks=1,
-            ).medical_record_no,
-            enumerate(doctors, start=1),
-        ))
+            ).medical_record_no
+        finally:
+            connections.close_all()
+
+    executor = ThreadPoolExecutor(max_workers=4)
+    futures = [executor.submit(create_numbered_patient, item) for item in enumerate(doctors, start=1)]
+    try:
+        with transaction.atomic():
+            from apps.doctors.models import SequenceCounter
+
+            SequenceCounter.objects.select_for_update().get(prefix="P")
+            start_barrier.wait(timeout=LOCK_TIMEOUT_SECONDS)
+            pids = [contender_pids.get(timeout=LOCK_TIMEOUT_SECONDS) for _ in range(4)]
+            for pid in pids:
+                _wait_until_backend_is_lock_waiting(pid)
+        patient_numbers = [future.result(timeout=LOCK_TIMEOUT_SECONDS) for future in futures]
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
     assert sorted(patient_numbers) == ["P000001", "P000002", "P000003", "P000004"]
+
+
+def test_doctor_delete_locks_pending_patient_before_inspecting_plans(monkeypatch, admin_user):
+    doctor = _doctor(1)
+    patient = create_patient(
+        name="待开始患者", gender="female", enrollment_age=30, phone="13790000004",
+        doctor=doctor, start_date="2026-01-01", cycle_weeks=4,
+    )
+    patient_locked = Event()
+    allow_patient_unlock = Event()
+    contender_pid = Queue(maxsize=1)
+
+    def hold_patient_lock():
+        try:
+            with transaction.atomic():
+                PatientProfile.objects.select_for_update().get(pk=patient.pk)
+                patient_locked.set()
+                assert allow_patient_unlock.wait(timeout=LOCK_TIMEOUT_SECONDS)
+        finally:
+            connections.close_all()
+
+    def delete_doctor():
+        try:
+            contender_pid.put(_current_backend_pid(), timeout=LOCK_TIMEOUT_SECONDS)
+            return soft_delete_doctor(
+                actor=admin_user,
+                doctor=doctor,
+                request_id="pg-doctor-delete-lock-order",
+            )
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holding = executor.submit(hold_patient_lock)
+        assert patient_locked.wait(timeout=LOCK_TIMEOUT_SECONDS)
+        deleting = executor.submit(delete_doctor)
+        _wait_until_backend_is_lock_waiting(contender_pid.get(timeout=LOCK_TIMEOUT_SECONDS))
+        allow_patient_unlock.set()
+        holding.result(timeout=LOCK_TIMEOUT_SECONDS)
+        deleting.result(timeout=LOCK_TIMEOUT_SECONDS)
+
+    doctor.refresh_from_db()
+    assert doctor.deleted_at is not None
 
 
 def test_patient_creation_waits_for_doctor_delete_and_rejects_deleted_doctor(monkeypatch, admin_user):

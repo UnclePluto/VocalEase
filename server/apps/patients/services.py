@@ -17,6 +17,10 @@ class PatientHasNoCurrentTreatmentPlan(APIException):
     default_code = "patient_has_no_current_treatment_plan"
 
 
+class PatientDoctorAssociationChanged(Exception):
+    """Internal retry signal; never exposed outside the service transaction."""
+
+
 def _lock_doctor(doctor_id):
     try:
         return DoctorProfile.objects.select_for_update().select_related("user").get(pk=doctor_id)
@@ -37,14 +41,72 @@ def _lock_active_doctor(doctor_id):
     return doctor
 
 
+def _validate_active_doctor(doctor):
+    user = doctor.user
+    if (
+        doctor.deleted_at is not None
+        or user.role != Role.DOCTOR
+        or not user.is_active
+        or user.deleted_at is not None
+    ):
+        raise ValidationError({"primary_doctor": "主治医生不存在或不可用"})
+
+
+def _with_patient_doctor_locks(
+    *,
+    patient_id,
+    operation,
+    requested_doctor_id=None,
+    require_current_doctor_active=True,
+    attempts=3,
+):
+    """Optimistic read, deterministic doctor locks, patient lock, then recheck.
+
+    Only a changed patient->doctor association is retried. Database errors are
+    deliberately not caught here.
+    """
+    for attempt in range(attempts):
+        try:
+            with transaction.atomic():
+                observed_doctor_id = PatientProfile.objects.values_list(
+                    "primary_doctor_id", flat=True
+                ).get(pk=patient_id, deleted_at__isnull=True)
+                doctor_ids = {observed_doctor_id}
+                if requested_doctor_id is not None:
+                    doctor_ids.add(requested_doctor_id)
+                locked_doctors = {
+                    doctor.pk: doctor
+                    for doctor in DoctorProfile.objects.select_for_update()
+                    .select_related("user")
+                    .filter(pk__in=doctor_ids)
+                    .order_by("id")
+                }
+                if len(locked_doctors) != len(doctor_ids):
+                    raise ValidationError({"primary_doctor": "主治医生不存在或不可用"})
+                locked_patient = PatientProfile.objects.select_for_update().get(
+                    pk=patient_id,
+                    deleted_at__isnull=True,
+                )
+                if locked_patient.primary_doctor_id != observed_doctor_id:
+                    raise PatientDoctorAssociationChanged
+                current_doctor = locked_doctors[observed_doctor_id]
+                if require_current_doctor_active:
+                    _validate_active_doctor(current_doctor)
+                requested_doctor = None
+                if requested_doctor_id is not None:
+                    requested_doctor = locked_doctors[requested_doctor_id]
+                    _validate_active_doctor(requested_doctor)
+                return operation(locked_patient, current_doctor, requested_doctor)
+        except PatientDoctorAssociationChanged:
+            if attempt == attempts - 1:
+                raise ValidationError({"primary_doctor": "主治医生关联已变化，请重试"})
+    raise RuntimeError("患者主治医生锁定失败")
+
+
 def create_treatment_plan(*, patient, start_date, cycle_weeks, status=TreatmentPlan.Status.PENDING):
-    """Lock order: DoctorProfile, PatientProfile, then TreatmentPlan creation."""
-    with transaction.atomic():
-        _lock_active_doctor(patient.primary_doctor_id)
-        locked_patient = PatientProfile.objects.select_for_update().get(
-            pk=patient.pk,
-            deleted_at__isnull=True,
-        )
+    """Use the database's current doctor relation; never trust patient cache."""
+
+    def create(locked_patient, current_doctor, requested_doctor):
         return TreatmentPlan.objects.create(
             patient=locked_patient,
             start_date=start_date,
@@ -53,43 +115,48 @@ def create_treatment_plan(*, patient, start_date, cycle_weeks, status=TreatmentP
             status=status,
         )
 
+    return _with_patient_doctor_locks(
+        patient_id=patient.pk,
+        operation=create,
+        require_current_doctor_active=True,
+    )
+
+
+def _update_locked_plan_status(*, actor, plan, status, request_id, locked_patient):
+    locked_plan = TreatmentPlan.objects.select_for_update().get(
+        pk=plan.pk,
+        patient=locked_patient,
+        deleted_at__isnull=True,
+    )
+    previous = locked_plan.status
+    locked_plan.status = status
+    locked_plan.save(update_fields=["status", "updated_at"])
+    record(
+        actor=actor,
+        action="treatment_plan.status_changed",
+        target=locked_plan,
+        changes={"status": {"from": previous, "to": status}},
+        request_id=request_id,
+    )
+    return locked_plan
+
 
 def transition_treatment_plan_status(*, actor, plan, status, request_id: str):
-    """Lock order: DoctorProfile, PatientProfile, then TreatmentPlan."""
+    """Lock current database doctor, patient, then the plan."""
     if status not in TreatmentPlan.Status.values:
         raise ValidationError({"status": "治疗计划状态无效"})
-    doctor_id = plan.patient.primary_doctor_id
-    with transaction.atomic():
-        locked_doctor = _lock_doctor(doctor_id)
-        if status in {TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE}:
-            if (
-                locked_doctor.deleted_at is not None
-                or locked_doctor.user.role != Role.DOCTOR
-                or not locked_doctor.user.is_active
-                or locked_doctor.user.deleted_at is not None
-            ):
-                raise ValidationError({"primary_doctor": "主治医生不存在或不可用"})
-        PatientProfile.objects.select_for_update().get(
-            pk=plan.patient_id,
-            primary_doctor=locked_doctor,
-            deleted_at__isnull=True,
-        )
-        locked_plan = TreatmentPlan.objects.select_for_update().get(
-            pk=plan.pk,
-            patient_id=plan.patient_id,
-            deleted_at__isnull=True,
-        )
-        previous = locked_plan.status
-        locked_plan.status = status
-        locked_plan.save(update_fields=["status", "updated_at"])
-        record(
+    require_active = status in {TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE}
+    return _with_patient_doctor_locks(
+        patient_id=plan.patient_id,
+        require_current_doctor_active=require_active,
+        operation=lambda locked_patient, current_doctor, requested_doctor: _update_locked_plan_status(
             actor=actor,
-            action="treatment_plan.status_changed",
-            target=locked_plan,
-            changes={"status": {"from": previous, "to": status}},
+            plan=plan,
+            status=status,
             request_id=request_id,
+            locked_patient=locked_patient,
         )
-        return locked_plan
+    )
 
 
 def _create_patient_once(*, name, gender, enrollment_age, phone, doctor, start_date, cycle_weeks, notes, actor, request_id):
@@ -137,13 +204,11 @@ def update_patient(*, actor, patient, request_id: str, **changes):
     plan_changes = {key: value for key, value in changes.items() if key in {"start_date", "cycle_weeks"}}
     if not editable and not plan_changes:
         return patient
-    with transaction.atomic():
-        requested_doctor = editable.get("primary_doctor")
-        doctor_id = requested_doctor.pk if requested_doctor is not None else patient.primary_doctor_id
-        locked_doctor = _lock_active_doctor(doctor_id)
-        locked = PatientProfile.objects.select_for_update().get(pk=patient.pk, deleted_at__isnull=True)
+    requested_doctor = editable.get("primary_doctor")
+
+    def update(locked, current_doctor, locked_requested_doctor):
         if "primary_doctor" in editable:
-            editable["primary_doctor"] = locked_doctor
+            editable["primary_doctor"] = locked_requested_doctor
         before = {key: str(getattr(locked, f"{key}_id")) if key == "primary_doctor" else getattr(locked, key) for key in editable}
         for key, value in editable.items():
             setattr(locked, key, value)
@@ -182,15 +247,17 @@ def update_patient(*, actor, patient, request_id: str, **changes):
             )
         return locked
 
+    return _with_patient_doctor_locks(
+        patient_id=patient.pk,
+        requested_doctor_id=requested_doctor.pk if requested_doctor is not None else None,
+        require_current_doctor_active=requested_doctor is None,
+        operation=update,
+    )
+
 
 def soft_delete_patient(*, actor, patient, request_id: str):
-    with transaction.atomic():
-        # Global plan-write lock order: DoctorProfile -> PatientProfile -> TreatmentPlan.
-        _lock_doctor(patient.primary_doctor_id)
-        locked = PatientProfile.objects.select_for_update().select_related("user").get(
-            pk=patient.pk,
-            deleted_at__isnull=True,
-        )
+    def delete(locked, current_doctor, requested_doctor):
+        locked = PatientProfile.objects.select_related("user").get(pk=locked.pk)
         current_plans = list(
             TreatmentPlan.objects.select_for_update().filter(
                 patient=locked,
@@ -214,3 +281,9 @@ def soft_delete_patient(*, actor, patient, request_id: str):
         locked.save(update_fields=["deleted_at"])
         record(actor=actor, action="patient.delete", target=locked, changes={"deleted": True}, request_id=request_id)
         return locked
+
+    return _with_patient_doctor_locks(
+        patient_id=patient.pk,
+        operation=delete,
+        require_current_doctor_active=False,
+    )

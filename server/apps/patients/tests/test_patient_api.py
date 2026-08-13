@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, connection, connections, transaction
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
@@ -13,6 +13,7 @@ from apps.doctors.services import create_doctor, soft_delete_doctor
 from apps.patients.models import PatientProfile, TreatmentPlan
 from apps.patients.services import (
     create_patient,
+    create_treatment_plan,
     soft_delete_patient,
     transition_treatment_plan_status,
     update_patient,
@@ -88,10 +89,13 @@ def test_concurrent_patient_number_generation_does_not_duplicate_numbers(doctor)
     if connection.vendor != "postgresql":
         pytest.skip("并发编号由真实 PostgreSQL 行锁测试证明")
     def create(index):
-        return create_patient(
-            name=f"并发患者{index}", gender="male", enrollment_age=20 + index,
-            phone=f"13700000{index:03d}", doctor=doctor, start_date="2026-01-01", cycle_weeks=1,
-        ).medical_record_no
+        try:
+            return create_patient(
+                name=f"并发患者{index}", gender="male", enrollment_age=20 + index,
+                phone=f"13700000{index:03d}", doctor=doctor, start_date="2026-01-01", cycle_weeks=1,
+            ).medical_record_no
+        finally:
+            connections.close_all()
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         numbers = list(executor.map(create, range(1, 5)))
@@ -268,6 +272,57 @@ def test_treatment_plan_activation_rejects_deleted_doctor(patient, doctor):
     assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
     plan.refresh_from_db()
     assert plan.status == TreatmentPlan.Status.PENDING
+
+
+@pytest.mark.django_db
+def test_create_plan_uses_current_database_doctor_not_stale_patient_relation(admin_user, patient):
+    stale_patient = PatientProfile.objects.get(pk=patient.pk)
+    current_doctor = create_doctor(
+        name="现主治医生", gender="female", phone="13600000009", department="康复科", title="医师"
+    )
+    PatientProfile.objects.filter(pk=patient.pk).update(primary_doctor=current_doctor)
+    soft_delete_doctor(
+        actor=admin_user,
+        doctor=current_doctor,
+        request_id="delete-current-doctor-before-plan-create",
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        create_treatment_plan(
+            patient=stale_patient,
+            start_date="2026-05-01",
+            cycle_weeks=2,
+            status=TreatmentPlan.Status.ACTIVE,
+        )
+
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
+    assert patient.treatment_plans.count() == 1
+
+
+@pytest.mark.django_db
+def test_patient_update_without_reassignment_uses_current_database_doctor(admin_user, patient):
+    stale_patient = PatientProfile.objects.get(pk=patient.pk)
+    current_doctor = create_doctor(
+        name="已删现主治", gender="male", phone="13600000008", department="康复科", title="医师"
+    )
+    PatientProfile.objects.filter(pk=patient.pk).update(primary_doctor=current_doctor)
+    soft_delete_doctor(
+        actor=admin_user,
+        doctor=current_doctor,
+        request_id="delete-current-doctor-before-patient-patch",
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        update_patient(
+            actor=admin_user,
+            patient=stale_patient,
+            request_id="stale-patient-patch",
+            phone="13500000888",
+        )
+
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
+    patient.refresh_from_db()
+    assert patient.phone == "13500000001"
 
 
 @pytest.mark.django_db

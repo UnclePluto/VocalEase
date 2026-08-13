@@ -105,15 +105,27 @@ def update_doctor(*, actor, doctor, request_id: str, **changes):
 
 def soft_delete_doctor(*, actor, doctor, request_id: str):
     from apps.patients.models import TreatmentPlan
+    from apps.patients.models import PatientProfile
 
     with transaction.atomic():
         locked = DoctorProfile.objects.select_for_update().select_related("user").get(pk=doctor.pk, deleted_at__isnull=True)
-        if TreatmentPlan.objects.select_for_update().filter(
-            patient__primary_doctor=locked,
-            patient__deleted_at__isnull=True,
-            status=TreatmentPlan.Status.ACTIVE,
-            deleted_at__isnull=True,
-        ).exists():
+        # Canonical order: DoctorProfile -> PatientProfile -> TreatmentPlan.
+        patients = list(
+            PatientProfile.objects.select_for_update()
+            .filter(primary_doctor=locked, deleted_at__isnull=True)
+            .order_by("id")
+        )
+        current_plans = list(
+            TreatmentPlan.objects.select_for_update().filter(
+                patient__in=patients,
+                status__in=[TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE],
+                deleted_at__isnull=True,
+            ).order_by("id")
+        )
+        if any(
+            plan.status == TreatmentPlan.Status.ACTIVE
+            for plan in current_plans
+        ):
             raise DoctorHasActivePatients()
         update_account_security_state(actor=actor, target=locked.user, is_active=False, deleted=True, request_id=request_id)
         locked.deleted_at = timezone.now()

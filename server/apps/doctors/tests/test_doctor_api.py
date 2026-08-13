@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from django.db import IntegrityError, OperationalError, connection
+from django.db import IntegrityError, OperationalError, connection, connections
 from rest_framework.test import APIClient
 
 from apps.accounts.models import RefreshToken, Role, User
@@ -80,9 +80,12 @@ def test_concurrent_doctor_number_generation_does_not_duplicate_numbers():
     if connection.vendor != "postgresql":
         pytest.skip("并发编号由真实 PostgreSQL 行锁测试证明")
     def create(index):
-        return create_doctor(
-            name=f"并发医生{index}", gender="male", phone=f"13900000{index:03d}", department="康复科", title="医师",
-        ).employee_no
+        try:
+            return create_doctor(
+                name=f"并发医生{index}", gender="male", phone=f"13900000{index:03d}", department="康复科", title="医师",
+            ).employee_no
+        finally:
+            connections.close_all()
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         numbers = list(executor.map(create, range(1, 5)))
@@ -206,6 +209,22 @@ def test_deleted_active_plan_does_not_block_doctor_deletion(api_client, admin_us
     plan.status = "active"
     plan.deleted_at = __import__("django.utils.timezone", fromlist=["now"]).now()
     plan.save(update_fields=["status", "deleted_at"])
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.delete(f"/api/v1/admin/doctors/{doctor.id}/")
+
+    assert response.status_code == 204
+
+
+@pytest.mark.django_db
+def test_deleted_patient_history_does_not_block_doctor_deletion(api_client, admin_user, doctor):
+    patient = create_patient(
+        name="已归档患者", gender="male", enrollment_age=30, phone="13700000010", doctor=doctor,
+        start_date="2026-01-01", cycle_weeks=4,
+    )
+    patient.treatment_plans.update(status="active")
+    patient.deleted_at = __import__("django.utils.timezone", fromlist=["now"]).now()
+    patient.save(update_fields=["deleted_at"])
     api_client.force_authenticate(admin_user)
 
     response = api_client.delete(f"/api/v1/admin/doctors/{doctor.id}/")
