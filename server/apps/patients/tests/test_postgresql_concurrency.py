@@ -1,17 +1,25 @@
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 from threading import Event
+from time import monotonic, sleep
 
 import pytest
 from django.db import connection, connections
+from rest_framework.exceptions import ValidationError
 
 from apps.accounts.models import Role, User
 from apps.doctors.models import DoctorProfile
 from apps.doctors.services import create_doctor, soft_delete_doctor
-from apps.patients.models import PatientProfile
-from apps.patients.services import create_patient, update_patient
+from apps.patients.models import PatientProfile, TreatmentPlan
+from apps.patients.services import (
+    create_patient,
+    transition_treatment_plan_status,
+    update_patient,
+)
 
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
+LOCK_TIMEOUT_SECONDS = 5
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +49,27 @@ def _doctor(index):
     )
 
 
+def _current_backend_pid():
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_backend_pid()")
+        return cursor.fetchone()[0]
+
+
+def _wait_until_backend_is_lock_waiting(pid):
+    deadline = monotonic() + LOCK_TIMEOUT_SECONDS
+    while monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                [pid],
+            )
+            row = cursor.fetchone()
+        if row and row[0] == "Lock":
+            return
+        sleep(0.02)
+    pytest.fail(f"PostgreSQL backend {pid} 未在 {LOCK_TIMEOUT_SECONDS} 秒内进入锁等待")
+
+
 def test_postgresql_sequence_rows_are_preseeded_and_concurrent_numbers_are_unique():
     from apps.doctors.models import SequenceCounter
 
@@ -51,15 +80,15 @@ def test_postgresql_sequence_rows_are_preseeded_and_concurrent_numbers_are_uniqu
 
     assert sorted(numbers) == ["D0001", "D0002", "D0003", "D0004"]
 
-    doctor = DoctorProfile.objects.order_by("employee_no").first()
+    doctors = list(DoctorProfile.objects.order_by("employee_no"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         patient_numbers = list(executor.map(
-            lambda index: create_patient(
-                name=f"编号患者{index}", gender="female", enrollment_age=20 + index,
-                phone=f"13780000{index:03d}", doctor=doctor,
+            lambda item: create_patient(
+                name=f"编号患者{item[0]}", gender="female", enrollment_age=20 + item[0],
+                phone=f"13780000{item[0]:03d}", doctor=item[1],
                 start_date="2026-01-01", cycle_weeks=1,
             ).medical_record_no,
-            range(1, 5),
+            enumerate(doctors, start=1),
         ))
 
     assert sorted(patient_numbers) == ["P000001", "P000002", "P000003", "P000004"]
@@ -69,11 +98,12 @@ def test_patient_creation_waits_for_doctor_delete_and_rejects_deleted_doctor(mon
     doctor = _doctor(1)
     delete_locked = Event()
     allow_delete = Event()
+    contender_pid = Queue(maxsize=1)
     original = __import__("apps.doctors.services", fromlist=["update_account_security_state"]).update_account_security_state
 
     def pause_after_doctor_lock(**kwargs):
         delete_locked.set()
-        assert allow_delete.wait(timeout=5)
+        assert allow_delete.wait(timeout=LOCK_TIMEOUT_SECONDS)
         return original(**kwargs)
 
     monkeypatch.setattr("apps.doctors.services.update_account_security_state", pause_after_doctor_lock)
@@ -86,6 +116,7 @@ def test_patient_creation_waits_for_doctor_delete_and_rejects_deleted_doctor(mon
 
     def create():
         try:
+            contender_pid.put(_current_backend_pid(), timeout=LOCK_TIMEOUT_SECONDS)
             return create_patient(
                 name="竞态患者", gender="female", enrollment_age=30, phone="13790000001",
                 doctor=doctor, start_date="2026-01-01", cycle_weeks=4,
@@ -95,13 +126,15 @@ def test_patient_creation_waits_for_doctor_delete_and_rejects_deleted_doctor(mon
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         deleting = executor.submit(delete)
-        assert delete_locked.wait(timeout=5)
+        assert delete_locked.wait(timeout=LOCK_TIMEOUT_SECONDS)
         creating = executor.submit(create)
+        _wait_until_backend_is_lock_waiting(contender_pid.get(timeout=LOCK_TIMEOUT_SECONDS))
         allow_delete.set()
-        deleting.result(timeout=5)
-        with pytest.raises(Exception):
-            creating.result(timeout=5)
+        deleting.result(timeout=LOCK_TIMEOUT_SECONDS)
+        with pytest.raises(ValidationError) as exc_info:
+            creating.result(timeout=LOCK_TIMEOUT_SECONDS)
 
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
     assert not PatientProfile.objects.filter(primary_doctor=doctor).exists()
 
 
@@ -114,11 +147,12 @@ def test_patient_update_waits_for_doctor_delete_and_keeps_original_doctor(monkey
     )
     delete_locked = Event()
     allow_delete = Event()
+    contender_pid = Queue(maxsize=1)
     original = __import__("apps.doctors.services", fromlist=["update_account_security_state"]).update_account_security_state
 
     def pause_after_doctor_lock(**kwargs):
         delete_locked.set()
-        assert allow_delete.wait(timeout=5)
+        assert allow_delete.wait(timeout=LOCK_TIMEOUT_SECONDS)
         return original(**kwargs)
 
     monkeypatch.setattr("apps.doctors.services.update_account_security_state", pause_after_doctor_lock)
@@ -126,15 +160,14 @@ def test_patient_update_waits_for_doctor_delete_and_keeps_original_doctor(monkey
     def delete():
         try:
             return soft_delete_doctor(
-                actor=admin_user,
-                doctor=deleting_doctor,
-                request_id="pg-delete-update-race",
+                actor=admin_user, doctor=deleting_doctor, request_id="pg-delete-update-race"
             )
         finally:
             connections.close_all()
 
     def update():
         try:
+            contender_pid.put(_current_backend_pid(), timeout=LOCK_TIMEOUT_SECONDS)
             return update_patient(
                 actor=admin_user,
                 patient=patient,
@@ -146,12 +179,74 @@ def test_patient_update_waits_for_doctor_delete_and_keeps_original_doctor(monkey
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         deleting = executor.submit(delete)
-        assert delete_locked.wait(timeout=5)
+        assert delete_locked.wait(timeout=LOCK_TIMEOUT_SECONDS)
         updating = executor.submit(update)
+        _wait_until_backend_is_lock_waiting(contender_pid.get(timeout=LOCK_TIMEOUT_SECONDS))
         allow_delete.set()
-        deleting.result(timeout=5)
-        with pytest.raises(Exception):
-            updating.result(timeout=5)
+        deleting.result(timeout=LOCK_TIMEOUT_SECONDS)
+        with pytest.raises(ValidationError) as exc_info:
+            updating.result(timeout=LOCK_TIMEOUT_SECONDS)
 
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
     patient.refresh_from_db()
     assert patient.primary_doctor_id == original_doctor.id
+
+
+def test_plan_activation_and_doctor_delete_preserve_final_invariant(monkeypatch, admin_user):
+    doctor = _doctor(1)
+    patient = create_patient(
+        name="待激活患者", gender="female", enrollment_age=30, phone="13790000003",
+        doctor=doctor, start_date="2026-01-01", cycle_weeks=4,
+    )
+    plan = patient.treatment_plans.get()
+    delete_locked = Event()
+    allow_delete = Event()
+    contender_pid = Queue(maxsize=1)
+    original = __import__("apps.doctors.services", fromlist=["update_account_security_state"]).update_account_security_state
+
+    def pause_after_doctor_lock(**kwargs):
+        delete_locked.set()
+        assert allow_delete.wait(timeout=LOCK_TIMEOUT_SECONDS)
+        return original(**kwargs)
+
+    monkeypatch.setattr("apps.doctors.services.update_account_security_state", pause_after_doctor_lock)
+
+    def delete():
+        try:
+            return soft_delete_doctor(
+                actor=admin_user, doctor=doctor, request_id="pg-delete-activate-race"
+            )
+        finally:
+            connections.close_all()
+
+    def activate():
+        try:
+            contender_pid.put(_current_backend_pid(), timeout=LOCK_TIMEOUT_SECONDS)
+            return transition_treatment_plan_status(
+                actor=admin_user,
+                plan=plan,
+                status=TreatmentPlan.Status.ACTIVE,
+                request_id="pg-activate-delete-race",
+            )
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        deleting = executor.submit(delete)
+        assert delete_locked.wait(timeout=LOCK_TIMEOUT_SECONDS)
+        activating = executor.submit(activate)
+        _wait_until_backend_is_lock_waiting(contender_pid.get(timeout=LOCK_TIMEOUT_SECONDS))
+        allow_delete.set()
+        deleting.result(timeout=LOCK_TIMEOUT_SECONDS)
+        with pytest.raises(ValidationError) as exc_info:
+            activating.result(timeout=LOCK_TIMEOUT_SECONDS)
+
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
+    doctor.refresh_from_db()
+    plan.refresh_from_db()
+    assert doctor.deleted_at is not None
+    assert not TreatmentPlan.objects.filter(
+        patient__primary_doctor=doctor,
+        status=TreatmentPlan.Status.ACTIVE,
+        deleted_at__isnull=True,
+    ).exists()

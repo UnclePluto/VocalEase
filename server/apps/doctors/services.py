@@ -108,7 +108,7 @@ def soft_delete_doctor(*, actor, doctor, request_id: str):
 
     with transaction.atomic():
         locked = DoctorProfile.objects.select_for_update().select_related("user").get(pk=doctor.pk, deleted_at__isnull=True)
-        if TreatmentPlan.objects.filter(
+        if TreatmentPlan.objects.select_for_update().filter(
             patient__primary_doctor=locked,
             patient__deleted_at__isnull=True,
             status=TreatmentPlan.Status.ACTIVE,

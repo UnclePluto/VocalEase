@@ -2,15 +2,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from django.db import IntegrityError, connection, transaction
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
 from apps.accounts.models import RefreshToken, Role, User
 from apps.accounts.tokens import issue_token_pair
 from apps.audit.models import AuditLog
 from apps.doctors.models import SequenceCounter
-from apps.doctors.services import create_doctor
+from apps.doctors.services import create_doctor, soft_delete_doctor
 from apps.patients.models import PatientProfile, TreatmentPlan
-from apps.patients.services import create_patient, soft_delete_patient, update_patient
+from apps.patients.services import (
+    create_patient,
+    soft_delete_patient,
+    transition_treatment_plan_status,
+    update_patient,
+)
 
 
 @pytest.fixture
@@ -188,9 +194,10 @@ def test_patient_service_revalidates_primary_doctor_inside_transaction(patient, 
     setattr(doctor.user, unsafe_state, value)
     doctor.user.save(update_fields=[unsafe_state])
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError) as exc_info:
         update_patient(actor=None, patient=patient, request_id="unsafe-doctor", primary_doctor=doctor)
 
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
     patient.refresh_from_db()
     assert patient.primary_doctor_id == doctor.id
 
@@ -245,6 +252,25 @@ def test_patient_has_at_most_one_active_treatment_plan(patient):
 
 
 @pytest.mark.django_db
+def test_treatment_plan_activation_rejects_deleted_doctor(patient, doctor):
+    plan = patient.treatment_plans.get()
+    doctor.deleted_at = __import__("django.utils.timezone", fromlist=["now"]).now()
+    doctor.save(update_fields=["deleted_at"])
+
+    with pytest.raises(ValidationError) as exc_info:
+        transition_treatment_plan_status(
+            actor=None,
+            plan=plan,
+            status=TreatmentPlan.Status.ACTIVE,
+            request_id="activate-deleted-doctor",
+        )
+
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
+    plan.refresh_from_db()
+    assert plan.status == TreatmentPlan.Status.PENDING
+
+
+@pytest.mark.django_db
 def test_delete_patient_keeps_history_root_revokes_refresh_and_audits(api_client, doctor_user, patient):
     pair = issue_token_pair(patient.user)
     api_client.force_authenticate(doctor_user)
@@ -257,8 +283,45 @@ def test_delete_patient_keeps_history_root_revokes_refresh_and_audits(api_client
     assert patient.deleted_at is not None
     assert patient.user.is_active is False
     assert patient.user.deleted_at is not None
+    plan = patient.treatment_plans.get()
+    assert plan.deleted_at is not None
+    assert not TreatmentPlan.objects.filter(
+        pk=plan.pk,
+        deleted_at__isnull=True,
+        status__in=[TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE],
+    ).exists()
     assert RefreshToken.objects.get(token_hash=RefreshToken.digest(pair.refresh)).revoked_at is not None
     assert AuditLog.objects.filter(action="patient.delete", target_id=patient.id, request_id="patient-delete-1").exists()
+
+
+@pytest.mark.django_db
+def test_patient_deletion_closes_current_plans_and_allows_doctor_deletion(admin_user, patient, doctor):
+    plan = patient.treatment_plans.get()
+    transition_treatment_plan_status(
+        actor=admin_user,
+        plan=plan,
+        status=TreatmentPlan.Status.ACTIVE,
+        request_id="activate-before-patient-delete",
+    )
+
+    soft_delete_patient(actor=admin_user, patient=patient, request_id="patient-delete-before-doctor")
+    soft_delete_doctor(actor=admin_user, doctor=doctor, request_id="doctor-delete-after-patient")
+
+    plan.refresh_from_db()
+    doctor.refresh_from_db()
+    assert plan.deleted_at is not None
+    assert doctor.deleted_at is not None
+
+
+@pytest.mark.django_db
+def test_patient_with_pending_plan_can_be_deleted_after_doctor_deletion(admin_user, patient, doctor):
+    soft_delete_doctor(actor=admin_user, doctor=doctor, request_id="doctor-delete-before-patient")
+
+    soft_delete_patient(actor=admin_user, patient=patient, request_id="patient-delete-after-doctor")
+
+    patient.refresh_from_db()
+    assert patient.deleted_at is not None
+    assert patient.treatment_plans.get().deleted_at is not None
 
 
 @pytest.mark.django_db
