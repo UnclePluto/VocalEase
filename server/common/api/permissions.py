@@ -28,3 +28,20 @@ class SystemAdminPermission(BasePermission):
             and request.user.deleted_at is None
             and not request.user.must_change_password
         )
+
+
+class IsAdminNamespaceUser(BasePermission):
+    """后台业务域由系统管理员和状态正常的医生共同管理。"""
+
+    message = "仅系统管理员或医生可访问"
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {Role.SYSTEM_ADMIN, Role.DOCTOR}
+            and user.is_active
+            and user.deleted_at is None
+            and not user.must_change_password
+        )

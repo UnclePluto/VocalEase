@@ -26,6 +26,8 @@ INSTALLED_APPS = [
     "rest_framework",
     "apps.accounts",
     "apps.audit",
+    "apps.doctors",
+    "apps.patients",
 ]
 
 MIDDLEWARE = [
