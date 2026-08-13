@@ -146,7 +146,7 @@ def test_local_upload_complete_and_private_download_are_authorized_and_do_not_ex
 
     upload_response = api_client.put(grant["upload_url"], content, content_type="audio/mpeg")
     assert upload_response.status_code == 204
-    assert (tmp_path / "not-public" / grant["object_key"]).is_file()
+    assert (tmp_path / "not-public" / ".manifests" / f"{grant['object_key']}.json").is_file()
 
     complete_response = api_client.post(
         f"/api/v1/patient/media/{grant['asset_id']}/complete/",

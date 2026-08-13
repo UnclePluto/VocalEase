@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, BinaryIO, Mapping
 from urllib.parse import quote, urlencode
 from uuid import UUID
+from uuid import uuid4
 
 from django.conf import settings
 from django.core import signing
@@ -40,9 +41,12 @@ class LocalStorageBackend:
             raise StorageValidationError("对象键越界")
         return path
 
-    def _metadata_path(self, object_key: str) -> Path:
-        path = self._path(object_key)
-        return path.with_name(f".{path.name}.metadata.json")
+    def _manifest_path(self, object_key: str) -> Path:
+        self._path(object_key)
+        return self.root / ".manifests" / f"{object_key}.json"
+
+    def _blob_path(self, blob_id: str) -> Path:
+        return self.root / ".blobs" / blob_id
 
     def _issue_token(self, value: Mapping[str, Any], ttl_seconds: int):
         expires_at = timezone.now() + timedelta(seconds=ttl_seconds)
@@ -71,8 +75,9 @@ class LocalStorageBackend:
         if claim.get("object_key") != object_key or claim.get("mime") != mime:
             raise StorageValidationError("上传内容与凭证不一致")
         path = self._path(object_key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = NamedTemporaryFile(dir=path.parent, prefix=".upload-", delete=False)
+        self.root.joinpath(".blobs").mkdir(parents=True, exist_ok=True)
+        self._manifest_path(object_key).parent.mkdir(parents=True, exist_ok=True)
+        temporary = NamedTemporaryFile(dir=self.root / ".blobs", prefix=".upload-", delete=False)
         temporary_path = Path(temporary.name)
         digest = hashlib.sha256()
         size = 0
@@ -86,11 +91,14 @@ class LocalStorageBackend:
                     temporary.write(chunk)
             if size != claim["size"]:
                 raise StorageValidationError("上传文件大小与凭证不一致")
-            os.replace(temporary_path, path)
-            metadata_temporary = NamedTemporaryFile(dir=path.parent, prefix=".metadata-", delete=False, mode="w", encoding="utf-8")
-            with metadata_temporary:
-                json.dump({"mime": mime, "size": size, "sha256": digest.hexdigest()}, metadata_temporary)
-            os.replace(metadata_temporary.name, self._metadata_path(object_key))
+            blob_id = uuid4().hex
+            blob_path = self._blob_path(blob_id)
+            os.replace(temporary_path, blob_path)
+            manifest_tmp = NamedTemporaryFile(dir=self._manifest_path(object_key).parent, prefix=".manifest-", delete=False, mode="w", encoding="utf-8")
+            with manifest_tmp:
+                json.dump({"blob": blob_id, "mime": mime, "size": size, "sha256": digest.hexdigest()}, manifest_tmp)
+                manifest_tmp.flush(); os.fsync(manifest_tmp.fileno())
+            os.replace(manifest_tmp.name, self._manifest_path(object_key))
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
@@ -101,16 +109,16 @@ class LocalStorageBackend:
         self.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=BytesIO(content), mime=mime)
 
     def stat(self, object_key: str) -> ObjectMetadata:
-        path = self._path(object_key)
-        metadata_path = self._metadata_path(object_key)
-        if not path.is_file() or not metadata_path.is_file():
+        manifest_path = self._manifest_path(object_key)
+        if not manifest_path.is_file():
             raise StorageValidationError("媒体对象不存在")
         try:
-            with metadata_path.open(encoding="utf-8") as metadata_file:
+            with manifest_path.open(encoding="utf-8") as metadata_file:
                 stored = json.load(metadata_file)
         except (OSError, ValueError, TypeError) as exc:
             raise StorageValidationError("媒体对象元数据损坏") from exc
-        size = path.stat().st_size
+        path = self._blob_path(stored.get("blob", ""))
+        size = path.stat().st_size if path.is_file() else -1
         if size != stored.get("size") or not stored.get("mime") or len(stored.get("sha256", "")) != 64:
             raise StorageValidationError("媒体对象元数据不一致")
         digest = hashlib.sha256()
@@ -126,7 +134,7 @@ class LocalStorageBackend:
         return UploadReceipt(**metadata.__dict__)
 
     def create_private_url(self, object_key: str, *, ttl_seconds: int) -> PrivateUrl:
-        self._path(object_key)
+        self.stat(object_key)
         token, expires_at = self._issue_token({"object_key": object_key, "kind": "private"}, ttl_seconds)
         segments = "/".join(quote(segment, safe="") for segment in object_key.split("/"))
         return PrivateUrl(url=f"/api/v1/media/private/{segments}?{urlencode({'signature': token})}", expires_at=expires_at, token=token)
@@ -135,14 +143,16 @@ class LocalStorageBackend:
         payload = self._read_token(token)
         if payload.get("kind") != "private" or payload.get("object_key") != object_key:
             raise StorageValidationError("下载签名无效")
-        return self._path(object_key)
+        self.stat(object_key)
+        with self._manifest_path(object_key).open(encoding="utf-8") as source:
+            return self._blob_path(json.load(source)["blob"])
 
     def read_private(self, token: str) -> bytes:
         """兼容旧契约测试；生产下载端点不会调用此方法。"""
         payload = self._read_token(token)
         if payload.get("kind") != "private":
             raise StorageValidationError("下载签名无效")
-        with self._path(payload["object_key"]).open("rb") as source:
+        with self.authorize_private(token, payload["object_key"]).open("rb") as source:
             return source.read()
 
     def mark_for_cleanup(self, object_key: str) -> None:

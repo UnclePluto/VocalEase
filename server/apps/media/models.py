@@ -39,6 +39,7 @@ class MediaAsset(UUIDSoftDeleteModel):
         indexes = [models.Index(fields=["patient_owner", "status"]), models.Index(fields=["media_type", "status"])]
         constraints = [
             models.CheckConstraint(condition=models.Q(backend__in=["local", "qiniu"]), name="media_asset_backend_valid"),
+            models.CheckConstraint(condition=models.Q(media_type__in=["song_source", "song_accompaniment", "song_vocal", "lyrics", "singing_audio", "singing_video", "waveform", "export"]), name="media_asset_media_type_valid"),
             models.CheckConstraint(condition=models.Q(owner_type__in=["patient", "song", "system", "export"]), name="media_asset_owner_type_valid"),
             models.CheckConstraint(condition=(models.Q(("owner_type", "patient"), ("patient_owner__isnull", False), ("owner_id", models.F("patient_owner_id"))) | ~models.Q(("owner_type", "patient"))), name="media_asset_patient_owner_consistent"),
             models.CheckConstraint(condition=(models.Q(owner_type__in=["song", "system", "export"], patient_owner__isnull=True) | models.Q(owner_type="patient")), name="media_asset_nonpatient_owner_null"),
