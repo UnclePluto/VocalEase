@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-vocaease}
       POSTGRES_USER: ${POSTGRES_USER:-vocaease}
@@ -14,7 +14,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -24,7 +24,7 @@ services:
   server:
     build:
       context: ..
-      dockerfile: docker/server.Dockerfile
+      dockerfile: deploy/docker/server.Dockerfile
     environment:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
@@ -54,7 +54,7 @@ services:
   celery:
     build:
       context: ..
-      dockerfile: docker/server.Dockerfile
+      dockerfile: deploy/docker/server.Dockerfile
     environment:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
       POSTGRES_DB: ${POSTGRES_DB:-vocaease}

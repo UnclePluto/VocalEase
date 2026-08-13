@@ -2,11 +2,11 @@
 name = "vocaease-server"
 version = "0.1.0"
 description = "VocaEase server"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "celery[redis]>=5.5,<6",
     "Django>=5.2,<5.3",
-    "djangorestframework>=3.16,<4",
+    "djangorestframework>=3.17,<4",
     "psycopg[binary]>=3.2,<4",
 ]
 
