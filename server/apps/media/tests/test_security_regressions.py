@@ -138,6 +138,9 @@ def test_manifest_publish_failure_keeps_previous_download_and_removes_orphan_blo
         backend.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg")
     assert backend.stat(grant.object_key).sha256 == original.sha256
     assert not list((tmp_path / ".blobs").glob(".upload-*"))
+    with (tmp_path / ".manifests" / f"{grant.object_key}.json").open() as manifest_file:
+        manifest = json.load(manifest_file)
+    assert [path.name for path in (tmp_path / ".blobs").iterdir()] == [manifest["blob"]]
 
 
 @pytest.mark.parametrize("environment", ["prod/evil", "prod?x", "prod#x", "prod%2f", "prod space", "..", ""])
