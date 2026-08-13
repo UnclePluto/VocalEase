@@ -105,7 +105,7 @@ class LocalUploadView(APIView):
         if not is_owner and not IsAdminNamespaceUser().has_permission(request, self):
             raise PermissionDenied("无权上传该媒体", code="media_owner_forbidden")
         backend = backend_for_asset(asset)
-        if asset.backend != "local" or asset.status != MediaAsset.Status.UPLOADING or not isinstance(backend, LocalStorageBackend):
+        if asset.backend != "local" or not isinstance(backend, LocalStorageBackend):
             raise PermissionDenied("上传凭证不可用", code="media_upload_not_available")
         nonce = claim_local_upload(asset=asset)
         try:

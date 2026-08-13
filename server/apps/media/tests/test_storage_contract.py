@@ -160,10 +160,13 @@ def test_local_upload_complete_and_private_download_are_authorized_and_do_not_ex
     assert private_response.status_code == 200
     private_url = private_response.json()["data"]["url"]
     assert "/api/v1/media/private/" in private_url
+    # 已签发的本地资产不得因运行期切到七牛而无法下载。
+    settings.MEDIA_BACKEND = "qiniu"
     download_response = api_client.get(private_url)
     assert download_response.status_code == 200
     assert b"".join(download_response.streaming_content) == content
 
+    settings.MEDIA_BACKEND = "local"
     backend = get_storage_backend()
     expired_signature, _ = backend._issue_token({"object_key": grant["object_key"], "kind": "private"}, -1)
     expired_response = api_client.get(f"/api/v1/media/private/{grant['object_key']}?signature={expired_signature}")

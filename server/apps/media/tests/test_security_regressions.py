@@ -3,10 +3,13 @@ import io
 from uuid import uuid4
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Thread
+from datetime import timedelta
 
 import pytest
 from django.test import override_settings
 from django.db import connection, connections
+from django.utils import timezone
 from rest_framework.test import APIClient
 from urllib.parse import urlencode
 
@@ -17,7 +20,9 @@ from apps.media.backends.local import LocalStorageBackend
 from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import ObjectMetadata, StorageValidationError, build_object_key, validate_media_request
 from apps.media.models import MediaAsset
-from apps.media.services import backend_for_asset, complete_qiniu_callback, create_upload_grant, mark_asset_for_cleanup
+from apps.media.services import (backend_for_asset, claim_local_upload,
+    complete_qiniu_callback, create_upload_grant, mark_asset_for_cleanup,
+    MediaConflict, release_local_upload, verify_local_upload_lease)
 from apps.patients.services import create_patient
 
 
@@ -180,3 +185,59 @@ def test_postgresql_concurrent_qiniu_callbacks_have_one_consistent_ready_result(
     asset.refresh_from_db()
     assert results == [MediaAsset.Status.READY, MediaAsset.Status.READY]
     assert asset.etag == "etag-a"
+
+
+@pytest.mark.postgresql
+@pytest.mark.django_db(transaction=True)
+@override_settings(MEDIA_BACKEND="local")
+def test_postgresql_local_upload_lease_rejects_second_writer_and_expired_nonce_cannot_publish(qiniu_patient, tmp_path, settings, monkeypatch):
+    """HTTP 上传入口只允许一个 writer；过期 writer 也不能越过发布前的 nonce 核对。"""
+    if connection.vendor != "postgresql":
+        pytest.skip("慢 PUT 交错由真实 PostgreSQL 行锁测试证明")
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    client = APIClient(); client.force_authenticate(qiniu_patient.user)
+    grant_response = client.post("/api/v1/patient/media/upload-grants/", {
+        "owner_id": str(qiniu_patient.id), "media_type": "singing_audio", "mime": "audio/mpeg", "size": 3,
+    }, format="json")
+    assert grant_response.status_code == 201
+    upload_url = grant_response.data["data"]["upload_url"]
+    entered, continue_writer = Event(), Event()
+    original_write = LocalStorageBackend.write_authorized_stream
+
+    def paused_write(self, **kwargs):
+        entered.set()
+        assert continue_writer.wait(10)
+        return original_write(self, **kwargs)
+
+    monkeypatch.setattr(LocalStorageBackend, "write_authorized_stream", paused_write)
+    outcome = {}
+
+    def first_writer():
+        local_client = APIClient(); local_client.force_authenticate(qiniu_patient.user)
+        outcome["first"] = local_client.put(upload_url, b"one", content_type="audio/mpeg").status_code
+        connections.close_all()
+
+    thread = Thread(target=first_writer)
+    thread.start()
+    assert entered.wait(10)
+    second = client.put(upload_url, b"two", content_type="audio/mpeg")
+    assert second.status_code == 409
+    continue_writer.set(); thread.join(10)
+    assert not thread.is_alive()
+    assert outcome["first"] == 204
+    asset_id = grant_response.data["data"]["asset_id"]
+    assert client.post(f"/api/v1/patient/media/{asset_id}/complete/", {}, format="json").status_code == 200
+    assert client.put(upload_url, b"two", content_type="audio/mpeg").status_code == 409
+
+    # A 的租约超时后 B 获得新 nonce；A 即使已经写完临时 blob，也不能替换 B 的 manifest。
+    asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend = backend_for_asset(asset)
+    nonce_a = claim_local_upload(asset=asset)
+    MediaAsset.objects.filter(pk=asset.pk).update(upload_lease_expires_at=timezone.now() - timedelta(seconds=1))
+    nonce_b = claim_local_upload(asset=asset)
+    assert nonce_a != nonce_b
+    backend.write_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg", before_publish=lambda: verify_local_upload_lease(asset_id=asset.id, nonce=nonce_b))
+    release_local_upload(asset_id=asset.id, nonce=nonce_b, success=True)
+    with pytest.raises(MediaConflict, match="上传租约已失效"):
+        backend.write_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg", before_publish=lambda: verify_local_upload_lease(asset_id=asset.id, nonce=nonce_a))
+    assert backend.stat(asset.object_key).sha256 == hashlib.sha256(b"new").hexdigest()

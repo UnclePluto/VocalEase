@@ -113,12 +113,19 @@ def complete_local_asset(*, asset: MediaAsset) -> MediaAsset:
 def claim_local_upload(*, asset: MediaAsset) -> UUID:
     with transaction.atomic():
         locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+        now = timezone.now()
+        # 租约过期时允许新的请求接管；旧 writer 发布前会再次校验 nonce，
+        # 因而不能覆盖后来者的 manifest。
+        if locked.status == MediaAsset.Status.RECEIVING and locked.upload_lease_expires_at and locked.upload_lease_expires_at <= now:
+            locked.status = MediaAsset.Status.UPLOADING
+            locked.upload_nonce = None
+            locked.upload_lease_expires_at = None
         if locked.status != MediaAsset.Status.UPLOADING:
             raise MediaConflict("上传已在进行或不可用", code="media_upload_in_progress")
         nonce = uuid4()
         locked.status = MediaAsset.Status.RECEIVING
         locked.upload_nonce = nonce
-        locked.upload_lease_expires_at = timezone.now() + timedelta(minutes=5)
+        locked.upload_lease_expires_at = now + timedelta(minutes=5)
         locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
         return nonce
 

@@ -21,6 +21,9 @@ def reverse_backfill_qiniu_etag(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [("media", "0001_initial")]
+    # PostgreSQL 对外键字段变更保留 deferred trigger 时不能在同一事务内再加 CHECK。
+    # 本迁移在本分支尚未发布，按操作提交可保证历史数据回填后再建立约束。
+    atomic = False
 
     operations = [
         migrations.RemoveIndex(model_name="mediaasset", name="media_media_owner_i_f272bb_idx"),

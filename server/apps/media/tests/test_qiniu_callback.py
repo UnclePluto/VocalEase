@@ -88,14 +88,16 @@ def qiniu_patient(db):
 )
 def test_qiniu_callback_is_idempotent_and_cannot_confirm_wrong_or_failed_asset(qiniu_patient, monkeypatch):
     backend = QiniuStorageBackend.from_settings(stat_transport=lambda _: ObjectMetadata("", 3, "audio/mpeg", "", "etag-value"))
-    monkeypatch.setattr("apps.media.views.get_storage_backend", lambda: backend)
-    monkeypatch.setattr("apps.media.views.backend_for_asset", lambda _: backend)
+    # 回调从已定位资产的 backend 分派，即使全局默认已改为 local 仍应走七牛验签与 stat。
+    monkeypatch.setattr("apps.media.services.QiniuStorageBackend.from_settings", lambda: backend)
     asset, grant = create_upload_grant(owner=qiniu_patient, media_type="singing_audio", mime="audio/mpeg", size=3, backend=backend)
     body = urlencode({"key": grant.object_key, "hash": "etag-value", "fsize": 3, "mime": "audio/mpeg"}).encode()
     authorization = qiniu_callback_authorization(
         access_key="access-key", secret_key="secret-key", callback_url=backend.callback_url, body=body
     )
     client = APIClient()
+    from django.conf import settings
+    settings.MEDIA_BACKEND = "local"
     response = client.post(
         "/api/v1/media/qiniu/callback/?source=qiniu", body, content_type="application/x-www-form-urlencoded", HTTP_AUTHORIZATION=authorization
     )
