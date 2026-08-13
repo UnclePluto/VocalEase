@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 from uuid import UUID
+from uuid import uuid4
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
@@ -83,7 +85,12 @@ def complete_local_asset(*, asset: MediaAsset) -> MediaAsset:
             raise MediaConflict()
         if locked.status == MediaAsset.Status.READY:
             return locked
-        if locked.status != MediaAsset.Status.UPLOADING or locked.upload_expires_at <= timezone.now():
+        if locked.status not in {MediaAsset.Status.UPLOADING, MediaAsset.Status.RECEIVING} or locked.upload_expires_at <= timezone.now():
+            if locked.status == MediaAsset.Status.RECEIVING:
+                locked.status = MediaAsset.Status.UPLOADING
+                locked.upload_nonce = None
+                locked.upload_lease_expires_at = None
+                locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
             raise MediaConflict("上传凭证已过期或状态不可用", code="media_grant_expired")
         try:
             receipt = backend.verify_completion(locked.object_key)
@@ -93,6 +100,31 @@ def complete_local_asset(*, asset: MediaAsset) -> MediaAsset:
         locked.sha256, locked.status = receipt.sha256, MediaAsset.Status.READY
         locked.save(update_fields=["sha256", "status", "updated_at"])
         return locked
+
+
+def claim_local_upload(*, asset: MediaAsset) -> UUID:
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+        if locked.status != MediaAsset.Status.UPLOADING:
+            raise MediaConflict("上传已在进行或不可用", code="media_upload_in_progress")
+        nonce = uuid4()
+        locked.status = MediaAsset.Status.RECEIVING
+        locked.upload_nonce = nonce
+        locked.upload_lease_expires_at = timezone.now() + timedelta(minutes=5)
+        locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
+        return nonce
+
+
+def release_local_upload(*, asset_id: UUID, nonce: UUID, success: bool) -> None:
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset_id)
+        if locked.upload_nonce != nonce:
+            raise MediaConflict("上传租约不匹配", code="media_upload_lease_invalid")
+        if not success:
+            locked.status = MediaAsset.Status.UPLOADING
+        locked.upload_nonce = None
+        locked.upload_lease_expires_at = None
+        locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
 
 
 def complete_qiniu_callback(*, payload: Mapping[str, Any], backend: QiniuStorageBackend) -> MediaAsset:

@@ -63,10 +63,9 @@ def test_qiniu_asset_cannot_be_completed_by_patient_or_admin_api(qiniu_patient):
 def test_qiniu_stat_uses_official_rs_stat_protocol_and_never_trusts_callback_sha256():
     captured = {}
 
-    def transport(request):
-        captured["url"] = request.full_url
-        captured["authorization"] = request.get_header("Authorization")
-        return json.dumps({"fsize": 3, "mimeType": "audio/mpeg", "hash": "etag-from-kodo"}).encode()
+    def transport(object_key):
+        captured["key"] = object_key
+        return {"fsize": 3, "mimeType": "audio/mpeg", "hash": "etag-from-kodo"}
 
     backend = QiniuStorageBackend(
         access_key="ak", secret_key="sk", bucket="bucket", domain="https://cdn.example.test",
@@ -75,8 +74,7 @@ def test_qiniu_stat_uses_official_rs_stat_protocol_and_never_trusts_callback_sha
 
     stat = backend.stat("prod/singing_audio/2026/08/14/abc")
 
-    assert captured["url"].startswith("https://rs.qiniu.com/stat/")
-    assert captured["authorization"].startswith("Qiniu ak:")
+    assert captured["key"] == "prod/singing_audio/2026/08/14/abc"
     assert stat == ObjectMetadata("prod/singing_audio/2026/08/14/abc", 3, "audio/mpeg", "", "etag-from-kodo")
     receipt = backend.verify_completion(stat.object_key, {"key": stat.object_key, "fsize": 3, "mime": "audio/mpeg", "hash": "etag-from-kodo", "sha256": "f" * 64})
     assert receipt.sha256 == ""

@@ -12,6 +12,7 @@ class MediaAsset(UUIDSoftDeleteModel):
 
     class Status(models.TextChoices):
         UPLOADING = "uploading", "上传中"
+        RECEIVING = "receiving", "接收中"
         READY = "ready", "可用"
         FAILED = "failed", "失败"
         PENDING_CLEANUP = "pending_cleanup", "待清理"
@@ -28,6 +29,8 @@ class MediaAsset(UUIDSoftDeleteModel):
     etag = models.CharField(max_length=128, blank=True)
     status = models.CharField(max_length=24, choices=Status.choices, default=Status.UPLOADING)
     upload_expires_at = models.DateTimeField()
+    upload_nonce = models.UUIDField(null=True, blank=True)
+    upload_lease_expires_at = models.DateTimeField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -37,7 +40,7 @@ class MediaAsset(UUIDSoftDeleteModel):
         constraints = [
             models.CheckConstraint(condition=models.Q(backend__in=["local", "qiniu"]), name="media_asset_backend_valid"),
             models.CheckConstraint(condition=models.Q(owner_type__in=["patient", "song", "system", "export"]), name="media_asset_owner_type_valid"),
-            models.CheckConstraint(condition=models.Q(status__in=["uploading", "ready", "failed", "pending_cleanup"]), name="media_asset_status_valid"),
+            models.CheckConstraint(condition=models.Q(status__in=["uploading", "receiving", "ready", "failed", "pending_cleanup"]), name="media_asset_status_valid"),
             models.CheckConstraint(condition=(models.Q(status="ready", backend="local", sha256__regex=r"^[0-9a-f]{64}$") | models.Q(status="ready", backend="qiniu", etag__gt="") | ~models.Q(status="ready")), name="media_asset_ready_receipt_valid"),
         ]
         ordering = ["-created_at"]

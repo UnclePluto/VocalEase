@@ -14,18 +14,14 @@ from apps.accounts.models import Role, User
 from apps.doctors.services import create_doctor
 from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import ObjectMetadata
+from qiniu import Auth
 from apps.media.models import MediaAsset
 from apps.media.services import create_upload_grant
 from apps.patients.services import create_patient
 
 
 def qiniu_callback_authorization(*, access_key, secret_key, callback_url, body):
-    parsed = urlsplit(callback_url)
-    canonical_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-    signing_data = canonical_path.encode() + b"\n" + body
-    digest = hmac.new(secret_key.encode(), signing_data, hashlib.sha1).digest()
-    signature = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-    return f"QBox {access_key}:{signature}"
+    return f"QBox {Auth(access_key, secret_key).token_of_request(callback_url, body.decode('utf-8'), 'application/x-www-form-urlencoded')}"
 
 
 def test_qiniu_policy_locks_key_type_size_and_callback_without_network():

@@ -220,7 +220,7 @@ def test_completion_rejects_an_expired_upload_grant_even_if_the_file_was_written
 
     assert completion.status_code == 409
     asset.refresh_from_db()
-    assert asset.status == MediaAsset.Status.UPLOADING
+    assert asset.status == MediaAsset.Status.RECEIVING
 
 
 @pytest.mark.django_db

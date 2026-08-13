@@ -1,6 +1,24 @@
 from django.db import migrations, models
 
 
+def backfill_qiniu_etag(apps, schema_editor):
+    MediaAsset = apps.get_model("media", "MediaAsset")
+    for asset in MediaAsset.objects.filter(backend="qiniu", status="ready", etag=""):
+        legacy = (asset.metadata or {}).get("qiniu_etag", "")
+        if legacy:
+            asset.etag = legacy
+            asset.save(update_fields=["etag"])
+
+
+def reverse_backfill_qiniu_etag(apps, schema_editor):
+    MediaAsset = apps.get_model("media", "MediaAsset")
+    for asset in MediaAsset.objects.filter(backend="qiniu").exclude(etag=""):
+        metadata = dict(asset.metadata or {})
+        metadata.setdefault("qiniu_etag", asset.etag)
+        asset.metadata = metadata
+        asset.save(update_fields=["metadata"])
+
+
 class Migration(migrations.Migration):
     dependencies = [("media", "0001_initial")]
 
@@ -14,6 +32,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(model_name="mediaasset", name="owner_id", field=models.UUIDField()),
         migrations.AlterField(model_name="mediaasset", name="owner_type", field=models.CharField(choices=[("patient", "患者"), ("song", "歌曲"), ("system", "系统"), ("export", "导出")], max_length=16)),
         migrations.AddIndex(model_name="mediaasset", index=models.Index(fields=["patient_owner", "status"], name="media_asset_patient_status_idx")),
+        migrations.RunPython(backfill_qiniu_etag, reverse_backfill_qiniu_etag),
         migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=models.Q(("backend__in", ["local", "qiniu"])), name="media_asset_backend_valid")),
         migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=models.Q(("owner_type__in", ["patient", "song", "system", "export"])), name="media_asset_owner_type_valid")),
         migrations.AddConstraint(model_name="mediaasset", constraint=models.CheckConstraint(condition=models.Q(("status__in", ["uploading", "ready", "failed", "pending_cleanup"])), name="media_asset_status_valid")),
