@@ -274,3 +274,54 @@ def test_system_admin_can_view_all_patients(patient):
     admin = User.objects.create_user(login_id="analytics-admin", password="888888", role=Role.SYSTEM_ADMIN, must_change_password=False)
     client = APIClient(); client.force_authenticate(admin)
     assert client.get("/api/v1/admin/analytics/patients/").json()["data"]["count"] == 1
+
+
+@pytest.mark.django_db
+def test_single_patient_ten_thousand_sessions_uses_streaming_fixed_windows(patient, monkeypatch):
+    from apps.analytics.selectors import patient_metric_rows
+
+    plan = patient.treatment_plans.get(status="active")
+    patient.metric_plans = [plan]
+    patient.current_plan_id = plan.id
+
+    class StreamingSessions:
+        def filter(self, **kwargs):
+            return self
+
+        def annotate(self, **kwargs):
+            return self
+
+        def values(self, *fields):
+            return self
+
+        def order_by(self, *fields):
+            return self
+
+        def __iter__(self):
+            raise AssertionError("指标实现不得填充 QuerySet 缓存或完整历史列表")
+
+        def iterator(self, **kwargs):
+            for index in range(10000):
+                score = 10 if index < 9997 else (70, 80, 90)[index - 9997]
+                burp = 6 if index < 3 else (3, 2, 1)[index - 9997] if index >= 9997 else 4
+                yield {
+                    "id": uuid.UUID(int=index + 1),
+                    "patient_id": patient.id,
+                    "treatment_plan_id": plan.id,
+                    "score": Decimal(score),
+                    "burp_count": burp,
+                    "duration_seconds": 60,
+                    "is_mock": True,
+                    "has_current_audio_result": True,
+                    "occurred_at": datetime(2026, 1, 1, tzinfo=datetime_timezone.utc) + timedelta(seconds=index),
+                }
+
+    monkeypatch.setattr("apps.analytics.selectors.completed_sessions", lambda: StreamingSessions())
+
+    row = patient_metric_rows([patient])[0]
+
+    assert row["completed_count"] == 10000
+    assert row["total_duration_seconds"] == 600000
+    assert row["average_score"] == "10.02"
+    assert row["score_trend"] == {"difference": "70.00", "direction": "up", "has_enough_data": True}
+    assert row["burp_improvement"] == "0.6667"

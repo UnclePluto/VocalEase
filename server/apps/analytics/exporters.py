@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from io import BytesIO, StringIO, TextIOWrapper
+import os
 import re
 from typing import Iterable, Mapping
 
@@ -49,15 +50,19 @@ class CsvExporter:
             writer.writerow([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
         return b"\xef\xbb\xbf" + stream.getvalue().encode("utf-8")
 
-    def render_to(self, stream, rows: Iterable[Mapping[str, object]]) -> None:
+    def render_to(self, stream, rows: Iterable[Mapping[str, object]], *, heartbeat=None) -> None:
         stream.write(b"\xef\xbb\xbf")
         text_stream = TextIOWrapper(stream, encoding="utf-8", newline="", write_through=True)
         try:
             writer = csv.writer(text_stream, lineterminator="\r\n")
             writer.writerow([label for _, label in EXPORT_COLUMNS])
             for row in rows:
+                if heartbeat:
+                    heartbeat()
                 writer.writerow([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
             text_stream.flush()
+            if heartbeat:
+                heartbeat()
         finally:
             text_stream.detach()
 
@@ -68,21 +73,67 @@ class XlsxExporter:
 
     def render(self, rows: Iterable[Mapping[str, object]]) -> bytes:
         workbook = Workbook(write_only=True)
-        worksheet = workbook.create_sheet("患者统计")
-        worksheet.append([label for _, label in EXPORT_COLUMNS])
-        for row in rows:
-            worksheet.append([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
         stream = BytesIO()
-        workbook.save(stream)
-        return stream.getvalue()
+        try:
+            worksheet = workbook.create_sheet("患者统计")
+            worksheet.append([label for _, label in EXPORT_COLUMNS])
+            for row in rows:
+                worksheet.append([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
+            workbook.save(stream)
+            return stream.getvalue()
+        finally:
+            _close_write_only_workbook(workbook)
 
-    def render_to(self, stream, rows: Iterable[Mapping[str, object]]) -> None:
+    def render_to(self, stream, rows: Iterable[Mapping[str, object]], *, heartbeat=None) -> None:
         workbook = Workbook(write_only=True)
-        worksheet = workbook.create_sheet("患者统计")
-        worksheet.append([label for _, label in EXPORT_COLUMNS])
-        for row in rows:
-            worksheet.append([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
-        workbook.save(stream)
+        try:
+            worksheet = workbook.create_sheet("患者统计")
+            worksheet.append([label for _, label in EXPORT_COLUMNS])
+            for row in rows:
+                if heartbeat:
+                    heartbeat()
+                worksheet.append([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
+            workbook.save(_HeartbeatWriteProxy(stream, heartbeat) if heartbeat else stream)
+        finally:
+            _close_write_only_workbook(workbook)
+
+
+def _close_write_only_workbook(workbook) -> None:
+    """显式关闭 openpyxl 3.1 write-only writer 并移除其命名临时文件。"""
+    for worksheet in workbook.worksheets:
+        rows = getattr(worksheet, "_rows", None)
+        writer = getattr(worksheet, "_writer", None)
+        if rows is not None:
+            try:
+                rows.close()
+            except Exception:
+                pass
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            if os.path.exists(writer.out):
+                try:
+                    writer.cleanup()
+                except (OSError, ValueError):
+                    pass
+    workbook.close()
+
+
+class _HeartbeatWriteProxy:
+    def __init__(self, stream, heartbeat):
+        self._stream = stream
+        self._heartbeat = heartbeat
+
+    def write(self, data):
+        self._heartbeat()
+        written = self._stream.write(data)
+        self._heartbeat()
+        return written
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 def export_rows(rows: Iterable[Mapping[str, object]], export_format: str) -> bytes:
@@ -92,8 +143,8 @@ def export_rows(rows: Iterable[Mapping[str, object]], export_format: str) -> byt
     return exporter.render(rows)
 
 
-def export_rows_to(stream, rows: Iterable[Mapping[str, object]], export_format: str) -> None:
+def export_rows_to(stream, rows: Iterable[Mapping[str, object]], export_format: str, *, heartbeat=None) -> None:
     exporter = CsvExporter() if export_format == "csv" else XlsxExporter() if export_format == "xlsx" else None
     if exporter is None:
         raise ValueError("不支持的导出格式")
-    exporter.render_to(stream, rows)
+    exporter.render_to(stream, rows, heartbeat=heartbeat)

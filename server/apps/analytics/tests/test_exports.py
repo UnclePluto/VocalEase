@@ -57,3 +57,40 @@ def test_streaming_xlsx_large_batch_can_be_read_back():
 
     assert len(values) == 1206
     assert values[1][0] == "P000000" and values[-1][0] == "P001204"
+
+
+def test_xlsx_row_failure_closes_writer_and_removes_openpyxl_tempfile():
+    from openpyxl.worksheet._writer import ALL_TEMP_FILES
+
+    before = set(ALL_TEMP_FILES)
+
+    def rows():
+        yield ROWS[0]
+        raise RuntimeError("row-failed")
+
+    with tempfile.SpooledTemporaryFile(mode="w+b") as stream:
+        try:
+            export_rows_to(stream, rows(), "xlsx")
+        except RuntimeError as exc:
+            assert str(exc) == "row-failed"
+
+    assert set(ALL_TEMP_FILES) == before
+
+
+def test_xlsx_save_failure_closes_writer_and_removes_openpyxl_tempfile(monkeypatch):
+    from openpyxl import Workbook
+    from openpyxl.worksheet._writer import ALL_TEMP_FILES
+
+    before = set(ALL_TEMP_FILES)
+    monkeypatch.setattr(
+        Workbook,
+        "save",
+        lambda self, stream: (_ for _ in ()).throw(RuntimeError("save-failed")),
+    )
+    with tempfile.SpooledTemporaryFile(mode="w+b") as stream:
+        try:
+            export_rows_to(stream, ROWS, "xlsx")
+        except RuntimeError as exc:
+            assert str(exc) == "save-failed"
+
+    assert set(ALL_TEMP_FILES) == before

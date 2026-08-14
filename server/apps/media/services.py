@@ -415,6 +415,7 @@ def mark_asset_for_cleanup(*, asset: MediaAsset) -> MediaAsset:
 def publish_generated_asset(
     *, owner_id: UUID, mime: str, content: bytes | None = None,
     stream=None, size: int | None = None, content_sha256: str | None = None,
+    heartbeat=None,
 ) -> MediaAsset:
     """把可信服务端生成物发布到 Task 4 的私有媒体协议，不暴露临时路径。"""
     if content is not None:
@@ -426,6 +427,9 @@ def publish_generated_asset(
     if stream is None or not isinstance(size, int) or size <= 0 or not content_sha256:
         raise MediaConflict("生成物元数据不完整", code="media_metadata_mismatch")
     stream.seek(0)
+    upload_stream = _HeartbeatReadProxy(stream, heartbeat) if heartbeat else stream
+    if heartbeat:
+        heartbeat()
     existing = MediaAsset.objects.filter(
         owner_type=MediaAsset.OwnerType.EXPORT,
         owner_id=owner_id,
@@ -437,14 +441,20 @@ def publish_generated_asset(
         metadata__generated_sha256=content_sha256,
     ).order_by("created_at", "id").first()
     if existing is not None:
+        if heartbeat:
+            heartbeat()
         backend = backend_for_asset(existing)
         if isinstance(backend, LocalStorageBackend):
             existing = ensure_local_asset_layout(asset=existing)
             if existing.status == MediaAsset.Status.READY and existing.sha256 == content_sha256:
+                if heartbeat:
+                    heartbeat()
                 return existing
         elif isinstance(backend, QiniuStorageBackend):
             receipt = backend.verify_completion(existing.object_key)
             if receipt.size == existing.size and receipt.mime == existing.mime and receipt.etag == existing.etag:
+                if heartbeat:
+                    heartbeat()
                 return existing
     asset, grant = create_upload_grant(
         owner_type=MediaAsset.OwnerType.EXPORT,
@@ -462,7 +472,7 @@ def publish_generated_asset(
             prepared = backend.prepare_authorized_stream(
                 object_key=asset.object_key,
                 token=grant.upload_token,
-                stream=stream,
+                stream=upload_stream,
                 mime=mime,
                 asset_id=asset.id,
             )
@@ -478,7 +488,7 @@ def publish_generated_asset(
                 receipt = backend.upload_generated(grant=grant, content=content, mime=mime)
             else:
                 stream.seek(0)
-                receipt = backend.upload_generated_stream(grant=grant, stream=stream, size=size, mime=mime)
+                receipt = backend.upload_generated_stream(grant=grant, stream=upload_stream, size=size, mime=mime)
             with transaction.atomic():
                 locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
                 if locked.status == MediaAsset.Status.READY:
@@ -504,3 +514,18 @@ def publish_generated_asset(
             upload_lease_expires_at=None,
         )
         raise
+
+
+class _HeartbeatReadProxy:
+    def __init__(self, stream, heartbeat):
+        self._stream = stream
+        self._heartbeat = heartbeat
+
+    def read(self, *args, **kwargs):
+        self._heartbeat()
+        chunk = self._stream.read(*args, **kwargs)
+        self._heartbeat()
+        return chunk
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)

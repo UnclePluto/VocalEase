@@ -4,6 +4,15 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+
+def _integer_env_or_raw(name, default):
+    raw = os.getenv(name, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        # 配置检查负责给出稳定诊断；settings import 本身不得因拼写错误 traceback。
+        return raw
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
@@ -164,7 +173,7 @@ MEDIA_BACKEND = os.getenv("MEDIA_BACKEND", "qiniu")
 MEDIA_ENVIRONMENT = os.getenv("MEDIA_ENVIRONMENT", "production")
 MEDIA_LOCAL_ROOT = os.getenv("MEDIA_LOCAL_ROOT", str(BASE_DIR / "private-media"))
 MEDIA_UPLOAD_GRANT_TTL_SECONDS = int(os.getenv("MEDIA_UPLOAD_GRANT_TTL_SECONDS", "900"))
-MEDIA_PRIVATE_URL_TTL_SECONDS = int(os.getenv("MEDIA_PRIVATE_URL_TTL_SECONDS", "600"))
+MEDIA_PRIVATE_URL_TTL_SECONDS = _integer_env_or_raw("MEDIA_PRIVATE_URL_TTL_SECONDS", 600)
 MEDIA_AUDIO_MAX_BYTES = int(os.getenv("MEDIA_AUDIO_MAX_BYTES", str(50 * 1024 * 1024)))
 MEDIA_VIDEO_MAX_BYTES = int(os.getenv("MEDIA_VIDEO_MAX_BYTES", str(500 * 1024 * 1024)))
 MEDIA_OTHER_MAX_BYTES = int(os.getenv("MEDIA_OTHER_MAX_BYTES", str(10 * 1024 * 1024)))
@@ -179,11 +188,11 @@ QINIU_UPLOAD_URL = os.getenv("QINIU_UPLOAD_URL", "https://up.qiniup.com")
 QINIU_RS_HOST = os.getenv("QINIU_RS_HOST", "https://rs.qiniu.com")
 QINIU_STAT_TIMEOUT_SECONDS = float(os.getenv("QINIU_STAT_TIMEOUT_SECONDS", "5"))
 
-ANALYTICS_SYNC_EXPORT_LIMIT = 1000
-ANALYTICS_EXPORT_TTL_SECONDS = int(os.getenv("ANALYTICS_EXPORT_TTL_SECONDS", "86400"))
-ANALYTICS_EXPORT_LEASE_SECONDS = int(os.getenv("ANALYTICS_EXPORT_LEASE_SECONDS", "300"))
-ANALYTICS_EXPORT_HEARTBEAT_SECONDS = int(os.getenv("ANALYTICS_EXPORT_HEARTBEAT_SECONDS", "60"))
-ANALYTICS_EXPORT_MAX_ATTEMPTS = int(os.getenv("ANALYTICS_EXPORT_MAX_ATTEMPTS", "4"))
+ANALYTICS_SYNC_EXPORT_LIMIT = _integer_env_or_raw("ANALYTICS_SYNC_EXPORT_LIMIT", 1000)
+ANALYTICS_EXPORT_TTL_SECONDS = _integer_env_or_raw("ANALYTICS_EXPORT_TTL_SECONDS", 86400)
+ANALYTICS_EXPORT_LEASE_SECONDS = _integer_env_or_raw("ANALYTICS_EXPORT_LEASE_SECONDS", 300)
+ANALYTICS_EXPORT_HEARTBEAT_SECONDS = _integer_env_or_raw("ANALYTICS_EXPORT_HEARTBEAT_SECONDS", 60)
+ANALYTICS_EXPORT_MAX_ATTEMPTS = _integer_env_or_raw("ANALYTICS_EXPORT_MAX_ATTEMPTS", 4)
 ANALYTICS_AUTO_DISPATCH_EXPORTS = not CELERY_TASK_ALWAYS_EAGER
 
 if settings_module not in {"vocaease.settings.local", "vocaease.settings.test", "vocaease.settings.postgresql_test"}:

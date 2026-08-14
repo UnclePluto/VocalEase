@@ -5,10 +5,10 @@ import hashlib
 from itertools import islice
 import logging
 import tempfile
+import time
 from uuid import UUID, uuid4
 
 from celery import shared_task
-from django.conf import settings
 from django.db import connection, models, transaction
 from django.utils import timezone
 
@@ -19,12 +19,34 @@ from apps.media.services import mark_asset_for_cleanup, publish_generated_asset
 from .assets import EXPECTED_MIME, ExportAssetError, resolve_export_asset
 from .exporters import export_rows_to
 from .models import ExportJob, ExportJobItem
+from .runtime import get_export_runtime_config
 from .selectors import exportable_row, patient_metric_rows, patients_for_export_snapshot
 
 
 logger = logging.getLogger(__name__)
 EXPORT_BATCH_SIZE = 200
 SPOOL_MEMORY_LIMIT = 8 * 1024 * 1024
+
+
+class ExportLeaseLost(RuntimeError):
+    pass
+
+
+class ExportHeartbeat:
+    def __init__(self, job_id, token, *, monotonic=time.monotonic):
+        self.job_id = job_id
+        self.token = token
+        self.monotonic = monotonic
+        self.interval = get_export_runtime_config().heartbeat_seconds
+        self.last_pulse = monotonic()
+
+    def pulse(self, *, force=False):
+        now = self.monotonic()
+        if not force and now - self.last_pulse < self.interval:
+            return
+        if not renew_export_claim(self.job_id, self.token):
+            raise ExportLeaseLost("导出任务租约已失效")
+        self.last_pulse = now
 
 
 def _clear_claim(job):
@@ -82,49 +104,40 @@ def cleanup_export_job(job_id: UUID):
         job.cleanup_status = ExportJob.CleanupStatus.PROCESSING
         job.cleanup_attempt += 1
         job.cleanup_claim_token = token
-        job.cleanup_lease_expires_at = now + timedelta(seconds=settings.ANALYTICS_EXPORT_LEASE_SECONDS)
-        job.save()
+        job.cleanup_lease_expires_at = now + timedelta(seconds=get_export_runtime_config().lease_seconds)
         asset_id = job.result_asset_id
+        job.normalized_filters = {}
+        job.selected_ids = []
         ExportJobItem.objects.filter(job=job).delete()
-
-    if asset_id:
-        asset = MediaAsset.objects.filter(
-            pk=asset_id,
-            deleted_at__isnull=True,
-            owner_type=MediaAsset.OwnerType.EXPORT,
-            owner_id=job_id,
-            media_type="export",
-        ).first()
-        if asset and asset.status != MediaAsset.Status.PENDING_CLEANUP:
-            mark_asset_for_cleanup(asset=asset)
+        job.save()
 
     with transaction.atomic():
         job = ExportJob.objects.select_for_update().get(pk=job_id)
         if job.cleanup_status != ExportJob.CleanupStatus.PROCESSING or job.cleanup_claim_token != token:
             return {"job_id": str(job_id), "cleaned": False}
+        asset_validation = "none"
         if asset_id:
-            remaining = MediaAsset.objects.filter(
-                pk=asset_id,
-                deleted_at__isnull=True,
-                owner_type=MediaAsset.OwnerType.EXPORT,
-                owner_id=job_id,
-                media_type="export",
-            ).exclude(status=MediaAsset.Status.PENDING_CLEANUP).exists()
-            if remaining:
-                job.cleanup_status = ExportJob.CleanupStatus.PENDING
-                _clear_cleanup_claim(job)
-                job.save()
-                return {"job_id": str(job_id), "cleaned": False}
+            try:
+                asset = resolve_export_asset(job, mode="cleanup", lock=True)
+                asset_validation = "trusted"
+            except ExportAssetError as exc:
+                # 不可信/孤儿链接只从 Job 解除，绝不触碰可能属于其他 owner 的媒体。
+                asset_validation = exc.code
+            else:
+                if asset.status != MediaAsset.Status.PENDING_CLEANUP:
+                    mark_asset_for_cleanup(asset=asset)
         record(
             actor=job.creator,
             action="analytics.export_cleanup",
             target=job,
-            changes={"status": job.status, "asset_id": str(asset_id) if asset_id else None},
+            changes={
+                "status": job.status,
+                "asset_id": str(asset_id) if asset_id else None,
+                "asset_validation": asset_validation,
+            },
             request_id=f"cleanup:{job.id}",
         )
         job.result_asset_id = None
-        job.normalized_filters = {}
-        job.selected_ids = []
         job.cleanup_status = ExportJob.CleanupStatus.COMPLETE
         job.cleanup_completed_at = timezone.now()
         _clear_cleanup_claim(job)
@@ -133,6 +146,7 @@ def cleanup_export_job(job_id: UUID):
 
 
 def claim_export_job(job_id: UUID):
+    config = get_export_runtime_config()
     cleanup_status = None
     with transaction.atomic():
         job = ExportJob.objects.select_for_update().get(pk=job_id)
@@ -143,7 +157,7 @@ def claim_export_job(job_id: UUID):
             return None
         elif job.status not in {ExportJob.Status.PENDING, ExportJob.Status.PROCESSING}:
             return None
-        elif job.attempt >= settings.ANALYTICS_EXPORT_MAX_ATTEMPTS:
+        elif job.attempt >= config.max_attempts:
             cleanup_status = ExportJob.Status.FAILED
         else:
             token = uuid4()
@@ -151,7 +165,7 @@ def claim_export_job(job_id: UUID):
             job.attempt += 1
             job.claim_token = token
             job.heartbeat_at = now
-            job.lease_expires_at = now + timedelta(seconds=settings.ANALYTICS_EXPORT_LEASE_SECONDS)
+            job.lease_expires_at = now + timedelta(seconds=config.lease_seconds)
             job.failure_reason = ""
             job.save()
             return token, job.format
@@ -177,7 +191,7 @@ def renew_export_claim(job_id: UUID, token) -> bool:
         ):
             return False
         job.heartbeat_at = now
-        job.lease_expires_at = now + timedelta(seconds=settings.ANALYTICS_EXPORT_LEASE_SECONDS)
+        job.lease_expires_at = now + timedelta(seconds=get_export_runtime_config().lease_seconds)
         job.save(update_fields=["heartbeat_at", "lease_expires_at", "updated_at"])
         return True
 
@@ -189,7 +203,7 @@ def expire_export_job(job_id: UUID):
     return request_export_cleanup(job_id, status=ExportJob.Status.EXPIRED)
 
 
-def _metric_rows_for_job(job_id: UUID, token):
+def _metric_rows_for_job(job_id: UUID, heartbeat: ExportHeartbeat):
     patient_id_iterator = ExportJobItem.objects.filter(job_id=job_id).order_by("position").values_list(
         "patient_id", flat=True,
     ).iterator(chunk_size=EXPORT_BATCH_SIZE)
@@ -205,13 +219,15 @@ def _metric_rows_for_job(job_id: UUID, token):
             patients = list(patients_for_export_snapshot(patient_ids))
             patient_by_id = {patient.id: patient for patient in patients}
             ordered_patients = [patient_by_id[patient_id] for patient_id in patient_ids if patient_id in patient_by_id]
-            rows_by_id = {row["id"]: row for row in patient_metric_rows(ordered_patients)}
+            rows_by_id = {
+                row["id"]: row
+                for row in patient_metric_rows(ordered_patients, heartbeat=heartbeat.pulse)
+            }
         for patient_id in patient_ids:
             row = rows_by_id.get(str(patient_id))
             if row is not None:
                 yield exportable_row(row)
-        if not renew_export_claim(job_id, token):
-            raise RuntimeError("导出任务租约已失效")
+        heartbeat.pulse()
 
 
 def _mark_unlinked_export_asset(asset, job_id):
@@ -224,10 +240,12 @@ def _mark_unlinked_export_asset(asset, job_id):
         mark_asset_for_cleanup(asset=asset)
 
 
-def _stream_sha256(stream):
+def _stream_sha256(stream, heartbeat=None):
     digest = hashlib.sha256()
     stream.seek(0)
     while chunk := stream.read(1024 * 1024):
+        if heartbeat:
+            heartbeat()
         digest.update(chunk)
     stream.seek(0)
     return digest.hexdigest()
@@ -239,21 +257,28 @@ def run_export_job(job_id: str):
     if claim is None:
         return {"job_id": str(job_uuid), "claimed": False}
     token, export_format = claim
+    heartbeat = ExportHeartbeat(job_uuid, token)
     asset = None
     try:
         with tempfile.SpooledTemporaryFile(max_size=SPOOL_MEMORY_LIMIT, mode="w+b") as stream:
-            export_rows_to(stream, _metric_rows_for_job(job_uuid, token), export_format)
+            export_rows_to(
+                stream,
+                _metric_rows_for_job(job_uuid, heartbeat),
+                export_format,
+                heartbeat=heartbeat.pulse,
+            )
             size = stream.tell()
-            content_sha256 = _stream_sha256(stream)
-            if not renew_export_claim(job_uuid, token):
-                return {"job_id": str(job_uuid), "claimed": True, "published": False}
+            content_sha256 = _stream_sha256(stream, heartbeat.pulse)
+            heartbeat.pulse(force=True)
             asset = publish_generated_asset(
                 owner_id=job_uuid,
                 stream=stream,
                 size=size,
                 content_sha256=content_sha256,
                 mime=EXPECTED_MIME[export_format],
+                heartbeat=heartbeat.pulse,
             )
+            heartbeat.pulse(force=True)
         with transaction.atomic():
             job = ExportJob.objects.select_for_update().get(pk=job_uuid)
             now = timezone.now()
@@ -277,7 +302,7 @@ def run_export_job(job_id: str):
                 try:
                     # 发布链接前再次核对 Task 4 的 owner/MIME/receipt 可信边界。
                     job.result_asset_id = locked_asset.id
-                    resolve_export_asset(job, verify_storage=True)
+                    resolve_export_asset(job, mode="publish", asset=locked_asset, verify_storage=True)
                 except ExportAssetError:
                     job.result_asset_id = None
                     job.status = ExportJob.Status.PENDING
@@ -296,16 +321,30 @@ def run_export_job(job_id: str):
     except Exception as exc:
         logger.error("export_job_failed job_id=%s exception=%s", job_uuid, exc.__class__.__name__)
         terminal = False
+        expired = False
+        orphan_asset = None
         with transaction.atomic():
             job = ExportJob.objects.select_for_update().get(pk=job_uuid)
-            if job.status == ExportJob.Status.PROCESSING and job.claim_token == token:
-                terminal = job.attempt >= settings.ANALYTICS_EXPORT_MAX_ATTEMPTS
+            expired = job.expires_at <= timezone.now()
+            if asset is not None and not (
+                job.status == ExportJob.Status.READY and job.result_asset_id == asset.id
+            ):
+                orphan_asset = asset
+            if job.status == ExportJob.Status.PROCESSING and job.claim_token == token and not expired:
+                terminal = job.attempt >= get_export_runtime_config().max_attempts
                 job.status = ExportJob.Status.FAILED if terminal else ExportJob.Status.PENDING
                 job.failure_reason = "导出生成多次失败" if terminal else "导出生成失败，请稍后重试"
                 if terminal:
                     job.cleanup_status = ExportJob.CleanupStatus.PENDING
                 _clear_claim(job)
                 job.save()
+        if orphan_asset is not None:
+            _mark_unlinked_export_asset(orphan_asset, job_uuid)
+        if expired:
+            request_export_cleanup(job_uuid, status=ExportJob.Status.EXPIRED)
+            return {"job_id": str(job_uuid), "claimed": True, "published": False}
+        if isinstance(exc, ExportLeaseLost):
+            return {"job_id": str(job_uuid), "claimed": True, "published": False}
         if terminal:
             cleanup_export_job(job_uuid)
         raise
@@ -340,7 +379,7 @@ def recover_export_jobs(*, batch_size=100):
         with transaction.atomic():
             job = ExportJob.objects.select_for_update().get(pk=job_id)
             if job.status == ExportJob.Status.PROCESSING and job.lease_expires_at and job.lease_expires_at <= now:
-                terminal = job.attempt >= settings.ANALYTICS_EXPORT_MAX_ATTEMPTS
+                terminal = job.attempt >= get_export_runtime_config().max_attempts
                 job.status = ExportJob.Status.FAILED if terminal else ExportJob.Status.PENDING
                 job.failure_reason = "导出生成多次失败" if terminal else ""
                 if terminal:

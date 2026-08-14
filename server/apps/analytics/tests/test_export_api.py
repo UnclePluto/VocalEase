@@ -13,6 +13,35 @@ from apps.accounts.models import Role, User
 from apps.patients.models import PatientProfile, TreatmentPlan
 
 
+def _create_active_patients(*, doctor, count, prefix):
+    users = [
+        User(login_id=f"{prefix}-user-{index:04d}", password="!", role=Role.PATIENT, must_change_password=False)
+        for index in range(count)
+    ]
+    User.objects.bulk_create(users, batch_size=250)
+    patients = [
+        PatientProfile(
+            user=user,
+            medical_record_no=f"{prefix.upper()[:2]}{index:06d}",
+            name=f"批量患者{index:04d}",
+            gender="male",
+            enrollment_age=30,
+            phone=f"139{index:08d}",
+            primary_doctor=doctor,
+        )
+        for index, user in enumerate(users)
+    ]
+    PatientProfile.objects.bulk_create(patients, batch_size=250)
+    TreatmentPlan.objects.bulk_create([
+        TreatmentPlan(
+            patient=item, start_date="2026-08-01", cycle_weeks=4,
+            target_session_count=12, status=TreatmentPlan.Status.ACTIVE,
+        )
+        for item in patients
+    ], batch_size=250)
+    return patients
+
+
 @pytest.mark.django_db
 def test_sync_export_intersects_selected_ids_with_current_filters(doctor, patient, other_patient):
     doctor.user.must_change_password = False
@@ -46,9 +75,9 @@ def test_async_export_snapshots_only_ids_and_defers_metrics_to_worker(
     original_metric_rows = __import__("apps.analytics.views", fromlist=["patient_metric_rows"]).patient_metric_rows
     metric_calls = []
 
-    def metric_rows_only_in_worker(patients):
+    def metric_rows_only_in_worker(patients, *, heartbeat=None):
         metric_calls.append(tuple(str(patient.id) for patient in patients))
-        return original_metric_rows(patients)
+        return original_metric_rows(patients, heartbeat=heartbeat)
 
     monkeypatch.setattr("apps.analytics.views.patient_metric_rows", lambda patients: pytest.fail("大导出请求不得计算指标"))
     response = client.post("/api/v1/admin/analytics/exports/", {
@@ -102,31 +131,7 @@ def test_export_idempotency_rejects_changed_request(settings, doctor, patient, o
 
 @pytest.mark.django_db
 def test_more_than_1000_rows_never_builds_request_metrics_or_json_snapshot(doctor, patient, monkeypatch):
-    users = [
-        User(login_id=f"bulk-patient-{index:04d}", password="!", role=Role.PATIENT, must_change_password=False)
-        for index in range(1000)
-    ]
-    User.objects.bulk_create(users, batch_size=250)
-    patients = [
-        PatientProfile(
-            user=user,
-            medical_record_no=f"PX{index:06d}",
-            name=f"批量患者{index:04d}",
-            gender="male",
-            enrollment_age=30,
-            phone=f"139{index:08d}",
-            primary_doctor=doctor,
-        )
-        for index, user in enumerate(users)
-    ]
-    PatientProfile.objects.bulk_create(patients, batch_size=250)
-    TreatmentPlan.objects.bulk_create([
-        TreatmentPlan(
-            patient=item, start_date="2026-08-01", cycle_weeks=4,
-            target_session_count=12, status=TreatmentPlan.Status.ACTIVE,
-        )
-        for item in patients
-    ], batch_size=250)
+    _create_active_patients(doctor=doctor, count=1000, prefix="bulk")
     monkeypatch.setattr(
         "apps.analytics.views.patient_metric_rows",
         lambda patients: pytest.fail(">1000 请求端不得构造指标行"),
@@ -142,6 +147,54 @@ def test_more_than_1000_rows_never_builds_request_metrics_or_json_snapshot(docto
     assert job.snapshot_count == 1001
     assert ExportJobItem.objects.filter(job=job).count() == 1001
     assert "rows_snapshot" not in {field.name for field in ExportJob._meta.fields}
+
+
+@pytest.mark.django_db
+def test_exactly_1000_rows_are_exported_synchronously(doctor, patient):
+    _create_active_patients(doctor=doctor, count=999, prefix="boundary")
+    client = APIClient(); client.force_authenticate(doctor.user)
+
+    response = client.post("/api/v1/admin/analytics/exports/", {
+        "format": "csv", "filters": {}, "selected_ids": [], "idempotency_key": "exactly-1000",
+    }, format="json")
+
+    assert response.status_code == 200
+    assert response["X-Export-Row-Count"] == "1000"
+    assert len(response.content.decode("utf-8-sig").splitlines()) == 1001
+
+
+@pytest.mark.django_db
+def test_async_selected_ids_are_intersected_before_snapshot(settings, doctor, patient, other_patient):
+    import uuid
+
+    settings.ANALYTICS_SYNC_EXPORT_LIMIT = 1
+    client = APIClient(); client.force_authenticate(doctor.user)
+    response = client.post("/api/v1/admin/analytics/exports/", {
+        "format": "csv",
+        "filters": {"treatment_status": "active"},
+        "selected_ids": [str(patient.id), str(other_patient.id), str(uuid.uuid4())],
+        "idempotency_key": "async-selected-intersection",
+    }, format="json")
+
+    assert response.status_code == 202
+    job = ExportJob.objects.get(pk=response.json()["data"]["id"])
+    assert job.snapshot_count == 2
+    assert set(ExportJobItem.objects.filter(job=job).values_list("patient_id", flat=True)) == {
+        patient.id, other_patient.id,
+    }
+
+
+@pytest.mark.django_db
+def test_invalid_runtime_configuration_fails_closed_without_500(settings, doctor):
+    settings.ANALYTICS_SYNC_EXPORT_LIMIT = "many"
+    client = APIClient(); client.force_authenticate(doctor.user)
+
+    response = client.post("/api/v1/admin/analytics/exports/", {
+        "format": "csv", "filters": {}, "selected_ids": [], "idempotency_key": "bad-runtime",
+    }, format="json")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "export_runtime_unavailable"
 
 
 @pytest.mark.django_db
@@ -175,6 +228,33 @@ def test_export_failure_never_leaves_false_ready_job(settings, doctor, patient, 
         run_export_job(str(job.id))
 
     job.refresh_from_db()
+    assert job.status == "pending" and job.result_asset_id is None
+    assert job.claim_token is None and job.lease_expires_at is None
+
+
+@pytest.mark.django_db
+def test_heartbeat_loss_fences_worker_before_media_publish(doctor, monkeypatch):
+    from datetime import timedelta
+
+    job = ExportJob.objects.create(
+        creator=doctor.user, normalized_filters={}, selected_ids=[], snapshot_count=0,
+        format="csv", expires_at=timezone.now() + timedelta(hours=1),
+        idempotency_key="heartbeat-lost", request_fingerprint="9" * 64,
+    )
+    monkeypatch.setattr(
+        "apps.analytics.tasks.export_rows_to",
+        lambda stream, rows, export_format, **kwargs: stream.write(b"abc"),
+    )
+    monkeypatch.setattr("apps.analytics.tasks.renew_export_claim", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "apps.analytics.tasks.publish_generated_asset",
+        lambda **kwargs: pytest.fail("失去租约后不得继续发布媒体"),
+    )
+
+    result = run_export_job(str(job.id))
+
+    job.refresh_from_db()
+    assert result["published"] is False
     assert job.status == "pending" and job.result_asset_id is None
     assert job.claim_token is None and job.lease_expires_at is None
 
@@ -226,7 +306,7 @@ def test_export_worker_renews_claim_after_render_before_publishing(settings, doc
         etag="export-ready", status="ready", upload_expires_at=timezone.now() + timedelta(hours=1),
     )
 
-    def slow_render(stream, rows, export_format):
+    def slow_render(stream, rows, export_format, *, heartbeat=None):
         stream.write(b"abc")
         ExportJob.objects.filter(pk=job.id).update(lease_expires_at=timezone.now() + timedelta(seconds=1))
 
@@ -237,7 +317,7 @@ def test_export_worker_renews_claim_after_render_before_publishing(settings, doc
 
     monkeypatch.setattr("apps.analytics.tasks.export_rows_to", slow_render)
     monkeypatch.setattr("apps.analytics.tasks.publish_generated_asset", publish)
-    monkeypatch.setattr("apps.analytics.tasks.resolve_export_asset", lambda job, verify_storage=True: asset)
+    monkeypatch.setattr("apps.analytics.tasks.resolve_export_asset", lambda job, **kwargs: asset)
 
     result = run_export_job(str(job.id))
 
@@ -247,20 +327,19 @@ def test_export_worker_renews_claim_after_render_before_publishing(settings, doc
 
 
 @pytest.mark.django_db
-def test_expired_export_revokes_its_private_media(doctor):
+def test_expired_export_revokes_its_private_media(settings, doctor, tmp_path):
     from datetime import timedelta
-    import uuid
+    from apps.media.services import publish_generated_asset
+
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
 
     job = ExportJob.objects.create(
         creator=doctor.user, normalized_filters={}, selected_ids=[], snapshot_count=0,
         format="csv", status="pending", expires_at=timezone.now() - timedelta(seconds=1),
         idempotency_key="expire-media", request_fingerprint="d" * 64,
     )
-    asset = MediaAsset.objects.create(
-        owner_type="export", owner_id=job.id, media_type="export", backend="qiniu",
-        object_key=f"test/export/{uuid.uuid4().hex}", mime="text/csv", size=3,
-        etag="expired-ready", status="ready", upload_expires_at=timezone.now() + timedelta(hours=1),
-    )
+    asset = publish_generated_asset(owner_id=job.id, content=b"abc", mime="text/csv")
     ExportJob.objects.filter(pk=job.id).update(status="ready", result_asset_id=asset.id, completed_at=timezone.now())
     client = APIClient(); client.force_authenticate(doctor.user)
 
@@ -286,7 +365,7 @@ def test_worker_never_links_media_revoked_during_lease_takeover(doctor, monkeypa
         object_key=f"test/export/{uuid.uuid4().hex}", mime="text/csv", size=3,
         etag="revoked", status="pending_cleanup", upload_expires_at=timezone.now() + timedelta(hours=1),
     )
-    monkeypatch.setattr("apps.analytics.tasks.export_rows_to", lambda stream, rows, export_format: stream.write(b"abc"))
+    monkeypatch.setattr("apps.analytics.tasks.export_rows_to", lambda stream, rows, export_format, **kwargs: stream.write(b"abc"))
     monkeypatch.setattr("apps.analytics.tasks.publish_generated_asset", lambda **kwargs: asset)
 
     result = run_export_job(str(job.id))
@@ -316,7 +395,7 @@ def test_worker_does_not_publish_ready_after_job_expires(doctor, monkeypatch):
         ExportJob.objects.filter(pk=job.id).update(expires_at=timezone.now() - timedelta(seconds=1))
         return asset
 
-    monkeypatch.setattr("apps.analytics.tasks.export_rows_to", lambda stream, rows, export_format: stream.write(b"abc"))
+    monkeypatch.setattr("apps.analytics.tasks.export_rows_to", lambda stream, rows, export_format, **kwargs: stream.write(b"abc"))
     monkeypatch.setattr("apps.analytics.tasks.publish_generated_asset", publish)
 
     result = run_export_job(str(job.id))
@@ -327,9 +406,12 @@ def test_worker_does_not_publish_ready_after_job_expires(doctor, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_cleanup_crash_is_recovered_and_clears_snapshot_once(settings, doctor, patient, monkeypatch):
+def test_cleanup_crash_is_recovered_and_clears_snapshot_once(settings, doctor, patient, tmp_path, monkeypatch):
     from datetime import timedelta
-    import uuid
+    from apps.media.services import publish_generated_asset
+
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
 
     job = ExportJob.objects.create(
         creator=doctor.user,
@@ -342,11 +424,7 @@ def test_cleanup_crash_is_recovered_and_clears_snapshot_once(settings, doctor, p
         request_fingerprint="1" * 64,
     )
     ExportJobItem.objects.create(job=job, patient_id=patient.id, position=0)
-    asset = MediaAsset.objects.create(
-        owner_type="export", owner_id=job.id, media_type="export", backend="qiniu",
-        object_key=f"test/export/{uuid.uuid4().hex}", mime="text/csv", size=3,
-        etag="cleanup-crash", status="ready", upload_expires_at=timezone.now() + timedelta(hours=1),
-    )
+    asset = publish_generated_asset(owner_id=job.id, content=b"abc", mime="text/csv")
     ExportJob.objects.filter(pk=job.id).update(
         status="ready", result_asset_id=asset.id, completed_at=timezone.now(),
     )
@@ -361,6 +439,7 @@ def test_cleanup_crash_is_recovered_and_clears_snapshot_once(settings, doctor, p
     job.refresh_from_db()
     assert job.status == "expired" and job.cleanup_status == "processing"
     assert not ExportJobItem.objects.filter(job=job).exists()
+    assert job.normalized_filters == {} and job.selected_ids == []
 
     monkeypatch.setattr("apps.analytics.tasks.mark_asset_for_cleanup", original)
     ExportJob.objects.filter(pk=job.id).update(cleanup_lease_expires_at=timezone.now() - timedelta(seconds=1))
@@ -372,6 +451,36 @@ def test_cleanup_crash_is_recovered_and_clears_snapshot_once(settings, doctor, p
     assert job.normalized_filters == {} and job.selected_ids == []
     assert asset.status == "pending_cleanup"
     assert AuditLog.objects.filter(action="analytics.export_cleanup", target_id=job.id).count() == 1
+
+
+@pytest.mark.django_db
+def test_cleanup_untrusted_asset_detaches_without_touching_other_job_media(doctor):
+    from datetime import timedelta
+    import uuid
+
+    other_owner = uuid.uuid4()
+    job = ExportJob.objects.create(
+        creator=doctor.user, normalized_filters={"name": "敏感"}, selected_ids=[str(uuid.uuid4())],
+        snapshot_count=1, format="csv", expires_at=timezone.now() - timedelta(seconds=1),
+        idempotency_key="cleanup-wrong-owner", request_fingerprint="3" * 64,
+    )
+    asset = MediaAsset.objects.create(
+        owner_type="export", owner_id=other_owner, media_type="export", backend="qiniu",
+        object_key=f"test/export/{uuid.uuid4().hex}", mime="text/csv", size=3,
+        etag="other-job", status="ready", upload_expires_at=timezone.now() + timedelta(hours=1),
+    )
+    ExportJob.objects.filter(pk=job.id).update(
+        status="ready", result_asset_id=asset.id, completed_at=timezone.now(),
+    )
+
+    expire_export_job(job.id)
+
+    job.refresh_from_db(); asset.refresh_from_db()
+    cleanup_audit = AuditLog.objects.get(action="analytics.export_cleanup", target_id=job.id)
+    assert job.cleanup_status == "complete" and job.result_asset_id is None
+    assert job.normalized_filters == {} and job.selected_ids == []
+    assert asset.status == "ready" and asset.owner_id == other_owner
+    assert cleanup_audit.changes["asset_validation"] == "export_asset_invalid"
 
 
 @pytest.mark.django_db
@@ -440,3 +549,29 @@ def test_private_url_rejects_local_manifest_receipt_mismatch(
     assert response.status_code == 409
     assert response.json()["code"] in {"export_asset_invalid", "export_asset_unverifiable"}
     assert job.status == "failed" and job.cleanup_status == "complete"
+
+
+@pytest.mark.django_db
+def test_private_url_storage_signing_failure_is_stable_conflict(
+    settings, doctor, patient, other_patient, tmp_path, monkeypatch,
+):
+    from apps.media.contracts import StorageValidationError
+
+    settings.ANALYTICS_SYNC_EXPORT_LIMIT = 1
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    client = APIClient(); client.force_authenticate(doctor.user)
+    created = client.post("/api/v1/admin/analytics/exports/", {
+        "format": "csv", "filters": {}, "selected_ids": [], "idempotency_key": "signing-failure",
+    }, format="json")
+    job = ExportJob.objects.get(pk=created.json()["data"]["id"])
+    run_export_job(str(job.id))
+    monkeypatch.setattr(
+        "apps.media.backends.local.LocalStorageBackend.create_private_url",
+        lambda *args, **kwargs: (_ for _ in ()).throw(StorageValidationError("backend changed")),
+    )
+
+    response = client.post(f"/api/v1/admin/analytics/exports/{job.id}/private-url/")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "export_asset_unverifiable"

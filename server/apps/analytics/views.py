@@ -11,20 +11,19 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.views import APIView
 
 from apps.accounts.views import api_response
 from apps.audit.services import record
-from apps.media.backends.local import LocalStorageBackend
-from apps.media.services import backend_for_asset, ensure_local_asset_layout
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 
 from .calculations import METRIC_VERSION
-from .assets import ExportAssetError, resolve_export_asset
+from .assets import ExportAssetError, issue_export_private_url, resolve_export_asset
 from .dto import ExportRequestSerializer, PatientMetricFilters, PatientMetricQuerySerializer
 from .exporters import CsvExporter, XlsxExporter, export_rows
 from .models import ExportJob, ExportJobItem
+from .runtime import ExportRuntimeConfigurationError, get_export_runtime_config
 from .selectors import dashboard_metrics, exportable_row, filtered_patients, patient_metric_rows
 from .tasks import expire_export_job, request_export_cleanup, run_export_job_task
 
@@ -39,6 +38,12 @@ class ExportAssetConflict(APIException):
     status_code = 409
     default_code = "export_asset_invalid"
     default_detail = "导出媒体状态不可信"
+
+
+class ExportRuntimeUnavailable(APIException):
+    status_code = 503
+    default_code = "export_runtime_unavailable"
+    default_detail = "导出服务配置不可用"
 
 
 def _validate_query(request):
@@ -119,7 +124,10 @@ def _snapshot_job_items(job, patient_queryset, *, batch_size=500):
         ExportJobItem.objects.bulk_create(batch, batch_size=batch_size)
 
 
-def _find_or_create_job(*, user, key, fingerprint, filters, selected_ids, patient_queryset, count, export_format):
+def _find_or_create_job(
+    *, user, key, fingerprint, filters, selected_ids, patient_queryset,
+    count, export_format, ttl_seconds,
+):
     try:
         with transaction.atomic():
             existing = ExportJob.objects.select_for_update().filter(creator=user, idempotency_key=key).first()
@@ -133,7 +141,7 @@ def _find_or_create_job(*, user, key, fingerprint, filters, selected_ids, patien
                 selected_ids=[str(value) for value in selected_ids],
                 snapshot_count=count,
                 format=export_format,
-                expires_at=timezone.now() + timedelta(seconds=settings.ANALYTICS_EXPORT_TTL_SECONDS),
+                expires_at=timezone.now() + timedelta(seconds=ttl_seconds),
                 idempotency_key=key,
                 request_fingerprint=fingerprint,
             )
@@ -150,6 +158,10 @@ class ExportCreateView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
     def post(self, request):
+        try:
+            runtime = get_export_runtime_config()
+        except ExportRuntimeConfigurationError as exc:
+            raise ExportRuntimeUnavailable() from exc
         serializer = ExportRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
@@ -159,7 +171,7 @@ class ExportCreateView(APIView):
         count = patient_queryset.count()
         export_format = values["format"]
         exporter = CsvExporter() if export_format == "csv" else XlsxExporter()
-        if count <= settings.ANALYTICS_SYNC_EXPORT_LIMIT:
+        if count <= runtime.sync_limit:
             rows = [exportable_row(row) for row in patient_metric_rows(patient_queryset)]
             content = export_rows(rows, export_format)
             record(
@@ -185,6 +197,7 @@ class ExportCreateView(APIView):
             patient_queryset=patient_queryset,
             count=count,
             export_format=export_format,
+            ttl_seconds=runtime.ttl_seconds,
         )
         if created:
             record(
@@ -224,32 +237,17 @@ class ExportPrivateUrlView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
     def post(self, request, job_id):
-        job = get_object_or_404(ExportJob, pk=job_id)
-        remaining = int((job.expires_at - timezone.now()).total_seconds())
-        if remaining <= 0:
-            expire_export_job(job.id)
-            raise PermissionDenied("导出文件已过期", code="export_expired")
-        if job.status != ExportJob.Status.READY or not job.result_asset_id:
-            raise PermissionDenied("导出文件尚不可下载", code="export_not_ready")
+        get_object_or_404(ExportJob, pk=job_id)
         try:
-            asset = resolve_export_asset(job)
+            job, asset, private = issue_export_private_url(job_id)
+        except ExportRuntimeConfigurationError as exc:
+            raise ExportRuntimeUnavailable() from exc
         except ExportAssetError as exc:
-            request_export_cleanup(job.id, status=ExportJob.Status.FAILED, failure_reason=exc.message)
+            if exc.code == "export_expired":
+                expire_export_job(job_id)
+            elif exc.code.startswith("export_asset_"):
+                request_export_cleanup(job_id, status=ExportJob.Status.FAILED, failure_reason=exc.message)
             raise ExportAssetConflict(exc.message, code=exc.code) from exc
-        backend = backend_for_asset(asset)
-        ttl = min(settings.MEDIA_PRIVATE_URL_TTL_SECONDS, remaining)
-        if isinstance(backend, LocalStorageBackend):
-            asset = ensure_local_asset_layout(asset=asset)
-            if asset.status != "ready":
-                raise PermissionDenied("导出文件尚不可下载", code="export_not_ready")
-            private = backend.create_private_url(
-                asset.object_key,
-                ttl_seconds=ttl,
-                asset_id=asset.id,
-                expected_generation=asset.manifest_generation,
-            )
-        else:
-            private = backend.create_private_url(asset.object_key, ttl_seconds=ttl)
         record(
             actor=request.user,
             action="analytics.export_download",
