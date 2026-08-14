@@ -149,8 +149,18 @@ def issue_session_upload_grant(*, session_id: UUID, patient_id: UUID, media_type
                 if existing.media_type != media_type or asset.mime != mime or asset.size != size:
                     raise SingingMediaConflict("幂等键已用于不同的上传凭证请求")
                 if asset.status == MediaAsset.Status.READY:
+                    if session.status not in {
+                        SingingSession.Status.AWAITING_UPLOAD,
+                        SingingSession.Status.UPLOADED,
+                    }:
+                        raise SingingStateConflict()
                     grant = UploadGrant(object_key=asset.object_key, expires_at=asset.upload_expires_at)
                 else:
+                    if session.status not in {
+                        SingingSession.Status.CREATED,
+                        SingingSession.Status.AWAITING_UPLOAD,
+                    }:
+                        raise SingingStateConflict()
                     grant = reissue_upload_grant(asset=asset)
                 return UploadGrantResult(session=session, asset=asset, grant=grant, created=False)
         if session.status not in {SingingSession.Status.CREATED, SingingSession.Status.AWAITING_UPLOAD}:
@@ -215,12 +225,88 @@ def _asset_snapshot(asset: MediaAsset) -> dict[str, object]:
     return {
         "asset_id": str(asset.id), "object_key": asset.object_key, "media_type": asset.media_type,
         "mime": asset.mime, "size": asset.size, "backend": asset.backend,
+        "generation": asset.manifest_generation,
+        "blob": asset.sha256 if asset.backend == "local" else asset.etag,
         "receipt_fingerprint": source_receipt_fingerprint(asset),
     }
 
 
-def _session_tasks(session_id):
-    return AnalysisTask.objects.filter(target_type=AnalysisTask.TargetType.SINGING_SESSION, target_id=session_id).order_by("task_type")
+def _task_snapshot(*, session: SingingSession, asset: MediaAsset, generation: int) -> dict[str, object]:
+    return {
+        "session_id": str(session.id),
+        "duration_seconds": session.song_snapshot["duration_seconds"],
+        "protocol_version": "1.0",
+        "generation": generation,
+        "media": _asset_snapshot(asset),
+    }
+
+
+def _session_tasks(session_id, *, generation=None):
+    queryset = AnalysisTask.objects.filter(
+        target_type=AnalysisTask.TargetType.SINGING_SESSION,
+        target_id=session_id,
+    )
+    if generation is not None:
+        queryset = queryset.filter(generation=generation)
+    return queryset.order_by("task_type")
+
+
+def _task_idempotency_key(session_id: UUID, generation: int, task_type: str) -> str:
+    if generation == 0:
+        return f"singing:{session_id}:{task_type}"
+    return f"singing:{session_id}:{generation}:{task_type}"
+
+
+def _locked_ready_bindings(session: SingingSession) -> dict[str, SessionMedia]:
+    bindings = list(
+        SessionMedia.objects.select_for_update().select_related("asset").filter(session=session)
+    )
+    by_type = {binding.media_type: binding for binding in bindings}
+    audio = by_type.get("singing_audio")
+    if not audio or not audio.confirmed_at or audio.asset.status != MediaAsset.Status.READY:
+        raise SingingMediaConflict("演唱音频尚未通过可信回执确认")
+    if any(not item.confirmed_at or item.asset.status != MediaAsset.Status.READY for item in bindings):
+        raise SingingMediaConflict("存在尚未确认完成的演唱媒体")
+    return by_type
+
+
+def _create_generation_tasks_locked(*, session: SingingSession, generation: int) -> list[AnalysisTask]:
+    by_type = _locked_ready_bindings(session)
+    task_specs = [(AnalysisTask.TaskType.SINGING_AUDIO_METRICS, by_type["singing_audio"].asset)]
+    video = by_type.get("singing_video")
+    if video:
+        task_specs.append((AnalysisTask.TaskType.FACE_LANDMARKS, video.asset))
+    tasks = []
+    for task_type, asset in task_specs:
+        defaults = {
+            "target_type": AnalysisTask.TargetType.SINGING_SESSION,
+            "target_id": session.id,
+            "song": None,
+            "source_asset": asset,
+            "task_type": task_type,
+            "protocol_version": "1.0",
+            "executor": "mock_singing",
+            "generation": generation,
+            "input_snapshot": _task_snapshot(
+                session=session,
+                asset=asset,
+                generation=generation,
+            ),
+        }
+        task, created = AnalysisTask.objects.get_or_create(
+            idempotency_key=_task_idempotency_key(session.id, generation, task_type),
+            defaults=defaults,
+        )
+        if not created and (
+            task.target_type != defaults["target_type"] or task.target_id != defaults["target_id"]
+            or task.song_id is not None or task.source_asset_id != asset.id
+            or task.task_type != task_type or task.protocol_version != "1.0"
+            or task.executor != "mock_singing" or task.generation != generation
+            or task.input_snapshot != defaults["input_snapshot"]
+        ):
+            raise SingingSubmissionConflict("幂等分析任务与当前会话媒体不一致")
+        tasks.append(task)
+    return tasks
 
 
 def submit_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) -> SubmissionResult:
@@ -234,55 +320,20 @@ def submit_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) 
         if session.submission_idempotency_key:
             if session.submission_idempotency_key != idempotency_key:
                 raise SingingSubmissionConflict()
-            tasks = tuple(_session_tasks(session.id).values_list("id", flat=True))
+            tasks = tuple(_session_tasks(session.id, generation=0).values_list("id", flat=True))
             return SubmissionResult(session=session, task_ids=tasks, created=False)
         if session.status != SingingSession.Status.UPLOADED:
             raise SingingStateConflict()
-        bindings = list(SessionMedia.objects.select_for_update().select_related("asset").filter(session=session))
-        by_type = {binding.media_type: binding for binding in bindings}
-        audio = by_type.get("singing_audio")
-        if not audio or not audio.confirmed_at or audio.asset.status != MediaAsset.Status.READY:
-            raise SingingMediaConflict("演唱音频尚未通过可信回执确认")
-        if any(not item.confirmed_at or item.asset.status != MediaAsset.Status.READY for item in bindings):
-            raise SingingMediaConflict("存在尚未确认完成的演唱媒体")
-        tasks = []
-        task_specs = [("singing_audio_metrics", audio.asset)]
-        video = by_type.get("singing_video")
-        if video:
-            task_specs.append(("face_landmarks", video.asset))
-        for task_type, asset in task_specs:
-            defaults = {
-                "target_type": AnalysisTask.TargetType.SINGING_SESSION,
-                "target_id": session.id,
-                "song": None,
-                "source_asset": asset,
-                "task_type": task_type,
-                "protocol_version": "1.0",
-                "executor": "mock_singing",
-                "input_snapshot": {
-                    "session_id": str(session.id), "duration_seconds": session.song_snapshot["duration_seconds"],
-                    "media": _asset_snapshot(asset),
-                },
-            }
-            task, created = AnalysisTask.objects.get_or_create(
-                idempotency_key=f"singing:{session.id}:{task_type}",
-                defaults=defaults,
-            )
-            if not created and (
-                task.target_type != defaults["target_type"] or task.target_id != defaults["target_id"]
-                or task.song_id is not None or task.source_asset_id != asset.id
-                or task.task_type != task_type or task.protocol_version != "1.0"
-                or task.executor != "mock_singing" or task.input_snapshot != defaults["input_snapshot"]
-            ):
-                raise SingingSubmissionConflict("幂等分析任务与当前会话媒体不一致")
-            tasks.append(task)
+        if session.analysis_generation != 0:
+            raise SingingSubmissionConflict("首次提交的分析代际无效")
+        tasks = _create_generation_tasks_locked(session=session, generation=0)
         session.submission_idempotency_key = idempotency_key
         session.status = SingingSession.Status.PROCESSING
         session.submitted_at = timezone.now()
         session.save(update_fields=["submission_idempotency_key", "status", "submitted_at", "updated_at"])
         for task in tasks:
             transaction.on_commit(lambda task_id=task.id: schedule_singing_analysis_task(task_id))
-        task_ids = tuple(_session_tasks(session.id).values_list("id", flat=True))
+        task_ids = tuple(_session_tasks(session.id, generation=0).values_list("id", flat=True))
         return SubmissionResult(session=session, task_ids=task_ids, created=True)
 
 
@@ -311,7 +362,10 @@ def retry_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) -
         except SingingSession.DoesNotExist as exc:
             raise NotFound() from exc
         if session.retry_idempotency_key == idempotency_key:
-            task_ids = tuple(_session_tasks(session.id).values_list("id", flat=True))
+            task_ids = tuple(_session_tasks(
+                session.id,
+                generation=session.analysis_generation,
+            ).values_list("id", flat=True))
             return SubmissionResult(session=session, task_ids=task_ids, created=False)
         if session.retry_idempotency_key and session.status == SingingSession.Status.PROCESSING:
             raise SingingRetryConflict()
@@ -319,24 +373,21 @@ def retry_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) -
             raise SingingStateConflict()
         tasks = list(AnalysisTask.objects.select_for_update().filter(
             target_type=AnalysisTask.TargetType.SINGING_SESSION, target_id=session.id,
+            generation=session.analysis_generation,
         ).order_by("task_type"))
         failed_tasks = [task for task in tasks if task.status == AnalysisTask.Status.FAILED]
         if not failed_tasks:
             raise SingingStateConflict("演唱会话没有可重试的失败任务")
         if any(task.attempt >= MAX_ATTEMPTS for task in failed_tasks):
             raise SingingRetryExhausted()
-        for task in failed_tasks:
-            AnalysisResult.objects.filter(task=task).delete()
-            AnalysisTimeSeries.objects.filter(task=task).delete()
-            task.status = AnalysisTask.Status.RETRYING
-            _clear_task_claim(task)
-            task.next_dispatch_at = None
-            task.error_code = ""
-            task.error_summary = ""
-            task.completed_at = None
-            task.save()
+        next_generation = session.analysis_generation + 1
+        new_tasks = _create_generation_tasks_locked(
+            session=session,
+            generation=next_generation,
+        )
         session.retry_idempotency_key = idempotency_key
         session.retry_generation += 1
+        session.analysis_generation = next_generation
         session.status = SingingSession.Status.PROCESSING
         session.score = None
         session.burp_count = None
@@ -344,12 +395,16 @@ def retry_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) -
         session.is_mock = False
         session.completed_at = None
         session.save(update_fields=[
-            "retry_idempotency_key", "retry_generation", "status", "score", "burp_count",
-            "duration_seconds", "is_mock", "completed_at", "updated_at",
+            "retry_idempotency_key", "retry_generation", "analysis_generation", "status",
+            "score", "burp_count", "duration_seconds", "is_mock", "completed_at", "updated_at",
         ])
-        for task in failed_tasks:
+        for task in new_tasks:
             transaction.on_commit(lambda task_id=task.id: schedule_singing_analysis_task(task_id))
-        return SubmissionResult(session=session, task_ids=tuple(task.id for task in tasks), created=True)
+        return SubmissionResult(
+            session=session,
+            task_ids=tuple(task.id for task in sorted(new_tasks, key=lambda value: value.task_type)),
+            created=True,
+        )
 
 
 def _clear_task_claim(task: AnalysisTask):
@@ -359,7 +414,13 @@ def _clear_task_claim(task: AnalysisTask):
 
 
 def _task_asset_is_valid(*, session: SingingSession, task: AnalysisTask) -> bool:
-    expected_media_type = "singing_audio" if task.task_type == "singing_audio_metrics" else "singing_video"
+    expected_types = {
+        AnalysisTask.TaskType.SINGING_AUDIO_METRICS: "singing_audio",
+        AnalysisTask.TaskType.FACE_LANDMARKS: "singing_video",
+    }
+    expected_media_type = expected_types.get(task.task_type)
+    if expected_media_type is None:
+        return False
     binding = SessionMedia.objects.select_for_update().select_related("asset").filter(
         session=session, asset_id=task.source_asset_id, media_type=expected_media_type,
         confirmed_at__isnull=False,
@@ -367,13 +428,17 @@ def _task_asset_is_valid(*, session: SingingSession, task: AnalysisTask) -> bool
     if binding is None:
         return False
     asset = binding.asset
-    snapshot = task.input_snapshot.get("media", {})
     return bool(
-        asset.status == MediaAsset.Status.READY and asset.deleted_at is None
+        task.generation == session.analysis_generation
+        and task.protocol_version == "1.0" and task.executor == "mock_singing"
+        and asset.status == MediaAsset.Status.READY and asset.deleted_at is None
         and asset.owner_type == "patient" and asset.owner_id == session.patient_id
         and asset.patient_owner_id == session.patient_id and asset.media_type == expected_media_type
-        and snapshot.get("asset_id") == str(asset.id)
-        and snapshot.get("receipt_fingerprint") == source_receipt_fingerprint(asset)
+        and task.input_snapshot == _task_snapshot(
+            session=session,
+            asset=asset,
+            generation=session.analysis_generation,
+        )
     )
 
 
@@ -386,16 +451,29 @@ def _lock_singing_task(task_id: UUID):
     return session, task
 
 
-def _fail_singing_task_locked(task: AnalysisTask, session: SingingSession, *, code: str, summary: str):
-    AnalysisResult.objects.filter(task=task).delete()
-    AnalysisTimeSeries.objects.filter(task=task).delete()
-    task.status = AnalysisTask.Status.FAILED
-    _clear_task_claim(task)
-    task.next_dispatch_at = None
-    task.error_code = code
-    task.error_summary = summary[:256]
-    task.completed_at = timezone.now()
-    task.save()
+def _fail_singing_generation_locked(task: AnalysisTask, session: SingingSession, *, code: str, summary: str):
+    if task.generation != session.analysis_generation:
+        return task
+    now = timezone.now()
+    generation_tasks = AnalysisTask.objects.select_for_update().filter(
+        target_type=AnalysisTask.TargetType.SINGING_SESSION,
+        target_id=session.id,
+        generation=session.analysis_generation,
+    )
+    task_ids = list(generation_tasks.values_list("id", flat=True))
+    AnalysisResult.objects.filter(task_id__in=task_ids).delete()
+    AnalysisTimeSeries.objects.filter(task_id__in=task_ids).delete()
+    generation_tasks.update(
+        status=AnalysisTask.Status.FAILED,
+        claim_token=None,
+        lease_expires_at=None,
+        heartbeat_at=None,
+        next_dispatch_at=None,
+        error_code=code,
+        error_summary=summary[:256],
+        completed_at=now,
+        updated_at=now,
+    )
     session.status = SingingSession.Status.FAILED
     session.score = None
     session.burp_count = None
@@ -405,6 +483,7 @@ def _fail_singing_task_locked(task: AnalysisTask, session: SingingSession, *, co
     session.save(update_fields=[
         "status", "score", "burp_count", "duration_seconds", "is_mock", "completed_at", "updated_at",
     ])
+    task.refresh_from_db()
     return task
 
 
@@ -414,7 +493,7 @@ def fail_exhausted_singing_task(task_id: UUID) -> bool:
         session, task = _lock_singing_task(task_id)
         if task.attempt < MAX_ATTEMPTS or not _is_recoverable_task(task, now=timezone.now()):
             return False
-        _fail_singing_task_locked(
+        _fail_singing_generation_locked(
             task, session, code="analysis_retry_exhausted",
             summary="分析服务暂时不可用，已超过重试次数",
         )
@@ -431,18 +510,20 @@ def claim_singing_analysis_task(task_id: UUID, *, now=None):
         session, task = _lock_singing_task(task_id)
         if task.status in {AnalysisTask.Status.SUCCEEDED, AnalysisTask.Status.FAILED, AnalysisTask.Status.SUPERSEDED}:
             return None
+        if task.generation != session.analysis_generation:
+            return None
         if task.status == AnalysisTask.Status.PROCESSING and task.lease_expires_at and task.lease_expires_at > now:
             return None
         if task.attempt >= MAX_ATTEMPTS:
-            _fail_singing_task_locked(task, session, code="analysis_retry_exhausted", summary="分析服务暂时不可用，已超过重试次数")
+            _fail_singing_generation_locked(task, session, code="analysis_retry_exhausted", summary="分析服务暂时不可用，已超过重试次数")
             return None
         if session.status != SingingSession.Status.PROCESSING or not _task_asset_is_valid(session=session, task=task):
-            _fail_singing_task_locked(task, session, code="analysis_source_unavailable", summary="演唱媒体已不可用")
+            _fail_singing_generation_locked(task, session, code="analysis_source_unavailable", summary="演唱媒体已不可用")
             return None
         try:
             resolve_executor(task.task_type, task.executor, task.protocol_version)
         except AnalysisProtocolError:
-            _fail_singing_task_locked(task, session, code="analysis_protocol_unsupported", summary="分析任务协议不受支持")
+            _fail_singing_generation_locked(task, session, code="analysis_protocol_unsupported", summary="分析任务协议不受支持")
             return None
         token = uuid4()
         task.status = AnalysisTask.Status.PROCESSING
@@ -486,21 +567,26 @@ def finalize_singing_success(task_id: UUID, claim_token: UUID, payload):
         if not valid:
             return task
         if not _task_asset_is_valid(session=session, task=task):
-            return _fail_singing_task_locked(task, session, code="analysis_source_unavailable", summary="演唱媒体已不可用")
+            return _fail_singing_generation_locked(task, session, code="analysis_source_unavailable", summary="演唱媒体已不可用")
         try:
             parsed = resolve_executor(task.task_type, task.executor, task.protocol_version).result_parser(payload)
         except AnalysisProtocolError:
-            return _fail_singing_task_locked(task, session, code="analysis_result_invalid", summary="分析结果协议无效")
+            return _fail_singing_generation_locked(task, session, code="analysis_result_invalid", summary="分析结果协议无效")
         stored_payload = parsed.as_dict()
         AnalysisResult.objects.update_or_create(
             task=task,
-            defaults={"protocol_version": parsed.protocol_version, "is_mock": parsed.is_mock, "payload": stored_payload},
+            defaults={
+                "protocol_version": parsed.protocol_version,
+                "is_mock": parsed.is_mock,
+                "generation": task.generation,
+                "payload": stored_payload,
+            },
         )
         AnalysisTimeSeries.objects.filter(task=task).delete()
         if task.task_type == AnalysisTask.TaskType.SINGING_AUDIO_METRICS:
             AnalysisTimeSeries.objects.bulk_create([
                 AnalysisTimeSeries(
-                    session=session, task=task, metric_type=metric,
+                    session=session, task=task, generation=task.generation, metric_type=metric,
                     sample_interval_ms=parsed.sample_interval_ms, values=list(values),
                 )
                 for metric, values in parsed.series.items()
@@ -514,12 +600,15 @@ def finalize_singing_success(task_id: UUID, claim_token: UUID, payload):
         task.save()
         unfinished = AnalysisTask.objects.filter(
             target_type=AnalysisTask.TargetType.SINGING_SESSION, target_id=session.id,
+            generation=session.analysis_generation,
         ).exclude(status=AnalysisTask.Status.SUCCEEDED).exists()
         if not unfinished:
             audio_result = AnalysisResult.objects.get(
                 task__target_type=AnalysisTask.TargetType.SINGING_SESSION,
                 task__target_id=session.id,
                 task__task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+                task__generation=session.analysis_generation,
+                generation=session.analysis_generation,
             ).payload
             session.status = SingingSession.Status.COMPLETED
             session.score = audio_result["score"]
@@ -539,9 +628,10 @@ def finalize_singing_failure(task_id: UUID, claim_token: UUID, *, code: str, sum
         if (
             task.status != AnalysisTask.Status.PROCESSING or task.claim_token != claim_token
             or not task.lease_expires_at or task.lease_expires_at <= timezone.now()
+            or task.generation != session.analysis_generation
         ):
             return task
-        return _fail_singing_task_locked(task, session, code=code, summary=summary)
+        return _fail_singing_generation_locked(task, session, code=code, summary=summary)
 
 
 def handle_singing_transient(task_id: UUID, claim_token: UUID):
@@ -551,12 +641,13 @@ def handle_singing_transient(task_id: UUID, claim_token: UUID):
         if (
             task.status != AnalysisTask.Status.PROCESSING or task.claim_token != claim_token
             or not task.lease_expires_at or task.lease_expires_at <= timezone.now()
+            or task.generation != session.analysis_generation
         ):
             return TransientOutcome(task=task, should_retry=False)
         AnalysisResult.objects.filter(task=task).delete()
         AnalysisTimeSeries.objects.filter(task=task).delete()
         if task.attempt >= MAX_ATTEMPTS:
-            _fail_singing_task_locked(task, session, code="analysis_retry_exhausted", summary="分析服务暂时不可用，已超过重试次数")
+            _fail_singing_generation_locked(task, session, code="analysis_retry_exhausted", summary="分析服务暂时不可用，已超过重试次数")
             return TransientOutcome(task=task, should_retry=False)
         task.status = AnalysisTask.Status.RETRYING
         _clear_task_claim(task)
@@ -598,7 +689,11 @@ def _release_singing_dispatch(task_id: UUID, expected_next_dispatch_at) -> bool:
     from apps.analysis.services import _is_recoverable_task
     with transaction.atomic():
         _session, task = _lock_singing_task(task_id)
-        if task.next_dispatch_at != expected_next_dispatch_at or not _is_recoverable_task(task, now=timezone.now()):
+        if (
+            task.generation != _session.analysis_generation
+            or task.next_dispatch_at != expected_next_dispatch_at
+            or not _is_recoverable_task(task, now=timezone.now())
+        ):
             return False
         task.next_dispatch_at = None
         task.save(update_fields=["next_dispatch_at", "updated_at"])
@@ -612,10 +707,12 @@ def schedule_singing_analysis_task(task_id: UUID) -> bool:
         session, task = _lock_singing_task(task_id)
         if task.status in {AnalysisTask.Status.SUCCEEDED, AnalysisTask.Status.FAILED, AnalysisTask.Status.SUPERSEDED}:
             return False
+        if task.generation != session.analysis_generation or session.status != SingingSession.Status.PROCESSING:
+            return False
         if _has_active_claim(task, now=now) or not _is_recoverable_task(task, now=now):
             return False
         if task.attempt >= MAX_ATTEMPTS:
-            _fail_singing_task_locked(task, session, code="analysis_retry_exhausted", summary="分析服务暂时不可用，已超过重试次数")
+            _fail_singing_generation_locked(task, session, code="analysis_retry_exhausted", summary="分析服务暂时不可用，已超过重试次数")
             return False
         if task.next_dispatch_at and task.next_dispatch_at > now:
             return False

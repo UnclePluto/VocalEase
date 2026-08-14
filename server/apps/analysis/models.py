@@ -34,6 +34,7 @@ class AnalysisTask(models.Model):
     protocol_version = models.CharField(max_length=16, default="1.0")
     executor = models.CharField(max_length=64, default="mock_song")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    generation = models.PositiveIntegerField(default=0)
     attempt = models.PositiveSmallIntegerField(default=0)
     idempotency_key = models.CharField(max_length=128, unique=True)
     input_snapshot = models.JSONField(default=dict)
@@ -50,9 +51,16 @@ class AnalysisTask(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["target_type", "target_id", "generation", "task_type"],
+                name="analysis_task_target_gen_idx",
+            ),
+        ]
         constraints = [
             models.CheckConstraint(condition=Q(status__in=["pending", "processing", "succeeded", "failed", "retrying", "superseded"]), name="analysis_task_status_valid"),
             models.CheckConstraint(condition=Q(attempt__gte=0), name="analysis_task_attempt_nonnegative"),
+            models.CheckConstraint(condition=Q(generation__gte=0), name="analysis_task_generation_nonnegative"),
             models.CheckConstraint(condition=Q(task_type__in=["vocal_separation", "accompaniment_generation", "lyrics_recognition", "singing_audio_metrics", "face_landmarks"]), name="analysis_task_type_valid"),
             models.CheckConstraint(condition=Q(executor__in=["mock_song", "mock_singing"]), name="analysis_executor_valid"),
             models.CheckConstraint(condition=Q(protocol_version="1.0"), name="analysis_protocol_valid"),
@@ -81,5 +89,6 @@ class AnalysisResult(models.Model):
     task = models.OneToOneField(AnalysisTask, on_delete=models.CASCADE, related_name="analysis_result")
     protocol_version = models.CharField(max_length=16)
     is_mock = models.BooleanField(default=False)
+    generation = models.PositiveIntegerField(default=0)
     payload = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)

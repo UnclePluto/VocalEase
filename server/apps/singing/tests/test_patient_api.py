@@ -2,6 +2,8 @@ import io
 import uuid
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -235,3 +237,30 @@ def test_singing_history_rejects_unknown_query_parameters(patient):
     assert response.status_code == 400
     assert response.json()["code"] == "validation_error"
     assert "unknown" in response.json()["data"]
+
+
+@pytest.mark.django_db
+def test_singing_history_is_lightweight_and_query_count_does_not_grow_with_page_size(
+    patient,
+    tmp_path,
+    settings,
+):
+    song = ready_song(tmp_path, settings)
+    SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    with CaptureQueriesContext(connection) as one_session_queries:
+        one = client.get("/api/v1/patient/singing-sessions/?page_size=20")
+    for _index in range(4):
+        SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    with CaptureQueriesContext(connection) as five_session_queries:
+        five = client.get("/api/v1/patient/singing-sessions/?page_size=20")
+
+    assert one.status_code == five.status_code == 200
+    assert len(one_session_queries) == len(five_session_queries)
+    assert len(five_session_queries) <= 6
+    assert len(five.json()["data"]["results"]) == 5
+    for row in five.json()["data"]["results"]:
+        assert "analysis_results" not in row
+        assert "analysis_task_ids" not in row

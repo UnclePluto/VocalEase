@@ -51,48 +51,62 @@ class SessionMediaReadSerializer(serializers.ModelSerializer):
         fields = ("asset_id", "media_type", "status", "mime", "size", "confirmed_at")
 
 
-class SingingSessionReadSerializer(serializers.ModelSerializer):
+class SingingSessionSummarySerializer(serializers.ModelSerializer):
     patient = serializers.JSONField(source="patient_snapshot", read_only=True)
     song = serializers.JSONField(source="song_snapshot", read_only=True)
     treatment_plan = serializers.JSONField(source="treatment_plan_snapshot", read_only=True)
-    media = SessionMediaReadSerializer(source="media_bindings", many=True, read_only=True)
-    analysis_task_ids = serializers.SerializerMethodField()
-    analysis_results = serializers.SerializerMethodField()
 
     class Meta:
         model = SingingSession
         fields = (
             "id", "patient", "song", "treatment_plan", "status", "score", "burp_count",
-            "duration_seconds", "is_mock", "created_source", "media", "analysis_task_ids",
-            "analysis_results",
+            "duration_seconds", "is_mock", "created_source", "analysis_generation",
             "submitted_at", "completed_at", "created_at", "updated_at",
         )
 
-    def get_analysis_task_ids(self, obj):
+
+class SingingSessionReadSerializer(SingingSessionSummarySerializer):
+    media = SessionMediaReadSerializer(source="media_bindings", many=True, read_only=True)
+    analysis_task_ids = serializers.SerializerMethodField()
+    analysis_results = serializers.SerializerMethodField()
+
+    class Meta(SingingSessionSummarySerializer.Meta):
+        fields = SingingSessionSummarySerializer.Meta.fields + (
+            "media", "analysis_task_ids", "analysis_results",
+        )
+
+    @staticmethod
+    def _current_tasks(obj):
+        prefetched = getattr(obj, "prefetched_analysis_tasks", None)
+        if prefetched is not None:
+            return [task for task in prefetched if task.generation == obj.analysis_generation]
         from apps.analysis.models import AnalysisTask
-        return [
-            str(value) for value in AnalysisTask.objects.filter(
-                target_type="singing_session", target_id=obj.id,
-            ).order_by("task_type").values_list("id", flat=True)
-        ]
+        return list(AnalysisTask.objects.filter(
+            target_type="singing_session",
+            target_id=obj.id,
+            generation=obj.analysis_generation,
+        ).select_related("analysis_result").prefetch_related("time_series").order_by("task_type"))
+
+    def get_analysis_task_ids(self, obj):
+        return [str(task.id) for task in self._current_tasks(obj)]
 
     def get_analysis_results(self, obj):
-        from apps.analysis.models import AnalysisTask
-        tasks = AnalysisTask.objects.filter(
-            target_type="singing_session", target_id=obj.id,
-        ).select_related("analysis_result").prefetch_related("time_series").order_by("task_type")
         rows = []
-        for task in tasks:
+        for task in self._current_tasks(obj):
             result = getattr(task, "analysis_result", None)
+            if result is not None and result.generation != obj.analysis_generation:
+                result = None
             series = {
                 item.metric_type: {
                     "sample_interval_ms": item.sample_interval_ms,
                     "values": item.values,
                 }
                 for item in task.time_series.all()
+                if item.generation == obj.analysis_generation
             }
             rows.append({
                 "id": str(task.id), "task_type": task.task_type, "status": task.status,
+                "generation": task.generation,
                 "protocol_version": task.protocol_version,
                 "is_mock": result.is_mock if result else None,
                 "payload": result.payload if result else None,

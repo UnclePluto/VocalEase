@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import fcntl
 import json
-import math
 import os
 import re
 import stat
@@ -604,12 +603,15 @@ class LocalStorageBackend:
         remaining_seconds = (expires_at - timezone.now()).total_seconds()
         if remaining_seconds <= 0:
             raise StorageValidationError("上传凭证已过期")
-        remaining = max(1, math.ceil(remaining_seconds))
-        token, token_expires_at = self._issue_token(
-            {"object_key": object_key, "owner_id": str(owner_id), "media_type": media_type, "mime": mime, "size": size},
-            remaining,
-        )
-        return UploadGrant(object_key=object_key, expires_at=token_expires_at, upload_token=token)
+        token = self.signer.sign_object({
+            "object_key": object_key,
+            "owner_id": str(owner_id),
+            "media_type": media_type,
+            "mime": mime,
+            "size": size,
+            "expires_at": expires_at.timestamp(),
+        })
+        return UploadGrant(object_key=object_key, expires_at=expires_at, upload_token=token)
 
     def migrate_legacy_layout(self, *, object_key: str, asset_id: UUID | str, generation: str, expected_size: int, expected_mime: str, expected_sha256: str) -> bool:
         """在调用方持有 DB 行锁时，用普通 marker 协议转换 v0 sidecar 或 v1 manifest。"""

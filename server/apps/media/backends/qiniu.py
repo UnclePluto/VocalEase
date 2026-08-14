@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
@@ -48,8 +47,7 @@ class QiniuStorageBackend:
         remaining_seconds = (expires_at - timezone.now()).total_seconds()
         if remaining_seconds <= 0:
             raise StorageValidationError("上传凭证已过期")
-        remaining = max(1, math.ceil(remaining_seconds))
-        deadline = int(expires_at.timestamp())
+        remaining = max(0, int(remaining_seconds))
         policy = {
             "scope": f"{self.bucket}:{object_key}", "insertOnly": 1, "fsizeLimit": size,
             "mimeLimit": mime, "detectMime": 1, "callbackUrl": self.callback_url,
@@ -58,7 +56,7 @@ class QiniuStorageBackend:
         }
         token = self.auth.upload_token(self.bucket, object_key, expires=remaining, policy=policy.copy(), strict_policy=True)
         return UploadGrant(
-            object_key=object_key, expires_at=datetime.fromtimestamp(deadline, tz=datetime_timezone.utc),
+            object_key=object_key, expires_at=expires_at,
             upload_url=settings.QINIU_UPLOAD_URL, upload_token=token, fields={"key": object_key, "token": token},
         )
 

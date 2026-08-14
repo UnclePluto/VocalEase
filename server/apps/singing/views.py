@@ -14,10 +14,11 @@ from apps.patients.serializers import TreatmentPlanReadSerializer
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 
-from .selectors import sessions_for_admin, sessions_for_patient
+from .selectors import attach_analysis_details, sessions_for_admin, sessions_for_patient
 from .serializers import (
     AdminSessionListQuerySerializer, ConfirmSessionMediaSerializer, CreateSessionSerializer,
     SessionListQuerySerializer, SessionUploadGrantSerializer, SingingSessionReadSerializer,
+    SingingSessionSummarySerializer,
 )
 from .services import cancel_session, confirm_session_media, create_session, issue_session_upload_grant, retry_session, submit_session
 
@@ -78,7 +79,7 @@ class PatientSessionListView(APIView):
         if query["status"]:
             queryset = queryset.filter(status=query["status"])
         data = paginated_data(queryset, page=query["page"], page_size=query["page_size"])
-        data["results"] = SingingSessionReadSerializer(data["results"], many=True).data
+        data["results"] = SingingSessionSummarySerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
     def post(self, request):
@@ -92,14 +93,23 @@ class PatientSessionListView(APIView):
 class PatientSessionMixin:
     permission_classes = [IsPatientUser, MustChangePasswordPermission]
 
-    def get_session(self, request, session_id):
+    def get_session(self, request, session_id, *, include_details=False):
         patient = patient_for_request(request)
-        return get_object_or_404(sessions_for_patient(patient_id=patient.id), pk=session_id)
+        session = get_object_or_404(
+            sessions_for_patient(patient_id=patient.id, include_media=include_details),
+            pk=session_id,
+        )
+        return attach_analysis_details(session) if include_details else session
 
 
 class PatientSessionDetailView(PatientSessionMixin, APIView):
     def get(self, request, session_id):
-        return api_response(data=SingingSessionReadSerializer(self.get_session(request, session_id)).data, request_id=request.request_id)
+        return api_response(
+            data=SingingSessionReadSerializer(
+                self.get_session(request, session_id, include_details=True),
+            ).data,
+            request_id=request.request_id,
+        )
 
 
 class PatientSessionUploadGrantView(PatientSessionMixin, APIView):
@@ -121,7 +131,7 @@ class PatientSessionUploadGrantView(PatientSessionMixin, APIView):
             "expires_at": grant.expires_at.isoformat(), "upload_url": grant.upload_url,
             "upload_token": grant.upload_token, "fields": grant.fields or {},
         }
-        if asset.backend == "local":
+        if asset.backend == "local" and grant.upload_token:
             data.update(upload_url=f"/api/v1/media/local-upload/{asset.id}/?signature={grant.upload_token}", upload_token="")
         record(
             actor=request.user, action="singing.media_upload_grant", target=asset,
@@ -193,7 +203,7 @@ class AdminSessionListView(APIView):
             created_from=query["created_from"], created_to=query["created_to"],
         )
         data = paginated_data(queryset, page=query["page"], page_size=query["page_size"])
-        data["results"] = SingingSessionReadSerializer(data["results"], many=True).data
+        data["results"] = SingingSessionSummarySerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
 
@@ -201,5 +211,6 @@ class AdminSessionDetailView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
     def get(self, request, session_id):
-        session = get_object_or_404(sessions_for_admin(), pk=session_id)
+        session = get_object_or_404(sessions_for_admin(include_media=True), pk=session_id)
+        session = attach_analysis_details(session)
         return api_response(data=SingingSessionReadSerializer(session).data, request_id=request.request_id)

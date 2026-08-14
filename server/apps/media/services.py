@@ -76,6 +76,8 @@ def create_upload_grant(*, owner: PatientProfile | None = None, owner_type: str 
 def reissue_upload_grant(*, asset: MediaAsset) -> UploadGrant:
     if asset.deleted_at is not None or asset.upload_expires_at <= timezone.now():
         raise MediaConflict("上传凭证已过期或不可用", code="media_grant_expired")
+    if asset.status != MediaAsset.Status.UPLOADING:
+        raise MediaConflict("媒体当前状态不允许重签上传凭证", code="media_grant_not_reissuable")
     backend = backend_for_asset(asset)
     try:
         return backend.reissue_upload_grant(
