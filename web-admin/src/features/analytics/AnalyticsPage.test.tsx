@@ -254,6 +254,34 @@ describe('数据管理页面', () => {
     release()
   })
 
+  it('创建导出网络失败后重试成功复用原幂等键，且不伪造 request_id', async () => {
+    authenticate(); useAnalyticsHandlers()
+    let attempts = 0
+    server.use(http.post('/api/v1/admin/analytics/exports/', () => {
+      attempts += 1
+      return attempts === 1
+        ? HttpResponse.error()
+        : new HttpResponse('csv', { headers: { 'content-type': 'text/csv' } })
+    }))
+    const createUrl = vi.fn(() => 'blob:network-retry')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    const user = userEvent.setup(); renderApp('/analytics')
+
+    await screen.findByText('患者甲')
+    await user.click(screen.getByRole('button', { name: '导出报告 (0)' }))
+    await user.click(screen.getByRole('menuitem', { name: 'CSV' }))
+    expect(await screen.findByText('网络连接失败，请稍后重试')).toBeInTheDocument()
+    expect(screen.queryByText(/^请求编号：/)).not.toBeInTheDocument()
+    const firstKey = (server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key
+
+    await user.click(screen.getByRole('button', { name: '重试创建导出' }))
+    await waitFor(() => expect(server.calls('/api/v1/admin/analytics/exports/')).toHaveLength(2))
+    expect((server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key).toBe(firstKey)
+    await waitFor(() => expect(createUrl).toHaveBeenCalledOnce())
+  })
+
   it.each([
     [400, 'validation_error'],
     [409, 'export_idempotency_conflict'],
