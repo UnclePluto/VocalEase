@@ -1,0 +1,119 @@
+import { PauseOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { Alert, Button, Space } from 'antd'
+import WaveSurfer from 'wavesurfer.js'
+import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js'
+import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
+import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
+import { useEffect, useRef, useState } from 'react'
+
+import { ApiError } from '../../../api/errors'
+import { createPlaybackClock, type PlaybackClock } from '../PlaybackClock'
+import { createVisualizerAdapter, type VisualizerAdapter } from './VisualizerAdapter'
+
+export type Track = { assetId: string; url: string }
+export type PlayerMedia = { mixed?: Track; video?: Track; vocal?: Track; accompaniment?: Track }
+export type WaveHandle = { addRegion(region: { start: number; end: number; color?: string }): unknown; destroy(): void; seek?(seconds: number): void }
+type MediaFailure = { asset: Track; message: string; requestId?: string }
+
+function failureOf(asset: Track, error: unknown): MediaFailure {
+  const apiError = error instanceof ApiError ? error : null
+  const source = error instanceof Error ? error : null
+  return { asset, message: apiError?.message ?? source?.message ?? '媒体播放或授权失败，请重试', requestId: apiError?.requestId ?? (source as (Error & { requestId?: string }) | null)?.requestId }
+}
+
+export function WaveformPlayer({ media, events, waveFactory, visualizerFactory = createVisualizerAdapter, onRefreshMedia, onTime }: {
+  media: PlayerMedia; events: number[]; waveFactory?: (container: HTMLElement) => WaveHandle; visualizerFactory?: () => VisualizerAdapter; onRefreshMedia?: (assetId: string) => Promise<string>; onTime?: (seconds: number) => void
+}) {
+  const container = useRef<HTMLDivElement>(null)
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const visualizer = useRef<VisualizerAdapter | null>(null)
+  const audio = useRef<HTMLAudioElement>(null)
+  const video = useRef<HTMLVideoElement>(null)
+  const clock = useRef<PlaybackClock | null>(null)
+  const handle = useRef<WaveHandle | null>(null)
+  const instanceVersion = useRef(0)
+  const refreshed = useRef(new Set<string>())
+  const [playing, setPlaying] = useState(false)
+  const [videoFailed, setVideoFailed] = useState(false)
+  const [overrides, setOverrides] = useState<Record<string, string>>({})
+  const [failure, setFailure] = useState<MediaFailure | null>(null)
+  const mixed = media.mixed
+  const mixedAssetId = mixed?.assetId
+  const videoTrack = videoFailed ? undefined : media.video
+  const mixedUrl = mixed ? overrides[mixed.assetId] ?? mixed.url : ''
+  const videoUrl = videoTrack ? overrides[videoTrack.assetId] ?? videoTrack.url : ''
+
+  useEffect(() => {
+    if (!container.current || !mixedAssetId || !audio.current) return
+    const version = ++instanceVersion.current
+    const factory = waveFactory ?? ((element: HTMLElement) => {
+      const regions = RegionsPlugin.create()
+      const wave = WaveSurfer.create({ container: element, media: audio.current ?? undefined, height: 96, waveColor: '#a9c7ff', progressColor: '#3478f6', plugins: [regions, TimelinePlugin.create(), HoverPlugin.create()] })
+      return { addRegion: (region) => regions.addRegion(region), destroy: () => wave.destroy(), seek: (seconds) => wave.setTime(seconds) }
+    })
+    const created = factory(container.current)
+    handle.current = created
+    events.forEach((seconds) => created.addRegion({ start: seconds, end: seconds + 0.15, color: 'rgba(255,77,79,.55)' }))
+    clock.current = createPlaybackClock(audio.current, video.current)
+    const unsubscribe = clock.current.subscribe(onTime ?? (() => undefined))
+    return () => {
+      instanceVersion.current = Math.max(instanceVersion.current, version + 1)
+      unsubscribe(); visualizer.current?.destroy(); visualizer.current = null
+      clock.current?.destroy(); clock.current = null
+      created.destroy(); handle.current = null
+    }
+  }, [events, mixedAssetId, mixedUrl, onTime, videoTrack?.assetId, videoUrl, waveFactory])
+
+  if (!mixed) return <p className="inline-error">缺少可播放的真实演唱录音。</p>
+
+  const refresh = async (asset: Track, force = false): Promise<boolean> => {
+    if (!onRefreshMedia || (!force && refreshed.current.has(asset.assetId))) return false
+    refreshed.current.add(asset.assetId)
+    const version = instanceVersion.current
+    setFailure(null)
+    try {
+      const url = await onRefreshMedia(asset.assetId)
+      if (version !== instanceVersion.current) return false
+      setOverrides((current) => ({ ...current, [asset.assetId]: url }))
+      return true
+    } catch (error) {
+      if (version === instanceVersion.current) setFailure(failureOf(asset, error))
+      return false
+    }
+  }
+
+  const play = async () => {
+    setFailure(null)
+    try {
+      await clock.current?.play()
+      if (audio.current && canvas.current) {
+        visualizer.current ??= visualizerFactory()
+        await visualizer.current.start(audio.current, canvas.current)
+      }
+      setPlaying(true)
+    } catch (error) {
+      setPlaying(false)
+      setFailure({ asset: mixed, message: error instanceof DOMException && error.name === 'NotAllowedError' ? '浏览器阻止自动播放，请再次点击播放按钮。' : failureOf(mixed, error).message, requestId: failureOf(mixed, error).requestId })
+    }
+  }
+
+  return <section className="waveform-player" aria-label="演唱回放">
+    <audio ref={audio} src={mixedUrl} onError={() => void refresh(mixed)} />
+    {videoTrack ? <video ref={video} src={videoUrl} onError={() => { void refresh(videoTrack).then((renewed) => { if (!renewed) setVideoFailed(true) }) }} controls /> : <p>{media.video && videoFailed ? '录像加载失败，已降级为音频回放。' : '未提供录像，音频回放不受影响。'}</p>}
+    {failure ? <Alert className="media-playback-error" type="error" showIcon title={failure.message} description={failure.requestId ? `请求编号：${failure.requestId}` : undefined} action={<Button aria-label="重试媒体授权" onClick={() => void refresh(failure.asset, true)}>重试</Button>} /> : null}
+    <canvas ref={canvas} width="520" height="80" aria-label="播放可视化" />
+    <div role="tablist" aria-label="音轨选择">
+      <button role="tab" aria-selected="true">人声 + 伴奏</button>
+      <button role="tab" aria-disabled={!media.vocal} disabled={!media.vocal}>仅人声</button>
+      <button role="tab" aria-disabled={!media.accompaniment} disabled={!media.accompaniment}>仅伴奏</button>
+    </div>
+    {(!media.vocal || !media.accompaniment) ? <p>缺少真实分轨产物；当前仅可播放真实演唱混合录音。</p> : null}
+    <div className="waveform-scroll"><div ref={container} className="waveform" /></div>
+    <Space>
+      <Button aria-label={playing ? '暂停' : '播放'} icon={playing ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => {
+        if (playing) { clock.current?.pause(); visualizer.current?.stop(); setPlaying(false) } else void play()
+      }}>{playing ? '暂停' : '播放'}</Button>
+      {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds) }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
+    </Space>
+  </section>
+}

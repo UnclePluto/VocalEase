@@ -37,6 +37,7 @@ function usePatientHandlers(results = [patient]) {
     http.get('/api/v1/admin/patients/', () => HttpResponse.json(envelope(list(results)))),
     http.get('/api/v1/admin/patients/:id/', () => HttpResponse.json(envelope(patient))),
     http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope(list([doctor])))),
+    http.get('/api/v1/admin/singing-sessions/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 10, results: [] }))),
   )
 }
 

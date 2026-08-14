@@ -157,6 +157,9 @@ export const server = {
   useEmptySongList() {
     mockServer.use(http.get('/api/v1/admin/songs/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 20, results: [] }))))
   },
+  useEmptySingingList() {
+    mockServer.use(http.get('/api/v1/admin/singing-sessions/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 10, results: [] }))))
+  },
   useChangePassword() {
     mockServer.use(http.post('/api/v1/auth/change-password/', () => HttpResponse.json(envelope({}))))
   },

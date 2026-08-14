@@ -19,6 +19,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.0.0",
+    "wavesurfer.js": "7.11.1",
+    "waviz": "1.0.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

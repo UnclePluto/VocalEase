@@ -151,6 +151,15 @@ textarea, select { font: inherit; }
 .song-analysis-cell { display: grid; gap: 6px; }
 .song-analysis-cell .ant-alert { padding: 6px 8px; }
 .ant-modal audio { width: 100%; margin-top: 16px; }
+.patient-data-error, .media-playback-error { margin: 16px 0; }
+.singing-summary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 18px 0; color: #475467; }
+.patient-history-table, .waveform-scroll { max-width: 100%; overflow-x: auto; }
+.waveform-player { min-width: 0; }
+.waveform-player audio, .waveform-player video, .waveform-player canvas { display: block; max-width: 100%; margin: 14px 0; }
+.waveform { min-width: 520px; }
+.metric-panel { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px 16px; margin: 20px 0; }
+.metric-panel h2 { grid-column: 1 / -1; margin: 0; font-size: 16px; }
+.metric-panel p { margin: 0; }
 
 @media (max-width: 899px) {
   .admin-main { margin-left: 0; }
@@ -171,6 +180,7 @@ textarea, select { font: inherit; }
   .management-toolbar { grid-template-columns: 1fr; gap: 10px; }
   .form-grid { grid-template-columns: 1fr; }
   .data-table-pagination { align-items: flex-end; flex-direction: column; padding: 14px 0; }
+  .metric-panel { grid-template-columns: 1fr 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
