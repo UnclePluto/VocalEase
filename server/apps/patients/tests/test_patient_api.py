@@ -163,6 +163,7 @@ def test_patient_list_filters_real_treatment_status(api_client, admin_user, pati
     assert body["count"] == 1
     assert body["results"][0]["id"] == str(patient.id)
     assert body["results"][0]["user_id"] == str(patient.user_id)
+    assert body["results"][0]["primary_doctor_name"] == doctor.name
     assert body["results"][0]["treatment_plan"]["status"] == "active"
 
 

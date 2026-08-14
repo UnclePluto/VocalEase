@@ -9,7 +9,7 @@ from rest_framework.exceptions import ValidationError
 
 from apps.accounts.models import Role, User
 from apps.doctors.models import DoctorProfile
-from apps.doctors.services import create_doctor, soft_delete_doctor
+from apps.doctors.services import create_doctor, set_doctor_active, soft_delete_doctor
 from apps.patients.models import PatientProfile, TreatmentPlan
 from apps.patients.services import (
     create_patient,
@@ -319,3 +319,76 @@ def test_plan_activation_and_doctor_delete_preserve_final_invariant(monkeypatch,
         status=TreatmentPlan.Status.ACTIVE,
         deleted_at__isnull=True,
     ).exists()
+
+
+def test_plan_activation_waits_for_doctor_deactivation_and_preserves_final_invariant(
+    monkeypatch, admin_user
+):
+    doctor = _doctor(1)
+    patient = create_patient(
+        name="停用竞态患者",
+        gender="female",
+        enrollment_age=30,
+        phone="13790000005",
+        doctor=doctor,
+        start_date="2026-01-01",
+        cycle_weeks=4,
+    )
+    plan = patient.treatment_plans.get()
+    status_locked = Event()
+    allow_status_change = Event()
+    contender_pid = Queue(maxsize=1)
+    original = __import__(
+        "apps.doctors.services", fromlist=["update_account_security_state"]
+    ).update_account_security_state
+
+    def pause_after_canonical_locks(**kwargs):
+        status_locked.set()
+        assert allow_status_change.wait(timeout=LOCK_TIMEOUT_SECONDS)
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        "apps.doctors.services.update_account_security_state",
+        pause_after_canonical_locks,
+    )
+
+    def deactivate():
+        try:
+            return set_doctor_active(
+                actor=admin_user,
+                doctor=doctor,
+                is_active=False,
+                request_id="pg-deactivate-activate-race",
+            )
+        finally:
+            connections.close_all()
+
+    def activate_plan():
+        try:
+            contender_pid.put(_current_backend_pid(), timeout=LOCK_TIMEOUT_SECONDS)
+            return transition_treatment_plan_status(
+                actor=admin_user,
+                plan=plan,
+                status=TreatmentPlan.Status.ACTIVE,
+                request_id="pg-plan-activate-deactivate-race",
+            )
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        deactivating = executor.submit(deactivate)
+        assert status_locked.wait(timeout=LOCK_TIMEOUT_SECONDS)
+        activating = executor.submit(activate_plan)
+        _wait_until_backend_is_lock_waiting(
+            contender_pid.get(timeout=LOCK_TIMEOUT_SECONDS)
+        )
+        allow_status_change.set()
+        deactivating.result(timeout=LOCK_TIMEOUT_SECONDS)
+        with pytest.raises(ValidationError) as exc_info:
+            activating.result(timeout=LOCK_TIMEOUT_SECONDS)
+
+    assert exc_info.value.get_codes()["primary_doctor"] == "invalid"
+    doctor.user.refresh_from_db()
+    plan.refresh_from_db()
+    assert doctor.user.is_active is False
+    assert plan.status == TreatmentPlan.Status.PENDING

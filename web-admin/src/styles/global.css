@@ -140,6 +140,8 @@ textarea, select { font: inherit; }
 .native-select:hover { border-color: #6993ee; }
 .native-select:focus-visible { border-color: #356ae6; box-shadow: 0 0 0 2px rgb(53 106 230 / 12%); }
 .native-select:disabled { color: #98a2b3; background: #f5f5f5; }
+.doctor-picker { display: grid; gap: 8px; }
+.doctor-options-error { margin: -4px 0 18px; }
 .form-api-error, .form-plan-hint { margin-bottom: 18px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .inline-error { color: #d92d20; }

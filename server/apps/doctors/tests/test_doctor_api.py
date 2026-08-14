@@ -197,6 +197,193 @@ def test_doctor_and_admin_can_access_doctor_management_but_patient_is_rejected(a
 
 
 @pytest.mark.django_db
+def test_admin_can_deactivate_and_activate_doctor_with_audit_and_session_revocation(
+    api_client, admin_user, doctor
+):
+    pair = issue_token_pair(doctor.user)
+    api_client.force_authenticate(admin_user)
+
+    deactivated = api_client.post(
+        f"/api/v1/admin/doctors/{doctor.id}/deactivate/",
+        HTTP_X_REQUEST_ID="doctor-deactivate-1",
+    )
+
+    assert deactivated.status_code == 200
+    assert deactivated.json()["data"]["status"] == "inactive"
+    assert RefreshToken.objects.get(
+        token_hash=RefreshToken.digest(pair.refresh)
+    ).revoked_at is not None
+    assert AuditLog.objects.filter(
+        action="doctor.deactivate",
+        target_id=doctor.id,
+        request_id="doctor-deactivate-1",
+    ).exists()
+
+    activated = api_client.post(
+        f"/api/v1/admin/doctors/{doctor.id}/activate/",
+        HTTP_X_REQUEST_ID="doctor-activate-1",
+    )
+
+    assert activated.status_code == 200
+    assert activated.json()["data"]["status"] == "active"
+    assert AuditLog.objects.filter(
+        action="doctor.activate",
+        target_id=doctor.id,
+        request_id="doctor-activate-1",
+    ).exists()
+    assert RefreshToken.objects.get(
+        token_hash=RefreshToken.digest(pair.refresh)
+    ).revoked_at is not None
+
+
+@pytest.mark.django_db
+def test_doctor_status_actions_are_idempotent_without_duplicate_audit(
+    api_client, admin_user, doctor
+):
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.post(
+        f"/api/v1/admin/doctors/{doctor.id}/activate/",
+        HTTP_X_REQUEST_ID="doctor-activate-noop",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "active"
+    assert not AuditLog.objects.filter(
+        action="doctor.activate", request_id="doctor-activate-noop"
+    ).exists()
+
+    changed = api_client.post(
+        f"/api/v1/admin/doctors/{doctor.id}/deactivate/",
+        HTTP_X_REQUEST_ID="doctor-deactivate-changed",
+    )
+    no_op = api_client.post(
+        f"/api/v1/admin/doctors/{doctor.id}/deactivate/",
+        HTTP_X_REQUEST_ID="doctor-deactivate-noop",
+    )
+
+    assert changed.status_code == 200
+    assert no_op.status_code == 200
+    assert no_op.json()["data"]["status"] == "inactive"
+    assert AuditLog.objects.filter(
+        action="doctor.deactivate", request_id="doctor-deactivate-changed"
+    ).count() == 1
+    assert not AuditLog.objects.filter(
+        action="doctor.deactivate", request_id="doctor-deactivate-noop"
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_deactivate_doctor_with_active_patients_returns_same_stable_conflict(
+    api_client, admin_user, doctor
+):
+    patient = create_patient(
+        name="在治患者",
+        gender="male",
+        enrollment_age=30,
+        phone="13700000011",
+        doctor=doctor,
+        start_date="2026-01-01",
+        cycle_weeks=4,
+    )
+    patient.treatment_plans.update(status="active")
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.post(f"/api/v1/admin/doctors/{doctor.id}/deactivate/")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "doctor_has_active_patients"
+    assert response.json()["message"] == "该医生仍有进行中的患者，不能停用"
+    doctor.user.refresh_from_db()
+    assert doctor.user.is_active is True
+
+
+@pytest.mark.django_db
+def test_doctor_cannot_deactivate_self_or_system_admin_and_patient_is_rejected(
+    api_client, doctor_user, doctor
+):
+    self_profile = DoctorProfile.objects.create(
+        user=doctor_user,
+        employee_no="D9001",
+        name="当前医生",
+        gender="male",
+        phone="13800009991",
+        department="康复科",
+        title="医师",
+    )
+    admin_target = create_doctor(
+        name="管理员档案",
+        gender="female",
+        phone="13800009992",
+        department="管理科",
+        title="管理员",
+    )
+    admin_target.user.role = Role.SYSTEM_ADMIN
+    admin_target.user.save(update_fields=["role"])
+    api_client.force_authenticate(doctor_user)
+
+    self_response = api_client.post(
+        f"/api/v1/admin/doctors/{self_profile.id}/deactivate/"
+    )
+    admin_response = api_client.post(
+        f"/api/v1/admin/doctors/{admin_target.id}/deactivate/"
+    )
+
+    assert self_response.status_code == 403
+    assert self_response.json()["code"] == "doctor_status_self_forbidden"
+    assert admin_response.status_code == 403
+    assert admin_response.json()["code"] == "doctor_status_target_forbidden"
+
+    patient_user = User.objects.create_user(
+        login_id="status-patient",
+        password="888888",
+        role=Role.PATIENT,
+        must_change_password=False,
+    )
+    api_client.force_authenticate(patient_user)
+    assert api_client.post(
+        f"/api/v1/admin/doctors/{doctor.id}/deactivate/"
+    ).status_code == 403
+
+
+@pytest.mark.django_db
+def test_status_action_validates_profile_user_is_really_a_doctor(
+    api_client, admin_user
+):
+    invalid_target = create_doctor(
+        name="异常患者档案",
+        gender="female",
+        phone="13800009993",
+        department="康复科",
+        title="医师",
+    )
+    invalid_target.user.role = Role.PATIENT
+    invalid_target.user.save(update_fields=["role"])
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.post(
+        f"/api/v1/admin/doctors/{invalid_target.id}/deactivate/"
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "doctor_status_target_invalid"
+    invalid_target.user.refresh_from_db()
+    assert invalid_target.user.is_active is True
+
+
+@pytest.mark.django_db
+def test_deleted_doctor_cannot_be_activated(api_client, admin_user, doctor):
+    soft_delete_doctor(
+        actor=admin_user, doctor=doctor, request_id="doctor-delete-before-activate"
+    )
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.post(f"/api/v1/admin/doctors/{doctor.id}/activate/")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
 def test_delete_doctor_revokes_refresh_soft_deletes_user_and_writes_audit(admin_user, doctor):
     pair = issue_token_pair(doctor.user)
 

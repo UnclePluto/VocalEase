@@ -60,6 +60,7 @@ class TreatmentPlanReadSerializer(serializers.ModelSerializer):
 class PatientReadSerializer(serializers.ModelSerializer):
     user_id = serializers.UUIDField(read_only=True)
     primary_doctor = serializers.UUIDField(source="primary_doctor_id", read_only=True)
+    primary_doctor_name = serializers.CharField(source="primary_doctor.name", read_only=True)
     treatment_plan = serializers.SerializerMethodField()
 
     class Meta:
@@ -73,6 +74,7 @@ class PatientReadSerializer(serializers.ModelSerializer):
             "enrollment_age",
             "phone",
             "primary_doctor",
+            "primary_doctor_name",
             "notes",
             "treatment_plan",
         )

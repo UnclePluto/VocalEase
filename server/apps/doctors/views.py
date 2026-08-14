@@ -16,6 +16,7 @@ from .serializers import (
 from .services import (
     DoctorHasActivePatients,
     create_doctor,
+    set_doctor_active,
     soft_delete_doctor,
     update_doctor,
 )
@@ -96,3 +97,20 @@ class DoctorDetailView(APIView):
                 status=exc.status_code,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DoctorStatusView(APIView):
+    permission_classes = [IsAdminNamespaceUser]
+
+    def post(self, request, doctor_id, action):
+        doctor = get_object_or_404(doctors_for_list(), pk=doctor_id)
+        updated = set_doctor_active(
+            actor=request.user,
+            doctor=doctor,
+            is_active=action == "activate",
+            request_id=request.request_id,
+        )
+        return api_response(
+            data=DoctorReadSerializer(updated).data,
+            request_id=request.request_id,
+        )

@@ -3,7 +3,7 @@ import time
 
 from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied
 
 from apps.accounts.models import Role, User
 from apps.accounts.services import update_account_security_state
@@ -16,6 +16,44 @@ class DoctorHasActivePatients(APIException):
     status_code = 409
     default_detail = "医生仍有在治患者，无法删除"
     default_code = "doctor_has_active_patients"
+
+    def __init__(self, *, action: str = "delete"):
+        detail = (
+            "该医生仍有进行中的患者，不能停用"
+            if action == "deactivate"
+            else self.default_detail
+        )
+        super().__init__(detail=detail, code=self.default_code)
+
+
+def _lock_current_patient_plans(doctor):
+    from apps.patients.models import PatientProfile, TreatmentPlan
+
+    # Canonical order: DoctorProfile -> PatientProfile -> TreatmentPlan -> User.
+    patients = list(
+        PatientProfile.objects.select_for_update()
+        .filter(primary_doctor=doctor, deleted_at__isnull=True)
+        .order_by("id")
+    )
+    return list(
+        TreatmentPlan.objects.select_for_update()
+        .filter(
+            patient__in=patients,
+            status__in=[TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE],
+            deleted_at__isnull=True,
+        )
+        .order_by("id")
+    )
+
+
+def _ensure_no_active_patients(doctor, *, action: str = "delete"):
+    from apps.patients.models import TreatmentPlan
+
+    if any(
+        plan.status == TreatmentPlan.Status.ACTIVE
+        for plan in _lock_current_patient_plans(doctor)
+    ):
+        raise DoctorHasActivePatients(action=action)
 
 
 def next_sequence(prefix: str, width: int) -> str:
@@ -103,30 +141,63 @@ def update_doctor(*, actor, doctor, request_id: str, **changes):
         return locked
 
 
-def soft_delete_doctor(*, actor, doctor, request_id: str):
-    from apps.patients.models import TreatmentPlan
-    from apps.patients.models import PatientProfile
-
+def set_doctor_active(*, actor, doctor, is_active: bool, request_id: str):
     with transaction.atomic():
-        locked = DoctorProfile.objects.select_for_update().select_related("user").get(pk=doctor.pk, deleted_at__isnull=True)
-        # Canonical order: DoctorProfile -> PatientProfile -> TreatmentPlan.
-        patients = list(
-            PatientProfile.objects.select_for_update()
-            .filter(primary_doctor=locked, deleted_at__isnull=True)
-            .order_by("id")
+        locked = (
+            DoctorProfile.objects.select_for_update(of=("self",))
+            .select_related("user")
+            .get(pk=doctor.pk)
         )
-        current_plans = list(
-            TreatmentPlan.objects.select_for_update().filter(
-                patient__in=patients,
-                status__in=[TreatmentPlan.Status.PENDING, TreatmentPlan.Status.ACTIVE],
-                deleted_at__isnull=True,
-            ).order_by("id")
-        )
-        if any(
-            plan.status == TreatmentPlan.Status.ACTIVE
-            for plan in current_plans
+        if locked.deleted_at is not None:
+            raise NotFound("医生不存在", code="not_found")
+        if (
+            actor.role == Role.DOCTOR
+            and not is_active
+            and locked.user_id == actor.pk
         ):
-            raise DoctorHasActivePatients()
+            raise PermissionDenied(
+                "医生不能停用自己",
+                code="doctor_status_self_forbidden",
+            )
+        if not is_active:
+            _ensure_no_active_patients(locked, action="deactivate")
+        locked_user = User.objects.select_for_update().get(pk=locked.user_id)
+        if locked_user.deleted_at is not None:
+            raise NotFound("医生不存在", code="not_found")
+        if actor.role == Role.DOCTOR and locked_user.role == Role.SYSTEM_ADMIN:
+            raise PermissionDenied(
+                "医生不能变更系统管理员状态",
+                code="doctor_status_target_forbidden",
+            )
+        if locked_user.role != Role.DOCTOR:
+            raise PermissionDenied(
+                "仅可变更医生账号状态",
+                code="doctor_status_target_invalid",
+            )
+        if locked_user.is_active == is_active:
+            locked.user = locked_user
+            return locked
+        updated_user = update_account_security_state(
+            actor=actor,
+            target=locked_user,
+            is_active=is_active,
+            request_id=request_id,
+        )
+        locked.user = updated_user
+        record(
+            actor=actor,
+            action="doctor.activate" if is_active else "doctor.deactivate",
+            target=locked,
+            changes={"status": {"from": not is_active, "to": is_active}},
+            request_id=request_id,
+        )
+        return locked
+
+
+def soft_delete_doctor(*, actor, doctor, request_id: str):
+    with transaction.atomic():
+        locked = DoctorProfile.objects.select_for_update(of=("self",)).select_related("user").get(pk=doctor.pk, deleted_at__isnull=True)
+        _ensure_no_active_patients(locked)
         update_account_security_state(actor=actor, target=locked.user, is_active=False, deleted=True, request_id=request_id)
         locked.deleted_at = timezone.now()
         locked.save(update_fields=["deleted_at"])

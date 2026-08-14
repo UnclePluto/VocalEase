@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
@@ -17,7 +17,7 @@ const doctor = {
   phone: '13800000001',
   department: '消化内科',
   title: '副主任医师',
-  status: 'active' as const,
+  status: 'active' as 'active' | 'inactive',
 }
 
 function envelope<T>(data: T, requestId = 'doctor-request') {
@@ -130,12 +130,75 @@ describe('医生管理页面', () => {
     expect(screen.getByText('李静')).toBeInTheDocument()
   }, 20_000)
 
+  it('停用与启用医生走独立动作接口并只刷新当前筛选列表', async () => {
+    authenticate()
+    let status: 'active' | 'inactive' = doctor.status
+    server.use(
+      http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope(doctorList([{ ...doctor, status }])))),
+      http.post('/api/v1/admin/doctors/:id/deactivate/', () => {
+        status = 'inactive'
+        return HttpResponse.json(envelope({ ...doctor, status }))
+      }),
+      http.post('/api/v1/admin/doctors/:id/activate/', () => {
+        status = 'active'
+        return HttpResponse.json(envelope({ ...doctor, status }))
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp('/doctors?page=2&page_size=20&department=%E6%B6%88%E5%8C%96%E5%86%85%E7%A7%91')
+
+    await user.click(await screen.findByRole('button', { name: '停用李静' }))
+    await user.click(screen.getByRole('button', { name: '确认停用' }))
+    expect(await screen.findByText('医生已停用')).toBeInTheDocument()
+    expect(server.calls(`/api/v1/admin/doctors/${doctor.id}/deactivate/`)).toHaveLength(1)
+    expect(server.calls('/api/v1/admin/doctors/').at(-1)?.search).toBe(
+      '?page=2&page_size=20&department=%E6%B6%88%E5%8C%96%E5%86%85%E7%A7%91',
+    )
+
+    await user.click(screen.getByRole('button', { name: '启用李静' }))
+    await user.click(screen.getByRole('button', { name: '确认启用' }))
+    expect(await screen.findByText('医生已启用')).toBeInTheDocument()
+    expect(server.calls(`/api/v1/admin/doctors/${doctor.id}/activate/`)).toHaveLength(1)
+  }, 20_000)
+
+  it('医生登录时不展示自己的重置密码和停用入口', async () => {
+    useAuthStore.setState({
+      accessToken: 'valid',
+      user: { login_id: doctor.employee_no, role: 'doctor', must_change_password: false },
+      status: 'authenticated',
+    })
+    useDoctorList()
+
+    renderApp('/doctors')
+
+    expect(await screen.findByText('李静')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重置李静密码' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '停用李静' })).not.toBeInTheDocument()
+  })
+
+  it('390px视口把固定操作列收敛为可键盘访问的更多菜单', async () => {
+    window.innerWidth = 390
+    authenticate()
+    useDoctorList()
+    const user = userEvent.setup()
+
+    renderApp('/doctors')
+
+    const more = await screen.findByRole('button', { name: '更多李静操作' })
+    expect(screen.queryByRole('button', { name: '编辑李静' })).not.toBeInTheDocument()
+    await user.click(more)
+    expect(await screen.findByRole('menuitem', { name: '编辑' })).toBeInTheDocument()
+  })
+
   it('显示加载、错误请求编号、重试和空态', async () => {
     authenticate()
     let attempt = 0
-    server.use(http.get('/api/v1/admin/doctors/', () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    server.use(http.get('/api/v1/admin/doctors/', async () => {
       attempt += 1
       if (attempt === 1) {
+        await gate
         return HttpResponse.json({ code: 'server_error', message: '暂时无法加载', data: null, request_id: 'load-req-1' }, { status: 500 })
       }
       return HttpResponse.json(envelope(doctorList([])))
@@ -143,12 +206,15 @@ describe('医生管理页面', () => {
     const user = userEvent.setup()
     renderApp('/doctors')
 
+    expect(await screen.findByRole('heading', { name: '医生管理' })).toBeInTheDocument()
     expect(screen.getByRole('status', { name: '正在加载医生列表' })).toBeInTheDocument()
+    await act(async () => { release() })
     expect(await screen.findByText('暂时无法加载')).toBeInTheDocument()
     expect(screen.getByText('请求编号：load-req-1')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => expect(server.calls('/api/v1/admin/doctors/')).toHaveLength(2))
     expect(await screen.findByText('暂无医生')).toBeInTheDocument()
-  })
+  }, 20_000)
 
   it('患者角色不能进入后台医生页面', async () => {
     authenticate('patient')

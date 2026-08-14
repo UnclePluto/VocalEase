@@ -19,6 +19,7 @@ export type Patient = {
   enrollment_age: number
   phone: string
   primary_doctor: string
+  primary_doctor_name: string
   notes: string
   treatment_plan: TreatmentPlan | null
 }

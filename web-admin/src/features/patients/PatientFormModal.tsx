@@ -7,7 +7,9 @@ import type { Patient, PatientWrite } from './types'
 
 type PatientFormModalProps = {
   doctors: Doctor[]
+  doctorSearch: string
   loadingDoctors: boolean
+  onDoctorSearch: (value: string) => void
   onCancel: () => void
   onSubmit: (values: PatientWrite) => Promise<void>
   open: boolean
@@ -18,13 +20,22 @@ function fieldMessage(value: string | string[]) {
   return Array.isArray(value) ? value.join('；') : value
 }
 
-export function PatientFormModal({ doctors, loadingDoctors, onCancel, onSubmit, open, patient }: PatientFormModalProps) {
+export function PatientFormModal({ doctors, doctorSearch, loadingDoctors, onCancel, onDoctorSearch, onSubmit, open, patient }: PatientFormModalProps) {
   const [form] = Form.useForm<PatientWrite>()
   const [error, setError] = useState<ApiError | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const submittingRef = useRef(false)
   const cycleWeeks = Form.useWatch('cycle_weeks', form)
   const hasCurrentPlan = !patient || patient.treatment_plan?.status === 'pending' || patient.treatment_plan?.status === 'active'
+  const selectableDoctors = patient ? [
+    {
+      ...doctors.find((doctor) => doctor.id === patient.primary_doctor),
+      id: patient.primary_doctor,
+      name: patient.primary_doctor_name,
+      employee_no: doctors.find((doctor) => doctor.id === patient.primary_doctor)?.employee_no ?? '',
+    },
+    ...doctors.filter((doctor) => doctor.id !== patient.primary_doctor),
+  ] : doctors
 
   const submit = async (rawValues: PatientWrite) => {
     if (submittingRef.current) return
@@ -102,11 +113,26 @@ export function PatientFormModal({ doctors, loadingDoctors, onCancel, onSubmit, 
           <Form.Item name="phone" label="手机号" rules={[{ required: true, message: '请输入手机号' }]}>
             <Input maxLength={32} inputMode="tel" />
           </Form.Item>
-          <Form.Item name="primary_doctor" label="主治医生" rules={[{ required: true, message: '请选择主治医生' }]}>
-            <select className="native-select" disabled={loadingDoctors}>
-              <option value="">请选择</option>
-              {doctors.map((doctor) => <option key={doctor.id} value={doctor.id}>{doctor.name} · {doctor.employee_no}</option>)}
-            </select>
+          <Form.Item label="主治医生">
+            <div className="doctor-picker">
+              <Input
+                aria-label="搜索主治医生选项"
+                allowClear
+                placeholder="输入姓名或工号搜索"
+                value={doctorSearch}
+                onChange={(event) => onDoctorSearch(event.target.value)}
+              />
+              <Form.Item name="primary_doctor" noStyle rules={[{ required: true, message: '请选择主治医生' }]}>
+                <select aria-label="主治医生" className="native-select" disabled={loadingDoctors}>
+                  <option value="">请选择</option>
+                  {selectableDoctors.map((doctor) => (
+                    <option key={doctor.id} value={doctor.id}>
+                      {doctor.name}{doctor.employee_no ? ` · ${doctor.employee_no}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </Form.Item>
+            </div>
           </Form.Item>
           <Form.Item
             name="start_date"

@@ -1,21 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { DeleteOutlined, EditOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, DeleteOutlined, EditOutlined, LockOutlined, MoreOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Button, Input, Modal, Select, Space, message } from 'antd'
+import { Button, Dropdown, Input, Modal, Select, Space, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import type { InputRef } from 'antd'
 import { useSearchParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/errors'
+import { useAuthStore } from '../../auth/store'
 import { ConfirmDelete } from '../../components/ConfirmDelete'
 import { DataTable } from '../../components/DataTable'
 import { StatusTag } from '../../components/StatusTag'
+import { useCompactActions } from '../../hooks/useCompactActions'
 import {
   createDoctor,
   deleteDoctor,
   doctorKeys,
+  doctorOptionKeys,
   listDoctors,
   resetDoctorPassword,
+  setDoctorActive,
   updateDoctor,
 } from './api'
 import { DoctorFormModal } from './DoctorFormModal'
@@ -59,8 +63,15 @@ export function DoctorListPage() {
   const [formDoctor, setFormDoctor] = useState<Doctor | null | undefined>(undefined)
   const [deleteTarget, setDeleteTarget] = useState<Doctor | null>(null)
   const [resetTarget, setResetTarget] = useState<Doctor | null>(null)
+  const [statusTarget, setStatusTarget] = useState<Doctor | null>(null)
+  const deleteSubmissionRef = useRef(false)
+  const resetSubmissionRef = useRef(false)
+  const statusSubmissionRef = useRef(false)
   const queryClient = useQueryClient()
   const [messageApi, messageContext] = message.useMessage()
+  const currentUserRole = useAuthStore((state) => state.user?.role)
+  const currentLoginId = useAuthStore((state) => state.user?.login_id)
+  const compactActions = useCompactActions()
 
   useEffect(() => {
     const canonical = uiParams(query)
@@ -77,7 +88,10 @@ export function DoctorListPage() {
       doctor ? updateDoctor(doctor.id, values) : createDoctor(values)
     ),
     onSuccess: async (_saved, variables) => {
-      await queryClient.invalidateQueries({ queryKey: doctorKeys.lists() })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true }),
+        queryClient.invalidateQueries({ queryKey: doctorOptionKeys.list(''), exact: true }),
+      ])
       setFormDoctor(undefined)
       if (variables.doctor) messageApi.success('医生信息已更新')
       else messageApi.success('医生创建成功，初始密码为 888888，首次登录需修改')
@@ -86,10 +100,14 @@ export function DoctorListPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteDoctor(id),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: doctorKeys.lists() })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true }),
+        queryClient.invalidateQueries({ queryKey: doctorOptionKeys.list(''), exact: true }),
+      ])
       setDeleteTarget(null)
       messageApi.success('医生已停用并隐藏，历史记录已保留')
     },
+    onSettled: () => { deleteSubmissionRef.current = false },
   })
   const resetMutation = useMutation({
     mutationFn: (userId: string) => resetDoctorPassword(userId),
@@ -97,6 +115,19 @@ export function DoctorListPage() {
       setResetTarget(null)
       messageApi.success('密码已重置为 888888，首次登录必须修改')
     },
+    onSettled: () => { resetSubmissionRef.current = false },
+  })
+  const statusMutation = useMutation({
+    mutationFn: (target: Doctor) => setDoctorActive(target.id, target.status === 'inactive'),
+    onSuccess: async (updated) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true }),
+        queryClient.invalidateQueries({ queryKey: doctorOptionKeys.list(''), exact: true }),
+      ])
+      setStatusTarget(null)
+      messageApi.success(updated.status === 'active' ? '医生已启用' : '医生已停用')
+    },
+    onSettled: () => { statusSubmissionRef.current = false },
   })
 
   const replaceQuery = (changes: Partial<DoctorListQuery>, resetPage = false) => {
@@ -112,16 +143,37 @@ export function DoctorListPage() {
     { title: '职称', dataIndex: 'title', width: 150 },
     { title: '状态', dataIndex: 'status', width: 100, render: (value: DoctorStatus) => <StatusTag status={value} /> },
     {
-      title: '操作', key: 'actions', width: 270, fixed: 'right',
-      render: (_value, row) => (
-        <Space size={4}>
-          <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={() => setFormDoctor(row)}>编辑</Button>
-          <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={() => { resetMutation.reset(); setResetTarget(row) }}>重置密码</Button>
-          <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={() => { deleteMutation.reset(); setDeleteTarget(row) }}>删除</Button>
-        </Space>
-      ),
+      title: '操作', key: 'actions', width: compactActions ? 72 : 350, fixed: 'right',
+      render: (_value, row) => {
+        const isSelf = currentUserRole === 'doctor' && currentLoginId === row.employee_no
+        const openEdit = () => setFormDoctor(row)
+        const openStatus = () => { statusSubmissionRef.current = false; statusMutation.reset(); setStatusTarget(row) }
+        const openReset = () => { resetSubmissionRef.current = false; resetMutation.reset(); setResetTarget(row) }
+        const openDelete = () => { deleteSubmissionRef.current = false; deleteMutation.reset(); setDeleteTarget(row) }
+        if (compactActions) {
+          const items = [
+            { key: 'edit', label: '编辑', onClick: openEdit },
+            ...(!isSelf ? [{ key: 'status', label: row.status === 'active' ? '停用' : '启用', onClick: openStatus }] : []),
+            ...(!isSelf ? [{ key: 'reset', label: '重置密码', onClick: openReset }] : []),
+            { key: 'delete', label: '删除', danger: true, onClick: openDelete },
+          ]
+          return (
+            <Dropdown menu={{ items }} trigger={['click']}>
+              <Button type="text" size="small" icon={<MoreOutlined />} aria-label={`更多${row.name}操作`}>更多</Button>
+            </Dropdown>
+          )
+        }
+        return (
+          <Space size={4}>
+            <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEdit}>编辑</Button>
+            {!isSelf ? <Button type="link" size="small" icon={row.status === 'active' ? <StopOutlined /> : <CheckCircleOutlined />} aria-label={`${row.status === 'active' ? '停用' : '启用'}${row.name}`} onClick={openStatus}>{row.status === 'active' ? '停用' : '启用'}</Button> : null}
+            {!isSelf ? <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={openReset}>重置密码</Button> : null}
+            <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={openDelete}>删除</Button>
+          </Space>
+        )
+      },
     },
-  ], [deleteMutation, resetMutation])
+  ], [compactActions, currentLoginId, currentUserRole, deleteMutation, resetMutation, statusMutation])
 
   const resetError = resetMutation.error instanceof ApiError ? resetMutation.error : null
   return (
@@ -195,15 +247,51 @@ export function DoctorListPage() {
         loading={deleteMutation.isPending}
         error={deleteMutation.error}
         onCancel={() => { if (!deleteMutation.isPending) setDeleteTarget(null) }}
-        onConfirm={() => { if (deleteTarget && !deleteMutation.isPending) deleteMutation.mutate(deleteTarget.id) }}
+        onConfirm={() => {
+          if (!deleteTarget || deleteSubmissionRef.current) return
+          deleteSubmissionRef.current = true
+          deleteMutation.mutate(deleteTarget.id)
+        }}
       />
+      <Modal
+        title={`${statusTarget?.status === 'active' ? '停用' : '启用'}医生“${statusTarget?.name ?? ''}”`}
+        open={statusTarget !== null}
+        okText={`确认${statusTarget?.status === 'active' ? '停用' : '启用'}`}
+        cancelText="取消"
+        onCancel={() => { if (!statusMutation.isPending) setStatusTarget(null) }}
+        onOk={() => {
+          if (!statusTarget || statusSubmissionRef.current) return
+          statusSubmissionRef.current = true
+          statusMutation.mutate(statusTarget)
+        }}
+        okButtonProps={{
+          danger: statusTarget?.status === 'active',
+          loading: statusMutation.isPending,
+          disabled: statusMutation.isPending,
+          'aria-label': `确认${statusTarget?.status === 'active' ? '停用' : '启用'}`,
+        }}
+        cancelButtonProps={{ disabled: statusMutation.isPending, 'aria-label': '取消' }}
+        mask={{ closable: !statusMutation.isPending }}
+      >
+        <p>{statusTarget?.status === 'active' ? '停用后该医生现有登录会话将失效；若仍有在治患者，系统会拒绝停用。' : '启用后该医生可重新登录，旧会话不会恢复。'}</p>
+        {statusMutation.error instanceof ApiError ? (
+          <p className="inline-error">
+            {statusMutation.error.message}
+            {statusMutation.error.requestId ? `（请求编号：${statusMutation.error.requestId}）` : ''}
+          </p>
+        ) : null}
+      </Modal>
       <Modal
         title={`重置“${resetTarget?.name ?? ''}”的密码`}
         open={resetTarget !== null}
         okText="确认重置"
         cancelText="取消"
         onCancel={() => { if (!resetMutation.isPending) setResetTarget(null) }}
-        onOk={() => { if (resetTarget && !resetMutation.isPending) resetMutation.mutate(resetTarget.user_id) }}
+        onOk={() => {
+          if (!resetTarget || resetSubmissionRef.current) return
+          resetSubmissionRef.current = true
+          resetMutation.mutate(resetTarget.user_id)
+        }}
         okButtonProps={{ loading: resetMutation.isPending, disabled: resetMutation.isPending, 'aria-label': '确认重置' }}
         cancelButtonProps={{ disabled: resetMutation.isPending, 'aria-label': '取消' }}
         mask={{ closable: !resetMutation.isPending }}

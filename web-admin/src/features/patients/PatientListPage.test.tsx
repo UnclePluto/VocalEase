@@ -1,5 +1,5 @@
 import { http, HttpResponse, delay } from 'msw'
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
@@ -16,7 +16,7 @@ const doctor = {
 const patient = {
   id: '30000000-0000-0000-0000-000000000001', user_id: '40000000-0000-0000-0000-000000000001',
   medical_record_no: 'P000001', name: '患者甲', gender: 'female', enrollment_age: 32,
-  phone: '13900000001', primary_doctor: doctor.id, notes: '每周复诊',
+  phone: '13900000001', primary_doctor: doctor.id, primary_doctor_name: '第101位医生', notes: '每周复诊',
   treatment_plan: { id: '50000000-0000-0000-0000-000000000001', start_date: '2026-08-01', cycle_weeks: 4, target_session_count: 12, status: 'active' },
 }
 
@@ -121,6 +121,24 @@ describe('病人管理页面', () => {
     expect(await screen.findByText('患者已停用并隐藏，历史数据已保留')).toBeInTheDocument()
   }, 20_000)
 
+  it('同一渲染帧重复确认删除也只发送一次请求', async () => {
+    authenticate()
+    usePatientHandlers()
+    server.use(http.delete('/api/v1/admin/patients/:id/', async () => {
+      await delay(50)
+      return new HttpResponse(null, { status: 204 })
+    }))
+    const user = userEvent.setup()
+    renderApp('/patients')
+
+    await user.click(await screen.findByRole('button', { name: '删除患者甲' }))
+    const confirm = screen.getByRole('button', { name: '确认删除' })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+
+    await waitFor(() => expect(server.calls(`/api/v1/admin/patients/${patient.id}/`)).toHaveLength(1))
+  }, 20_000)
+
   it('取消旧查询并避免乱序响应覆盖新筛选结果', async () => {
     authenticate()
     let oldAborted = false
@@ -146,5 +164,150 @@ describe('病人管理页面', () => {
     expect(await screen.findByText('新患者')).toBeInTheDocument()
     await waitFor(() => expect(oldAborted).toBe(true))
     expect(screen.queryByText('旧患者')).not.toBeInTheDocument()
+  })
+
+  it('患者行使用服务端医生姓名快照并导航到稳定患者数据路由', async () => {
+    authenticate()
+    usePatientHandlers()
+    const user = userEvent.setup()
+    renderApp('/patients')
+
+    expect(await screen.findByText('第101位医生')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '查看患者甲数据' }))
+
+    expect(await screen.findByRole('heading', { name: '患者数据' })).toBeInTheDocument()
+    expect(screen.getByText(patient.id)).toBeInTheDocument()
+  }, 20_000)
+
+  it('编辑第101位医生患者时即使当前选项页不含该医生也稳定回显', async () => {
+    authenticate()
+    usePatientHandlers()
+    const user = userEvent.setup()
+    renderApp('/patients')
+
+    await user.click(await screen.findByRole('button', { name: '编辑患者甲' }))
+
+    const selected = screen.getByLabelText('主治医生') as HTMLSelectElement
+    expect(selected).toHaveValue(patient.primary_doctor)
+    expect(selected.selectedOptions[0]).toHaveTextContent('第101位医生')
+  }, 20_000)
+
+  it('主治医生选项使用服务端搜索且失败时显式提示并可重试', async () => {
+    authenticate()
+    let doctorAttempt = 0
+    server.use(
+      http.get('/api/v1/admin/patients/', () => HttpResponse.json(envelope(list([patient])))),
+      http.get('/api/v1/admin/doctors/', ({ request }) => {
+        doctorAttempt += 1
+        if (doctorAttempt === 1) {
+          return HttpResponse.json({
+            code: 'doctor_options_failed', message: '医生选项加载失败', data: null, request_id: 'doctor-options-1',
+          }, { status: 500 })
+        }
+        const keyword = new URL(request.url).searchParams.get('keyword')
+        return HttpResponse.json(envelope(list(keyword === '第101' ? [{ ...doctor, name: '第101位医生' }] : [doctor])))
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp('/patients')
+
+    expect(await screen.findByText('医生选项加载失败')).toBeInTheDocument()
+    expect(screen.getByText('请求编号：doctor-options-1')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '重试医生选项' }))
+    const doctorFilter = screen.getByRole('combobox', { name: '主治医生筛选' })
+    await user.click(doctorFilter)
+    await user.type(doctorFilter, '第101')
+
+    await waitFor(() => {
+      expect(server.calls('/api/v1/admin/doctors/').at(-1)?.search).toBe(
+        '?page=1&page_size=20&keyword=%E7%AC%AC101&status=active',
+      )
+    })
+    expect(await screen.findByRole('option', { name: /第101位医生/ })).toBeInTheDocument()
+  })
+
+  it('医生选项初始只取一页且搜索第101位不会顺序扫描中间页', async () => {
+    authenticate()
+    server.use(
+      http.get('/api/v1/admin/patients/', () => HttpResponse.json(envelope(list([patient])))),
+      http.get('/api/v1/admin/doctors/', ({ request }) => {
+        const keyword = new URL(request.url).searchParams.get('keyword')
+        return HttpResponse.json(envelope({
+          count: keyword ? 1 : 101,
+          page: 1,
+          page_size: 20,
+          results: keyword ? [{ ...doctor, name: '第101位医生' }] : [doctor],
+        }))
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp('/patients')
+
+    expect(await screen.findByText('患者甲')).toBeInTheDocument()
+    await waitFor(() => expect(server.calls('/api/v1/admin/doctors/')).toHaveLength(1))
+    expect(server.calls('/api/v1/admin/doctors/')[0]?.search).toBe('?page=1&page_size=20&status=active')
+
+    const doctorFilter = screen.getByRole('combobox', { name: '主治医生筛选' })
+    await user.click(doctorFilter)
+    await user.type(doctorFilter, '第101')
+
+    await waitFor(() => expect(server.calls('/api/v1/admin/doctors/')).toHaveLength(2))
+    expect(server.calls('/api/v1/admin/doctors/')[1]?.search).toBe(
+      '?page=1&page_size=20&keyword=%E7%AC%AC101&status=active',
+    )
+  })
+
+  it('患者角色不能直接进入患者数据占位路由', async () => {
+    useAuthStore.setState({
+      accessToken: 'valid',
+      user: { login_id: 'P000001', role: 'patient', must_change_password: false },
+      status: 'authenticated',
+    })
+
+    renderApp(`/patients/${patient.id}/data`)
+
+    expect(await screen.findByRole('heading', { name: '登录 VocaEase' })).toBeInTheDocument()
+  })
+
+  it('医生选项可逐页请求到第101位且每页请求受限为20条', async () => {
+    authenticate()
+    server.use(
+      http.get('/api/v1/admin/patients/', () => HttpResponse.json(envelope(list([patient])))),
+      http.get('/api/v1/admin/doctors/', ({ request }) => {
+        const page = Number(new URL(request.url).searchParams.get('page'))
+        const pageDoctor = {
+          ...doctor,
+          id: `10000000-0000-0000-0000-${String(page).padStart(12, '0')}`,
+          name: page === 6 ? '第101位医生' : `第${page}页医生`,
+        }
+        return HttpResponse.json(envelope({ count: 101, page, page_size: 20, results: [pageDoctor] }))
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp('/patients')
+
+    const doctorFilter = await screen.findByRole('combobox', { name: '主治医生筛选' })
+    await user.click(doctorFilter)
+    for (let page = 2; page <= 6; page += 1) {
+      await user.click(await screen.findByRole('button', { name: '加载更多医生' }))
+      await waitFor(() => expect(server.calls('/api/v1/admin/doctors/').at(-1)?.search).toContain(`page=${page}&page_size=20`))
+    }
+    expect(server.calls('/api/v1/admin/doctors/').at(-1)?.search).toBe(
+      '?page=6&page_size=20&status=active',
+    )
+  }, 20_000)
+
+  it('390px视口以更多菜单保留患者数据入口和行操作', async () => {
+    window.innerWidth = 390
+    authenticate()
+    usePatientHandlers()
+    const user = userEvent.setup()
+
+    renderApp('/patients')
+
+    const more = await screen.findByRole('button', { name: '更多患者甲操作' })
+    expect(screen.queryByRole('button', { name: '编辑患者甲' })).not.toBeInTheDocument()
+    await user.click(more)
+    expect(await screen.findByRole('menuitem', { name: '查看患者数据' })).toBeInTheDocument()
   })
 })

@@ -7,6 +7,11 @@ export const doctorKeys = {
   list: (query: DoctorListQuery) => [...doctorKeys.lists(), query] as const,
 }
 
+export const doctorOptionKeys = {
+  all: ['doctor-options'] as const,
+  list: (search: string) => [...doctorOptionKeys.all, { search }] as const,
+}
+
 function doctorSearch(query: DoctorListQuery) {
   const params = new URLSearchParams()
   params.set('page', String(query.page))
@@ -35,4 +40,9 @@ export function deleteDoctor(id: string) {
 
 export function resetDoctorPassword(userId: string) {
   return apiRequest<Record<string, never>>(`/v1/admin/users/${userId}/reset-password/`, { method: 'POST' })
+}
+
+export function setDoctorActive(id: string, isActive: boolean) {
+  const action = isActive ? 'activate' : 'deactivate'
+  return apiRequest<Doctor>(`/v1/admin/doctors/${id}/${action}/`, { method: 'POST' })
 }

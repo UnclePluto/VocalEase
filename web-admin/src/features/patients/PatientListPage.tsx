@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { DeleteOutlined, EditOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Button, Input, Modal, Select, Space, message } from 'antd'
+import { BarChartOutlined, DeleteOutlined, EditOutlined, LockOutlined, MoreOutlined, PlusOutlined } from '@ant-design/icons'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Dropdown, Input, Modal, Select, Space, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import type { InputRef } from 'antd'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/errors'
 import { ConfirmDelete } from '../../components/ConfirmDelete'
 import { DataTable } from '../../components/DataTable'
 import { StatusTag } from '../../components/StatusTag'
-import { doctorKeys, listDoctors } from '../doctors/api'
-import type { Doctor } from '../doctors/types'
+import { useCompactActions } from '../../hooks/useCompactActions'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
+import { doctorOptionKeys, listDoctors } from '../doctors/api'
 import {
   createPatient,
   deletePatient,
@@ -26,7 +27,7 @@ import type { Patient, PatientListQuery, PatientWrite, TreatmentStatus } from '.
 const PAGE_SIZES = new Set([10, 20, 50, 100])
 const STATUSES = new Set<TreatmentStatus>(['pending', 'active', 'completed', 'cancelled'])
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
-const ACTIVE_DOCTOR_QUERY = { page: 1, page_size: 100, status: 'active' as const }
+const DOCTOR_OPTION_PAGE_SIZE = 20
 
 function positiveInteger(value: string | null, fallback: number) {
   const parsed = Number(value)
@@ -60,9 +61,15 @@ export function PatientListPage() {
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => readQuery(params), [params])
   const searchRef = useRef<InputRef>(null)
+  const navigate = useNavigate()
+  const compactActions = useCompactActions()
+  const [doctorSearch, setDoctorSearch] = useState('')
+  const deferredDoctorSearch = useDebouncedValue(doctorSearch.trim(), 250)
   const [formPatient, setFormPatient] = useState<Patient | null | undefined>(undefined)
   const [deleteTarget, setDeleteTarget] = useState<Patient | null>(null)
   const [resetTarget, setResetTarget] = useState<Patient | null>(null)
+  const deleteSubmissionRef = useRef(false)
+  const resetSubmissionRef = useRef(false)
   const queryClient = useQueryClient()
   const [messageApi, messageContext] = message.useMessage()
 
@@ -75,19 +82,42 @@ export function PatientListPage() {
     queryKey: patientKeys.list(query),
     queryFn: ({ signal }) => listPatients(query, signal),
   })
-  const doctorsQuery = useQuery({
-    queryKey: doctorKeys.list(ACTIVE_DOCTOR_QUERY),
-    queryFn: ({ signal }) => listDoctors(ACTIVE_DOCTOR_QUERY, signal),
+  const doctorsQuery = useInfiniteQuery({
+    queryKey: doctorOptionKeys.list(deferredDoctorSearch),
+    initialPageParam: 1,
+    queryFn: ({ pageParam, signal }) => listDoctors({
+      page: pageParam,
+      page_size: DOCTOR_OPTION_PAGE_SIZE,
+      search: deferredDoctorSearch || undefined,
+      status: 'active',
+    }, signal),
+    getNextPageParam: (lastPage) => {
+      const loadedThrough = lastPage.page * lastPage.page_size
+      return loadedThrough < lastPage.count ? lastPage.page + 1 : undefined
+    },
   })
-  const doctors = useMemo(() => doctorsQuery.data?.results ?? [], [doctorsQuery.data?.results])
-  const doctorNames = useMemo(() => new Map(doctors.map((doctor) => [doctor.id, doctor.name])), [doctors])
+  const doctors = useMemo(
+    () => doctorsQuery.data?.pages.flatMap((page) => page.results) ?? [],
+    [doctorsQuery.data?.pages],
+  )
+  const selectedDoctor = useMemo(() => {
+    if (!query.doctor || doctors.some((doctor) => doctor.id === query.doctor)) return null
+    const patientWithDoctor = listQuery.data?.results.find((item) => item.primary_doctor === query.doctor)
+    if (!patientWithDoctor) return null
+    return {
+      id: patientWithDoctor.primary_doctor,
+      name: patientWithDoctor.primary_doctor_name,
+      employee_no: '',
+    }
+  }, [doctors, listQuery.data?.results, query.doctor])
+  const doctorOptions = selectedDoctor ? [selectedDoctor, ...doctors] : doctors
 
   const saveMutation = useMutation({
     mutationFn: ({ values, patient }: { values: PatientWrite; patient?: Patient | null }) => (
       patient ? updatePatient(patient.id, values) : createPatient(values)
     ),
     onSuccess: async (_saved, variables) => {
-      await queryClient.invalidateQueries({ queryKey: patientKeys.lists() })
+      await queryClient.invalidateQueries({ queryKey: patientKeys.list(query), exact: true })
       setFormPatient(undefined)
       if (variables.patient) messageApi.success('患者信息已更新')
       else messageApi.success('患者创建成功，初始密码为 888888，首次登录需修改')
@@ -96,10 +126,11 @@ export function PatientListPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deletePatient(id),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: patientKeys.lists() })
+      await queryClient.invalidateQueries({ queryKey: patientKeys.list(query), exact: true })
       setDeleteTarget(null)
       messageApi.success('患者已停用并隐藏，历史数据已保留')
     },
+    onSettled: () => { deleteSubmissionRef.current = false },
   })
   const resetMutation = useMutation({
     mutationFn: (userId: string) => resetPatientPassword(userId),
@@ -107,6 +138,7 @@ export function PatientListPage() {
       setResetTarget(null)
       messageApi.success('密码已重置为 888888，首次登录必须修改')
     },
+    onSettled: () => { resetSubmissionRef.current = false },
   })
 
   const replaceQuery = (changes: Partial<PatientListQuery>, resetPage = false) => {
@@ -119,7 +151,7 @@ export function PatientListPage() {
     { title: '性别', dataIndex: 'gender', width: 72, render: (value: Patient['gender']) => value === 'male' ? '男' : '女' },
     { title: '入组年龄', dataIndex: 'enrollment_age', width: 100 },
     { title: '手机号', dataIndex: 'phone', width: 145 },
-    { title: '主治医生', dataIndex: 'primary_doctor', width: 120, render: (value: string) => doctorNames.get(value) ?? '—' },
+    { title: '主治医生', dataIndex: 'primary_doctor_name', width: 120 },
     {
       title: '治疗状态', key: 'status', width: 110,
       render: (_value, row) => row.treatment_plan ? <StatusTag scope="treatment" status={row.treatment_plan.status} /> : '—',
@@ -129,16 +161,35 @@ export function PatientListPage() {
       render: (_value, row) => row.treatment_plan ? `${row.treatment_plan.cycle_weeks} 周 / ${row.treatment_plan.target_session_count} 次` : '—',
     },
     {
-      title: '操作', key: 'actions', width: 270, fixed: 'right',
-      render: (_value, row) => (
-        <Space size={4}>
-          <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={() => setFormPatient(row)}>编辑</Button>
-          <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={() => { resetMutation.reset(); setResetTarget(row) }}>重置密码</Button>
-          <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={() => { deleteMutation.reset(); setDeleteTarget(row) }}>删除</Button>
-        </Space>
-      ),
+      title: '操作', key: 'actions', width: compactActions ? 72 : 380, fixed: 'right',
+      render: (_value, row) => {
+        const openData = () => navigate(`/patients/${row.id}/data`)
+        const openEdit = () => setFormPatient(row)
+        const openReset = () => { resetSubmissionRef.current = false; resetMutation.reset(); setResetTarget(row) }
+        const openDelete = () => { deleteSubmissionRef.current = false; deleteMutation.reset(); setDeleteTarget(row) }
+        if (compactActions) {
+          return (
+            <Dropdown menu={{ items: [
+              { key: 'data', label: '查看患者数据', onClick: openData },
+              { key: 'edit', label: '编辑', onClick: openEdit },
+              { key: 'reset', label: '重置密码', onClick: openReset },
+              { key: 'delete', label: '删除', danger: true, onClick: openDelete },
+            ] }} trigger={['click']}>
+              <Button type="text" size="small" icon={<MoreOutlined />} aria-label={`更多${row.name}操作`}>更多</Button>
+            </Dropdown>
+          )
+        }
+        return (
+          <Space size={4}>
+            <Button type="link" size="small" icon={<BarChartOutlined />} aria-label={`查看${row.name}数据`} onClick={openData}>查看数据</Button>
+            <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEdit}>编辑</Button>
+            <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={openReset}>重置密码</Button>
+            <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={openDelete}>删除</Button>
+          </Space>
+        )
+      },
     },
-  ], [deleteMutation, doctorNames, resetMutation])
+  ], [compactActions, deleteMutation, navigate, resetMutation])
 
   const resetError = resetMutation.error instanceof ApiError ? resetMutation.error : null
   return (
@@ -180,14 +231,40 @@ export function PatientListPage() {
             placeholder="全部主治医生"
             value={query.doctor}
             allowClear
-            loading={doctorsQuery.isPending}
+            loading={doctorsQuery.isPending || doctorsQuery.isFetchingNextPage}
             showSearch
-            optionFilterProp="label"
-            options={doctors.map((doctor: Doctor) => ({ value: doctor.id, label: `${doctor.name} · ${doctor.employee_no}` }))}
+            filterOption={false}
+            searchValue={doctorSearch}
+            onSearch={setDoctorSearch}
+            options={doctorOptions.map((item) => ({ value: item.id, label: `${item.name}${item.employee_no ? ` · ${item.employee_no}` : ''}` }))}
+            popupRender={(menu) => (
+              <>
+                {menu}
+                {doctorsQuery.hasNextPage ? (
+                  <Button
+                    aria-label="加载更多医生"
+                    type="text"
+                    block
+                    loading={doctorsQuery.isFetchingNextPage}
+                    onClick={() => void doctorsQuery.fetchNextPage()}
+                  >加载更多</Button>
+                ) : null}
+              </>
+            )}
             onChange={(value) => replaceQuery({ doctor: value }, true)}
           />
           <Button onClick={() => setParams(uiParams({ page: 1, page_size: query.page_size }))}>重置</Button>
         </div>
+        {doctorsQuery.error ? (
+          <Alert
+            className="doctor-options-error"
+            type="error"
+            showIcon
+            title={doctorsQuery.error instanceof ApiError ? doctorsQuery.error.message : '医生选项加载失败'}
+            description={doctorsQuery.error instanceof ApiError && doctorsQuery.error.requestId ? `请求编号：${doctorsQuery.error.requestId}` : undefined}
+            action={<Button aria-label="重试医生选项" size="small" onClick={() => void doctorsQuery.refetch()}>重试</Button>}
+          />
+        ) : null}
         <DataTable<Patient>
           ariaLabel="正在加载患者列表"
           columns={columns}
@@ -205,9 +282,11 @@ export function PatientListPage() {
         key={formPatient?.id ?? (formPatient === null ? 'new' : 'closed')}
         patient={formPatient}
         doctors={doctors}
-        loadingDoctors={doctorsQuery.isPending}
+        doctorSearch={doctorSearch}
+        loadingDoctors={doctorsQuery.isPending || doctorsQuery.isFetchingNextPage}
         open={formPatient !== undefined}
         onCancel={() => { if (!saveMutation.isPending) setFormPatient(undefined) }}
+        onDoctorSearch={setDoctorSearch}
         onSubmit={async (values) => { await saveMutation.mutateAsync({ values, patient: formPatient }) }}
       />
       <ConfirmDelete
@@ -217,7 +296,11 @@ export function PatientListPage() {
         loading={deleteMutation.isPending}
         error={deleteMutation.error}
         onCancel={() => { if (!deleteMutation.isPending) setDeleteTarget(null) }}
-        onConfirm={() => { if (deleteTarget && !deleteMutation.isPending) deleteMutation.mutate(deleteTarget.id) }}
+        onConfirm={() => {
+          if (!deleteTarget || deleteSubmissionRef.current) return
+          deleteSubmissionRef.current = true
+          deleteMutation.mutate(deleteTarget.id)
+        }}
       />
       <Modal
         title={`重置“${resetTarget?.name ?? ''}”的密码`}
@@ -225,7 +308,11 @@ export function PatientListPage() {
         okText="确认重置"
         cancelText="取消"
         onCancel={() => { if (!resetMutation.isPending) setResetTarget(null) }}
-        onOk={() => { if (resetTarget && !resetMutation.isPending) resetMutation.mutate(resetTarget.user_id) }}
+        onOk={() => {
+          if (!resetTarget || resetSubmissionRef.current) return
+          resetSubmissionRef.current = true
+          resetMutation.mutate(resetTarget.user_id)
+        }}
         okButtonProps={{ loading: resetMutation.isPending, disabled: resetMutation.isPending, 'aria-label': '确认重置' }}
         cancelButtonProps={{ disabled: resetMutation.isPending, 'aria-label': '取消' }}
         mask={{ closable: !resetMutation.isPending }}
