@@ -1,7 +1,9 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll } from 'vitest'
+import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 
+import { resetApiClientForTests } from '../api/client'
+import { useAuthStore } from '../auth/store'
 import { server } from './server'
 
 function memoryStorage(): Storage {
@@ -18,6 +20,9 @@ function memoryStorage(): Storage {
 
 Object.defineProperty(window, 'localStorage', { configurable: true, value: memoryStorage() })
 Object.defineProperty(window, 'sessionStorage', { configurable: true, value: memoryStorage() })
+
+const getComputedStyle = window.getComputedStyle.bind(window)
+window.getComputedStyle = (element: Element) => getComputedStyle(element)
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -36,6 +41,17 @@ Object.defineProperty(window, 'matchMedia', {
 beforeAll(() => server.listen())
 afterEach(() => {
   cleanup()
+  useAuthStore.getState().reset()
+  resetApiClientForTests()
   server.reset()
+  window.localStorage.clear()
+  window.sessionStorage.clear()
+  for (const cookie of document.cookie.split(';')) {
+    const name = cookie.split('=')[0]?.trim()
+    if (name) document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`
+  }
+  vi.clearAllTimers()
+  vi.useRealTimers()
+  window.innerWidth = 1024
 })
 afterAll(() => server.close())

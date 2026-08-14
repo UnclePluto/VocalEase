@@ -1,3 +1,4 @@
+import { StrictMode, type ReactNode } from 'react'
 import { render } from '@testing-library/react'
 import { MemoryRouter, useRoutes } from 'react-router-dom'
 
@@ -8,12 +9,15 @@ function TestRoutes() {
   return useRoutes(appRoutes)
 }
 
-export function renderApp(path = '/') {
-  return render(
+export function renderApp(path = '/', options: { strict?: boolean } = {}) {
+  const tree: ReactNode = (
     <AppProviders>
       <MemoryRouter initialEntries={[path]}>
         <TestRoutes />
       </MemoryRouter>
-    </AppProviders>,
+    </AppProviders>
+  )
+  return render(
+    options.strict ? <StrictMode>{tree}</StrictMode> : tree,
   )
 }

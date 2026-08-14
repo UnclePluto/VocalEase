@@ -125,15 +125,18 @@ def _rotate_refresh_token(
     return user, pair
 
 
-def revoke_refresh_token(raw_refresh: str) -> bool:
-    token = RefreshToken.objects.filter(
-        token_hash=RefreshToken.digest(raw_refresh), revoked_at__isnull=True
-    ).first()
+def revoke_refresh_token(raw_refresh: str) -> User | None:
+    token = (
+        RefreshToken.objects.select_for_update()
+        .select_related("user")
+        .filter(token_hash=RefreshToken.digest(raw_refresh), revoked_at__isnull=True)
+        .first()
+    )
     if token is None:
-        return False
+        return None
     token.revoked_at = timezone.now()
     token.save(update_fields=["revoked_at"])
-    return True
+    return token.user
 
 
 def revoke_user_refresh_tokens(user: User) -> None:

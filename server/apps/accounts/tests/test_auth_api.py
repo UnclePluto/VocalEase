@@ -124,11 +124,11 @@ def test_web_login_sets_http_only_refresh_cookie_and_records_request_audit(api_c
     ],
 )
 def test_login_returns_a_minimal_fresh_account_snapshot(api_client, role, login_id):
-    user = User.objects.create_user(login_id=login_id, password="888888", role=role)
+    User.objects.create_user(login_id=login_id, password="888888", role=role)
 
     response = api_client.post(
         "/api/v1/auth/login/",
-        {"login_id": login_id, "password": "888888", "client_kind": "web"},
+        {"login_id": login_id, "password": "888888", "client_kind": "android"},
         format="json",
     )
 
@@ -138,6 +138,61 @@ def test_login_returns_a_minimal_fresh_account_snapshot(api_client, role, login_
         "role": role,
         "must_change_password": True,
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("role", [Role.DOCTOR, Role.SYSTEM_ADMIN])
+def test_web_login_allows_backoffice_roles(api_client, role):
+    user = User.objects.create_user(
+        login_id=f"web-{role}", password="888888", role=role
+    )
+
+    response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": user.login_id, "password": "888888", "client_kind": "web"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["user"]["role"] == role
+    assert "refresh_token" in response.cookies
+
+
+@pytest.mark.django_db
+def test_web_login_rejects_patient_before_issuing_tokens_or_cookies(api_client, patient_user):
+    response = api_client.post(
+        "/api/v1/auth/login/",
+        {
+            "login_id": patient_user.login_id,
+            "password": "888888",
+            "client_kind": "web",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "admin_access_denied"
+    assert "refresh_token" not in response.cookies
+    assert "refresh_csrf_token" not in response.cookies
+    assert not RefreshToken.objects.filter(user=patient_user).exists()
+    assert not AuditLog.objects.filter(action="auth.login", actor=patient_user).exists()
+
+
+@pytest.mark.django_db
+def test_android_login_still_allows_patient(api_client, patient_user):
+    response = api_client.post(
+        "/api/v1/auth/login/",
+        {
+            "login_id": patient_user.login_id,
+            "password": "888888",
+            "client_kind": "android",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["user"]["role"] == Role.PATIENT
+    assert response.json()["data"]["refresh"]
 
 
 @pytest.mark.django_db
@@ -378,6 +433,89 @@ def test_logout_revokes_refresh_token_and_records_audit(api_client, doctor_user)
     assert response.status_code == 200
     assert RefreshToken.objects.get(token_hash=RefreshToken.digest(data["refresh"])).revoked_at is not None
     assert AuditLog.objects.filter(action="auth.logout", actor=doctor_user).exists()
+
+
+@pytest.mark.django_db
+def test_web_logout_uses_refresh_cookie_when_access_is_expired_and_is_idempotent(
+    api_client, doctor_user
+):
+    login_response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": doctor_user.login_id, "password": "888888", "client_kind": "web"},
+        format="json",
+    )
+    raw_refresh = login_response.cookies["refresh_token"].value
+    csrf_token = login_response.cookies["refresh_csrf_token"].value
+    api_client.credentials(HTTP_AUTHORIZATION="Bearer expired-access-token")
+
+    first = api_client.post(
+        "/api/v1/auth/logout/",
+        {"client_kind": "web"},
+        format="json",
+        HTTP_ORIGIN="https://app.vocaease.test",
+        HTTP_X_CSRFTOKEN=csrf_token,
+    )
+    second = api_client.post(
+        "/api/v1/auth/logout/",
+        {"client_kind": "web"},
+        format="json",
+        HTTP_ORIGIN="https://app.vocaease.test",
+        HTTP_X_CSRFTOKEN=csrf_token,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert RefreshToken.objects.get(token_hash=RefreshToken.digest(raw_refresh)).revoked_at
+    assert first.cookies["refresh_token"].value == ""
+    assert first.cookies["refresh_csrf_token"].value == ""
+    assert AuditLog.objects.filter(action="auth.logout", actor=doctor_user).count() == 1
+
+
+@pytest.mark.django_db
+def test_web_logout_revokes_cookie_so_refresh_cannot_restore_session(api_client, doctor_user):
+    login_response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": doctor_user.login_id, "password": "888888", "client_kind": "web"},
+        format="json",
+    )
+    csrf_token = login_response.cookies["refresh_csrf_token"].value
+
+    response = api_client.post(
+        "/api/v1/auth/logout/",
+        {"client_kind": "web"},
+        format="json",
+        HTTP_ORIGIN="https://app.vocaease.test",
+        HTTP_X_CSRFTOKEN=csrf_token,
+    )
+    assert response.status_code == 200
+
+    api_client.cookies["refresh_token"] = login_response.cookies["refresh_token"].value
+    api_client.cookies["refresh_csrf_token"] = csrf_token
+    refresh = api_client.post(
+        "/api/v1/auth/refresh/",
+        {"client_kind": "web"},
+        format="json",
+        HTTP_ORIGIN="https://app.vocaease.test",
+        HTTP_X_CSRFTOKEN=csrf_token,
+    )
+    assert refresh.status_code == 401
+
+
+@pytest.mark.django_db
+def test_android_logout_still_requires_authenticated_access(api_client, doctor_user):
+    login_response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": doctor_user.login_id, "password": "888888", "client_kind": "android"},
+        format="json",
+    )
+
+    response = api_client.post(
+        "/api/v1/auth/logout/",
+        {"client_kind": "android", "refresh": login_response.json()["data"]["refresh"]},
+        format="json",
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.django_db

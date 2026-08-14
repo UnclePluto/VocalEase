@@ -1,7 +1,7 @@
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.utils import timezone
-from rest_framework.exceptions import AuthenticationFailed, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
 from apps.audit.services import record
 
@@ -16,8 +16,14 @@ def authenticate_login(*, login_id: str, password: str) -> User:
     return user
 
 
-def login(*, login_id: str, password: str, remember_me: bool = False) -> tuple[User, TokenPair]:
+def login(
+    *, login_id: str, password: str, client_kind: str, remember_me: bool = False
+) -> tuple[User, TokenPair]:
     user = authenticate_login(login_id=login_id, password=password)
+    if client_kind == "web" and user.role == "patient":
+        raise PermissionDenied(
+            "患者账号不能登录医生后台", code="admin_access_denied"
+        )
     return user, issue_token_pair(user, remember_me=remember_me)
 
 

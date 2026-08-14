@@ -1,6 +1,6 @@
-import { act, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { useAuthStore } from '../auth/store'
 import { renderApp } from '../test/renderApp'
@@ -9,11 +9,6 @@ import { server } from '../test/server'
 const admin = { login_id: 'A000001', role: 'system_admin' as const, must_change_password: false }
 
 describe('后台布局', () => {
-  afterEach(() => {
-    act(() => useAuthStore.getState().reset())
-    server.reset()
-  })
-
   it('呈现视觉稿中的六个导航标签', async () => {
     useAuthStore.setState({ accessToken: 'valid', user: admin, status: 'authenticated' })
     renderApp('/doctors')
@@ -45,5 +40,27 @@ describe('后台布局', () => {
 
     expect(await screen.findByRole('heading', { name: '登录 VocaEase' })).toBeInTheDocument()
     expect(useAuthStore.getState().status).toBe('anonymous')
+  })
+
+  it('离开移动断点时关闭抽屉且返回移动端不会自动重开', async () => {
+    window.innerWidth = 390
+    useAuthStore.setState({ accessToken: 'valid', user: admin, status: 'authenticated' })
+    const user = userEvent.setup()
+    renderApp('/doctors')
+    await user.click(await screen.findByRole('button', { name: '打开导航菜单' }))
+    expect(await screen.findByRole('navigation', { name: '移动端后台主导航' })).toBeInTheDocument()
+
+    act(() => {
+      window.innerWidth = 1024
+      fireEvent(window, new Event('resize'))
+    })
+    await waitFor(() => expect(screen.queryByRole('navigation', { name: '移动端后台主导航' })).not.toBeInTheDocument())
+    act(() => {
+      window.innerWidth = 390
+      fireEvent(window, new Event('resize'))
+    })
+
+    expect(await screen.findByRole('button', { name: '打开导航菜单' })).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: '移动端后台主导航' })).not.toBeInTheDocument()
   })
 })

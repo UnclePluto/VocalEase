@@ -8,8 +8,8 @@ export function loginAccount(input: { login_id: string; password: string; rememb
   })
 }
 
-export function recoverAccount() {
-  return refreshSession()
+export function recoverAccount(expectedEpoch: number) {
+  return refreshSession(expectedEpoch)
 }
 
 export function logoutAccount() {

@@ -1,6 +1,6 @@
-import { act, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { apiRequest } from '../../api/client'
 import { useAuthStore } from '../../auth/store'
@@ -8,13 +8,6 @@ import { renderApp } from '../../test/renderApp'
 import { server } from '../../test/server'
 
 describe('后台认证', () => {
-  afterEach(() => {
-    act(() => useAuthStore.getState().reset())
-    server.reset()
-    window.localStorage.clear()
-    window.sessionStorage.clear()
-  })
-
   it('首次登录用户只能进入修改初始密码', async () => {
     useAuthStore.setState({
       accessToken: 'first-login-token',
@@ -47,12 +40,27 @@ describe('后台认证', () => {
     expect(server.calls('/api/v1/auth/refresh/')).toHaveLength(1)
   })
 
+  it('React StrictMode重复effect只启动一次会话恢复', async () => {
+    useAuthStore.setState({ status: 'booting', accessToken: null, user: null })
+    server.useRefresh({
+      access: 'strict-restored-access',
+      refresh_expires_at: '2026-08-15T00:00:00Z',
+      user: { login_id: 'D000001', role: 'doctor', must_change_password: false },
+    })
+
+    renderApp('/doctors', { strict: true })
+
+    expect(await screen.findByRole('heading', { name: '医生管理' })).toBeInTheDocument()
+    expect(server.calls('/api/v1/auth/refresh/')).toHaveLength(1)
+  })
+
   it('患者账号不能进入医生后台', async () => {
     server.useLogin({
       access: 'patient-access',
       refresh_expires_at: '2026-08-15T00:00:00Z',
       user: { login_id: 'P000001', role: 'patient', must_change_password: false },
     })
+    server.useLogout()
     const user = userEvent.setup()
     renderApp('/login')
 
@@ -62,6 +70,7 @@ describe('后台认证', () => {
 
     expect(await screen.findByText('患者账号不能登录医生后台')).toBeInTheDocument()
     expect(useAuthStore.getState()).toMatchObject({ status: 'anonymous', accessToken: null, user: null })
+    await waitFor(() => expect(server.calls('/api/v1/auth/logout/')).toHaveLength(1))
   })
 
   it('登录后发送web客户端类型和记住我语义且不持久化access token', async () => {
@@ -128,6 +137,101 @@ describe('后台认证', () => {
     expect(server.calls('/api/v1/auth/refresh/')).toHaveLength(1)
   })
 
+  it('退出立即失效本地会话且延迟刷新不能恢复或重放原请求', async () => {
+    useAuthStore.setState({
+      accessToken: 'expired',
+      user: { login_id: 'A000001', role: 'system_admin', must_change_password: false },
+      status: 'authenticated',
+    })
+    server.useConcurrentUnauthorizedResources()
+    const delayed = server.useDeferredRefresh({
+      access: 'stale-refreshed-access',
+      refresh_expires_at: '2026-08-15T00:00:00Z',
+      user: { login_id: 'A000001', role: 'system_admin', must_change_password: false },
+    })
+    server.useLogout()
+    const outcome = apiRequest('/v1/admin/test-resource/1/').catch((error: unknown) => error)
+    await waitFor(() => expect(server.calls('/api/v1/auth/refresh/')).toHaveLength(1))
+
+    const logout = useAuthStore.getState().logout()
+    expect(useAuthStore.getState()).toMatchObject({ status: 'anonymous', accessToken: null, user: null })
+    await logout
+    delayed.release()
+
+    await expect(outcome).resolves.toMatchObject({ code: 'session_changed' })
+    expect(server.calls('/api/v1/admin/test-resource/1/')).toHaveLength(1)
+    expect(useAuthStore.getState()).toMatchObject({ status: 'anonymous', accessToken: null, user: null })
+  })
+
+  it('延迟刷新不能覆盖之后完成的新登录', async () => {
+    useAuthStore.setState({
+      accessToken: 'old-access',
+      user: { login_id: 'old-doctor', role: 'doctor', must_change_password: false },
+      status: 'authenticated',
+    })
+    const delayed = server.useDeferredRefresh({
+      access: 'stale-access',
+      refresh_expires_at: '2026-08-15T00:00:00Z',
+      user: { login_id: 'old-doctor', role: 'doctor', must_change_password: false },
+    })
+    const refreshOutcome = useAuthStore.getState().refresh().catch((error: unknown) => error)
+    await waitFor(() => expect(server.calls('/api/v1/auth/refresh/')).toHaveLength(1))
+    server.useLogin({
+      access: 'new-access',
+      refresh_expires_at: '2026-09-15T00:00:00Z',
+      user: { login_id: 'new-doctor', role: 'doctor', must_change_password: false },
+    })
+
+    await useAuthStore.getState().login({
+      login_id: 'new-doctor', password: 'new-password', remember_me: false,
+    })
+    delayed.release()
+    await refreshOutcome
+
+    expect(useAuthStore.getState()).toMatchObject({
+      accessToken: 'new-access',
+      user: { login_id: 'new-doctor' },
+      status: 'authenticated',
+    })
+  })
+
+  it('旧登录响应不能覆盖之后完成的新登录', async () => {
+    const delayed = server.useDeferredLogin({
+      access: 'old-access',
+      refresh_expires_at: '2026-08-15T00:00:00Z',
+      user: { login_id: 'old-doctor', role: 'doctor', must_change_password: false },
+    })
+    const oldLogin = useAuthStore.getState().login({
+      login_id: 'old-doctor', password: 'old-password', remember_me: false,
+    })
+    await waitFor(() => expect(server.calls('/api/v1/auth/login/')).toHaveLength(1))
+    server.useLogin({
+      access: 'new-access',
+      refresh_expires_at: '2026-09-15T00:00:00Z',
+      user: { login_id: 'new-doctor', role: 'doctor', must_change_password: false },
+    })
+
+    await useAuthStore.getState().login({
+      login_id: 'new-doctor', password: 'new-password', remember_me: false,
+    })
+    delayed.release()
+    await oldLogin
+
+    expect(useAuthStore.getState()).toMatchObject({ accessToken: 'new-access', user: { login_id: 'new-doctor' } })
+  })
+
+  it('退出网络失败也不恢复会话或抛出未处理错误', async () => {
+    useAuthStore.setState({
+      accessToken: 'valid',
+      user: { login_id: 'A000001', role: 'system_admin', must_change_password: false },
+      status: 'authenticated',
+    })
+    server.useLogoutNetworkFailure()
+
+    await expect(useAuthStore.getState().logout()).resolves.toBeUndefined()
+    expect(useAuthStore.getState()).toMatchObject({ status: 'anonymous', accessToken: null, user: null })
+  })
+
   it('refresh和logout都携带CSRF头', async () => {
     document.cookie = 'refresh_csrf_token=csrf-value; path=/'
     useAuthStore.setState({
@@ -158,6 +262,18 @@ describe('后台认证', () => {
         requestId: 'request-from-header',
       }),
     )
+  })
+
+  it('稳定映射网络错误和请求取消', async () => {
+    server.useNetworkError()
+    await expect(apiRequest('/v1/admin/network-error/')).rejects.toMatchObject({ code: 'network_error' })
+
+    const controller = new AbortController()
+    const delayed = server.useDelayedResource()
+    const request = apiRequest('/v1/admin/delayed/', { signal: controller.signal })
+    controller.abort()
+    delayed.release()
+    await expect(request).rejects.toMatchObject({ code: 'request_aborted' })
   })
 
   it('改密成功后清空会话并要求重新登录', async () => {

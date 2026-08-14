@@ -1,23 +1,44 @@
 import { ApiError } from './errors'
 import type { ApiEnvelope, AuthPayload, FieldErrors } from './types'
 
+type SessionSnapshot = { accessToken: string | null; epoch: number }
+
 type SessionBridge = {
-  getAccessToken: () => string | null
-  acceptAuth: (payload: AuthPayload) => void
-  clearSession: () => void
+  getSession: () => SessionSnapshot
+  acceptAuth: (payload: AuthPayload, expectedEpoch: number) => boolean
+  clearSession: (expectedEpoch: number) => boolean
+  rejectServerSession: () => void
+}
+
+type RefreshFlight = {
+  epoch: number
+  promise: Promise<AuthPayload>
 }
 
 const API_PREFIX = '/api'
 const AUTH_PREFIX = '/v1/auth/'
 let bridge: SessionBridge = {
-  getAccessToken: () => null,
-  acceptAuth: () => undefined,
-  clearSession: () => undefined,
+  getSession: () => ({ accessToken: null, epoch: 0 }),
+  acceptAuth: () => false,
+  clearSession: () => false,
+  rejectServerSession: () => undefined,
 }
-let refreshPromise: Promise<AuthPayload> | null = null
+let refreshFlight: RefreshFlight | null = null
 
 export function configureSessionBridge(nextBridge: SessionBridge) {
   bridge = nextBridge
+}
+
+export function invalidateAuthOperations() {
+  refreshFlight = null
+}
+
+export function resetApiClientForTests() {
+  invalidateAuthOperations()
+}
+
+function sessionChanged(): ApiError {
+  return new ApiError('session_changed', '登录状态已变更')
 }
 
 function readCookie(name: string): string {
@@ -83,7 +104,7 @@ async function fetchApi<T>(path: string, init: RequestInit, accessToken: string 
       headers: requestHeaders(init, accessToken),
     })
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
+    if (init.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
       throw new ApiError('request_aborted', '请求已取消')
     }
     throw new ApiError('network_error', '网络连接失败，请稍后重试')
@@ -91,52 +112,75 @@ async function fetchApi<T>(path: string, init: RequestInit, accessToken: string 
   return parseResponse<T>(response)
 }
 
-async function refreshOnce(): Promise<AuthPayload> {
-  if (!refreshPromise) {
-    refreshPromise = fetchApi<AuthPayload>(
-      `${AUTH_PREFIX}refresh/`,
-      {
-        method: 'POST',
-        headers: csrfHeaders(),
-        body: JSON.stringify({ client_kind: 'web' }),
-      },
-      null,
-    )
-      .then((payload) => {
-        bridge.acceptAuth(payload)
-        return payload
-      })
-      .catch((error: unknown) => {
-        bridge.clearSession()
+async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
+  if (bridge.getSession().epoch !== expectedEpoch) throw sessionChanged()
+  if (refreshFlight?.epoch === expectedEpoch) return refreshFlight.promise
+  invalidateAuthOperations()
+
+  const flight = {} as RefreshFlight
+  flight.epoch = expectedEpoch
+  flight.promise = fetchApi<AuthPayload>(
+    `${AUTH_PREFIX}refresh/`,
+    {
+      method: 'POST',
+      headers: csrfHeaders(),
+      body: JSON.stringify({ client_kind: 'web' }),
+    },
+    null,
+  )
+    .then((payload) => {
+      try {
+        if (!bridge.acceptAuth(payload, expectedEpoch)) throw sessionChanged()
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'admin_access_denied') {
+          bridge.clearSession(expectedEpoch)
+          bridge.rejectServerSession()
+        }
         throw error
-      })
-      .finally(() => {
-        refreshPromise = null
-      })
-  }
-  return refreshPromise
+      }
+      return payload
+    })
+    .catch((error: unknown) => {
+      if (bridge.getSession().epoch !== expectedEpoch) throw sessionChanged()
+      bridge.clearSession(expectedEpoch)
+      throw error
+    })
+    .finally(() => {
+      if (refreshFlight === flight) refreshFlight = null
+    })
+  refreshFlight = flight
+  return flight.promise
 }
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}, hasReplayed = false): Promise<T> {
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const started = bridge.getSession()
   try {
-    return await fetchApi<T>(path, init, bridge.getAccessToken())
+    return await fetchApi<T>(path, init, started.accessToken)
   } catch (error) {
     const canRefresh =
       error instanceof ApiError &&
       error.status === 401 &&
       !path.startsWith(AUTH_PREFIX) &&
-      !hasReplayed
+      bridge.getSession().epoch === started.epoch
     if (!canRefresh) throw error
-    await refreshOnce()
-    return apiRequest<T>(path, init, true).catch((replayError: unknown) => {
-      if (replayError instanceof ApiError && replayError.status === 401) bridge.clearSession()
+
+    await refreshOnce(started.epoch)
+    const refreshed = bridge.getSession()
+    if (refreshed.epoch !== started.epoch) throw sessionChanged()
+
+    try {
+      return await fetchApi<T>(path, init, refreshed.accessToken)
+    } catch (replayError) {
+      if (replayError instanceof ApiError && replayError.status === 401) {
+        bridge.clearSession(started.epoch)
+      }
       throw replayError
-    })
+    }
   }
 }
 
-export async function refreshSession(): Promise<AuthPayload> {
-  return refreshOnce()
+export async function refreshSession(expectedEpoch: number): Promise<AuthPayload> {
+  return refreshOnce(expectedEpoch)
 }
 
 export function csrfRequestHeaders(): HeadersInit {

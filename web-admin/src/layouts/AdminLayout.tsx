@@ -68,7 +68,11 @@ export function AdminLayout() {
   const logout = useAuthStore((state) => state.logout)
 
   useEffect(() => {
-    const update = () => setMobile(window.innerWidth < DESKTOP_BREAKPOINT)
+    const update = () => {
+      const nextMobile = window.innerWidth < DESKTOP_BREAKPOINT
+      setMobile(nextMobile)
+      if (!nextMobile) setDrawerOpen(false)
+    }
     window.addEventListener('resize', update)
     return () => window.removeEventListener('resize', update)
   }, [])

@@ -24,17 +24,17 @@ function apiError(status: number, code: string, message: string) {
   )
 }
 
-mockServer.events.on('request:start', ({ request }) => {
+mockServer.events.on('request:start', async ({ request }) => {
   const entry: RecordedCall = {
     method: request.method,
     path: new URL(request.url).pathname,
     headers: new Headers(request.headers),
   }
-  calls.push(entry)
-  void request.clone().text().then((body) => {
-    if (!body) return
+  const body = await request.clone().text()
+  if (body) {
     try { entry.json = JSON.parse(body) as unknown } catch { entry.json = body }
-  })
+  }
+  calls.push(entry)
 })
 
 let exportStates: unknown[] = []
@@ -78,11 +78,32 @@ export const server = {
   useRefresh(payload: AuthPayload) {
     mockServer.use(http.post('/api/v1/auth/refresh/', () => HttpResponse.json(envelope(payload))))
   },
+  useDeferredRefresh(payload: AuthPayload) {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockServer.use(http.post('/api/v1/auth/refresh/', async () => {
+      await gate
+      return HttpResponse.json(envelope(payload))
+    }))
+    return { release }
+  },
+  useDeferredLogin(payload: AuthPayload) {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockServer.use(http.post('/api/v1/auth/login/', async () => {
+      await gate
+      return HttpResponse.json(envelope(payload))
+    }))
+    return { release }
+  },
   useRefreshFailure() {
     mockServer.use(http.post('/api/v1/auth/refresh/', () => apiError(401, 'token_not_valid', '刷新令牌无效')))
   },
   useLogout() {
     mockServer.use(http.post('/api/v1/auth/logout/', () => HttpResponse.json(envelope({}))))
+  },
+  useLogoutNetworkFailure() {
+    mockServer.use(http.post('/api/v1/auth/logout/', () => HttpResponse.error()))
   },
   useChangePassword() {
     mockServer.use(http.post('/api/v1/auth/change-password/', () => HttpResponse.json(envelope({}))))
@@ -113,5 +134,17 @@ export const server = {
         headers: { 'Content-Type': 'text/plain', 'X-Request-ID': 'request-from-header' },
       })),
     )
+  },
+  useNetworkError() {
+    mockServer.use(http.get('/api/v1/admin/network-error/', () => HttpResponse.error()))
+  },
+  useDelayedResource() {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockServer.use(http.get('/api/v1/admin/delayed/', async () => {
+      await gate
+      return HttpResponse.json(envelope({ ok: true }))
+    }))
+    return { release }
   },
 }

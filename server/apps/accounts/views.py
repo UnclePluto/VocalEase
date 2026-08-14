@@ -5,7 +5,12 @@ from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
+from rest_framework.exceptions import (
+    AuthenticationFailed,
+    NotAuthenticated,
+    PermissionDenied,
+    ValidationError,
+)
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -23,7 +28,7 @@ from .serializers import (
 )
 from .models import User
 from .services import change_password, login, reset_password
-from .tokens import revoke_refresh_token, rotate_refresh_token
+from .tokens import ActiveUserJWTAuthentication, revoke_refresh_token, rotate_refresh_token
 
 
 def api_response(*, data, request_id: str, status_code=status.HTTP_200_OK):
@@ -49,6 +54,19 @@ def set_refresh_cookie(response: Response, raw_refresh: str) -> None:
         secure=settings.AUTH_REFRESH_COOKIE_SECURE,
         samesite="Lax",
         path="/",
+    )
+
+
+def clear_refresh_cookies(response: Response) -> None:
+    response.delete_cookie(
+        settings.AUTH_REFRESH_COOKIE_NAME,
+        path="/api/v1/auth/",
+        samesite="Lax",
+    )
+    response.delete_cookie(
+        settings.AUTH_REFRESH_CSRF_COOKIE_NAME,
+        path="/",
+        samesite="Lax",
     )
 
 
@@ -80,6 +98,15 @@ def validate_web_refresh_request(request) -> None:
         raise PermissionDenied("CSRF 校验失败", code="csrf_failed")
 
 
+class LogoutJWTAuthentication(ActiveUserJWTAuthentication):
+    """Web 退出只信任 Refresh Cookie；Android 保持 Bearer 认证。"""
+
+    def authenticate(self, request):
+        if request.data.get("client_kind") == "web":
+            return None
+        return super().authenticate(request)
+
+
 class LoginView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -92,6 +119,7 @@ class LoginView(APIView):
             user, pair = login(
                 login_id=serializer.validated_data["login_id"],
                 password=serializer.validated_data["password"],
+                client_kind=serializer.validated_data["client_kind"],
                 remember_me=serializer.validated_data["remember_me"],
             )
             record(
@@ -174,7 +202,8 @@ class ChangePasswordView(APIView):
 
 
 class LogoutView(APIView):
-    permission_classes = [IsAuthenticated, MustChangePasswordPermission]
+    authentication_classes = [LogoutJWTAuthentication]
+    permission_classes = [AllowAny]
     allows_password_change = True
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_logout"
@@ -182,26 +211,35 @@ class LogoutView(APIView):
     def post(self, request):
         serializer = LogoutSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        if serializer.validated_data["client_kind"] == "web":
-            validate_web_refresh_request(request)
+        client_kind = serializer.validated_data["client_kind"]
         raw_refresh = get_refresh(request, serializer)
+        if client_kind == "web":
+            if not raw_refresh:
+                response = api_response(data={}, request_id=request.request_id)
+                clear_refresh_cookies(response)
+                return response
+            validate_web_refresh_request(request)
+            actor = None
+        else:
+            if not request.user or not request.user.is_authenticated:
+                raise NotAuthenticated("需要登录后退出", code="not_authenticated")
+            actor = request.user
         with transaction.atomic():
             if raw_refresh:
-                revoke_refresh_token(raw_refresh)
-            record(
-                actor=request.user,
-                action="auth.logout",
-                target=request.user,
-                changes={},
-                request_id=request.request_id,
-            )
+                revoked_user = revoke_refresh_token(raw_refresh)
+                if client_kind == "web":
+                    actor = revoked_user
+            if actor is not None:
+                record(
+                    actor=actor,
+                    action="auth.logout",
+                    target=actor,
+                    changes={},
+                    request_id=request.request_id,
+                )
         response = api_response(data={}, request_id=request.request_id)
-        response.delete_cookie(settings.AUTH_REFRESH_COOKIE_NAME, path="/api/v1/auth/", samesite="Lax")
-        response.delete_cookie(
-            settings.AUTH_REFRESH_CSRF_COOKIE_NAME,
-            path="/",
-            samesite="Lax",
-        )
+        if client_kind == "web":
+            clear_refresh_cookies(response)
         return response
 
 
