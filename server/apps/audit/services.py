@@ -32,8 +32,32 @@ SENSITIVE_FIELDS = {
     "etag",
     "etags",
 }
-MEDICAL_NOTE_FIELDS = {"medicalnote", "medicalnotes", "clinicalnote", "clinicalnotes"}
-PHONE_FIELDS = {"phone", "mobile", "phonenumber", "mobilenumber"}
+MEDICAL_NOTE_FIELDS = {
+    "notes",
+    "medicalnote",
+    "medicalnotes",
+    "conditionnote",
+    "conditionnotes",
+    "clinicalnote",
+    "clinicalnotes",
+    "illnessnote",
+    "illnessnotes",
+}
+PHONE_FIELDS = {
+    "phone",
+    "phoneno",
+    "phonenumber",
+    "mobile",
+    "mobileno",
+    "mobilenumber",
+    "telephone",
+    "tel",
+}
+MEDICAL_NOTE_SUFFIXES = tuple(MEDICAL_NOTE_FIELDS - {"notes"})
+PHONE_SUFFIXES = tuple(PHONE_FIELDS - {"tel"})
+PHONE_IN_TEXT = re.compile(
+    r"(?<!\d)(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}(?!\d)"
+)
 
 
 def normalize_field_name(key: Any) -> str:
@@ -65,19 +89,17 @@ def redact_value(value: Any) -> Any:
                 or "authorization" in normalized
             ):
                 result[key] = "[REDACTED]"
-            elif normalized in MEDICAL_NOTE_FIELDS or normalized.endswith(
-                ("medicalnote", "medicalnotes", "clinicalnote", "clinicalnotes")
-            ):
+            elif normalized in MEDICAL_NOTE_FIELDS or normalized.endswith(MEDICAL_NOTE_SUFFIXES):
                 result[key] = medical_content_placeholder(nested_value)
-            elif normalized in PHONE_FIELDS or normalized.endswith(
-                ("phone", "mobile", "phonenumber", "mobilenumber")
-            ):
+            elif normalized in PHONE_FIELDS or normalized.endswith(PHONE_SUFFIXES):
                 result[key] = "[PHONE_REDACTED]"
             else:
                 result[key] = redact_value(nested_value)
         return result
     if isinstance(value, (list, tuple)):
         return [redact_value(item) for item in value]
+    if isinstance(value, str):
+        return PHONE_IN_TEXT.sub("[PHONE_REDACTED]", value)
     return value
 
 

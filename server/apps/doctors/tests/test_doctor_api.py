@@ -208,6 +208,38 @@ def test_doctor_list_masks_phone_but_authorized_detail_returns_full_phone(
 
 
 @pytest.mark.django_db
+def test_doctor_option_lookup_returns_only_label_fields_and_enforces_permissions(
+    api_client, admin_user, doctor
+):
+    doctor.user.is_active = False
+    doctor.user.save(update_fields=["is_active"])
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.get(f"/api/v1/admin/doctors/{doctor.id}/option/")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "id": str(doctor.id),
+        "name": "王医生",
+        "employee_no": doctor.employee_no,
+    }
+
+    patient = User.objects.create_user(
+        login_id="patient-doctor-option",
+        password="888888",
+        role=Role.PATIENT,
+        must_change_password=False,
+    )
+    api_client.force_authenticate(patient)
+    assert api_client.get(f"/api/v1/admin/doctors/{doctor.id}/option/").status_code == 403
+
+    doctor.deleted_at = __import__("django.utils.timezone", fromlist=["now"]).now()
+    doctor.save(update_fields=["deleted_at"])
+    api_client.force_authenticate(admin_user)
+    assert api_client.get(f"/api/v1/admin/doctors/{doctor.id}/option/").status_code == 404
+
+
+@pytest.mark.django_db
 def test_doctor_phone_is_normalized_and_globally_unique_including_deleted_records(
     api_client, admin_user, doctor
 ):

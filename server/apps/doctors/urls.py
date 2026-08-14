@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import DoctorDetailView, DoctorListView, DoctorStatusView
+from .views import DoctorDetailView, DoctorListView, DoctorOptionView, DoctorStatusView
 
 
 urlpatterns = [
@@ -16,6 +16,11 @@ urlpatterns = [
         DoctorStatusView.as_view(),
         {"action": "deactivate"},
         name="doctor-deactivate",
+    ),
+    path(
+        "<uuid:doctor_id>/option/",
+        DoctorOptionView.as_view(),
+        name="doctor-option",
     ),
     path("<uuid:doctor_id>/", DoctorDetailView.as_view(), name="doctor-detail"),
 ]

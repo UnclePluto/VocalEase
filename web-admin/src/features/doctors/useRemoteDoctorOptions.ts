@@ -26,21 +26,35 @@ export type RemoteDoctorOptions = {
 
 export function useRemoteDoctorOptions(): RemoteDoctorOptions {
   const [search, setSearch] = useState('')
-  const [request, setRequest] = useState({ keyword: '', page: 1 })
+  const versionRef = useRef(0)
+  const [request, setRequest] = useState({ keyword: '', page: 1, version: 0 })
   const requestRef = useRef(request)
   const [doctors, setDoctors] = useState<Doctor[]>([])
+  const [isDebouncing, setIsDebouncing] = useState(false)
+  const refetchRef = useRef<() => void>(() => undefined)
+
+  const changeSearch = useCallback((value: string) => {
+    const version = versionRef.current + 1
+    versionRef.current = version
+    setSearch(value)
+    setDoctors([])
+    setIsDebouncing(true)
+    requestRef.current = { keyword: value.trim(), page: 0, version }
+  }, [])
 
   useEffect(() => {
     const keyword = search.trim()
+    const version = versionRef.current
+    if (version === 0) return undefined
     const timer = window.setTimeout(() => {
-      if (keyword === request.keyword) return
-      setDoctors([])
-      const next = { keyword, page: 1 }
+      if (version !== versionRef.current) return
+      const next = { keyword, page: 1, version }
       requestRef.current = next
-      setRequest(next)
+      if (keyword === request.keyword && request.page === 1) refetchRef.current()
+      else setRequest(next)
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [request.keyword, search])
+  }, [request.keyword, request.page, search])
 
   const query = useQuery({
     queryKey: doctorOptionKeys.page(request.keyword, request.page),
@@ -52,14 +66,19 @@ export function useRemoteDoctorOptions(): RemoteDoctorOptions {
         status: 'active',
       }, signal)
       const active = requestRef.current
-      if (active.keyword === request.keyword && active.page === request.page) {
+      if (active.keyword === request.keyword && active.page === request.page && active.version === request.version) {
         setDoctors((current) => request.page === 1
           ? mergeUnique([], response.results)
           : mergeUnique(current, response.results))
+        setIsDebouncing(false)
       }
       return response
     },
   })
+  const refetch = query.refetch
+  useEffect(() => {
+    refetchRef.current = () => { void refetch() }
+  }, [refetch])
 
   const hasMore = Boolean(query.data && query.data.page * query.data.page_size < query.data.count)
   const error = useMemo(() => query.error instanceof ApiError
@@ -77,10 +96,10 @@ export function useRemoteDoctorOptions(): RemoteDoctorOptions {
     doctors,
     error,
     hasMore,
-    isLoading: query.isPending || query.isFetching,
+    isLoading: isDebouncing || query.isPending || query.isFetching,
     loadMore,
     retry,
     search,
-    setSearch,
-  }), [doctors, error, hasMore, loadMore, query.isFetching, query.isPending, retry, search])
+    setSearch: changeSearch,
+  }), [changeSearch, doctors, error, hasMore, isDebouncing, loadMore, query.isFetching, query.isPending, retry, search])
 }

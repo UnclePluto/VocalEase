@@ -2,7 +2,7 @@ import { Alert, Button, Input, Select, Spin } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 
 import { ApiError } from '../../api/errors'
-import { doctorKeys, getDoctor } from './api'
+import { doctorOptionLookupKeys, getDoctorOption } from './api'
 import type { RemoteDoctorOptions } from './useRemoteDoctorOptions'
 import type { Doctor } from './types'
 
@@ -26,8 +26,8 @@ export function RemoteDoctorSelect({ ariaLabel, lookupEnabled = true, mode, onCh
     && !source.doctors.some((doctor) => doctor.id === value),
   )
   const lookup = useQuery({
-    queryKey: doctorKeys.detail(value ?? ''),
-    queryFn: ({ signal }) => getDoctor(value ?? '', signal),
+    queryKey: doctorOptionLookupKeys.detail(value ?? ''),
+    queryFn: ({ signal }) => getDoctorOption(value ?? '', signal),
     enabled: needsLookup,
   })
   const lookedUp = needsLookup ? lookup.data : null
@@ -99,7 +99,6 @@ export function RemoteDoctorSelect({ ariaLabel, lookupEnabled = true, mode, onCh
         options={doctors.map((doctor) => ({ value: doctor.id, label: `${doctor.name}${doctor.employee_no ? ` · ${doctor.employee_no}` : ''}` }))}
         onChange={change}
       />
-      {selected ? <span className="doctor-selected-label" aria-live="polite">{selected.name}</span> : null}
       {feedback}
     </div>
   )

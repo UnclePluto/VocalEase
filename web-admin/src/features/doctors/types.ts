@@ -13,6 +13,8 @@ export type Doctor = {
   status: DoctorStatus
 }
 
+export type DoctorOption = Pick<Doctor, 'id' | 'name' | 'employee_no'>
+
 export type DoctorWrite = Pick<Doctor, 'name' | 'gender' | 'phone' | 'department' | 'title'>
 
 export type DoctorListQuery = {

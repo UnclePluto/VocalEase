@@ -11,6 +11,7 @@ from .selectors import doctors_for_list
 from .serializers import (
     DoctorListQuerySerializer,
     DoctorListSerializer,
+    DoctorOptionSerializer,
     DoctorReadSerializer,
     DoctorWriteSerializer,
 )
@@ -100,6 +101,17 @@ class DoctorDetailView(APIView):
                 status=exc.status_code,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DoctorOptionView(APIView):
+    permission_classes = [IsAdminNamespaceUser]
+
+    def get(self, request, doctor_id):
+        doctor = get_object_or_404(doctors_for_list(), pk=doctor_id)
+        return api_response(
+            data=DoctorOptionSerializer(doctor).data,
+            request_id=request.request_id,
+        )
 
 
 class DoctorStatusView(APIView):

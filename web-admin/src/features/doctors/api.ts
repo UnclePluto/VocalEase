@@ -1,5 +1,5 @@
 import { apiRequest } from '../../api/client'
-import type { Doctor, DoctorListQuery, DoctorWrite, PaginatedDoctors } from './types'
+import type { Doctor, DoctorListQuery, DoctorOption, DoctorWrite, PaginatedDoctors } from './types'
 
 export const doctorKeys = {
   all: ['doctors'] as const,
@@ -12,6 +12,11 @@ export const doctorKeys = {
 export const doctorOptionKeys = {
   all: ['doctor-options'] as const,
   page: (search: string, page: number) => [...doctorOptionKeys.all, { search, page }] as const,
+}
+
+export const doctorOptionLookupKeys = {
+  all: ['doctor-option-lookups'] as const,
+  detail: (id: string) => [...doctorOptionLookupKeys.all, id] as const,
 }
 
 function doctorSearch(query: DoctorListQuery) {
@@ -30,6 +35,10 @@ export function listDoctors(query: DoctorListQuery, signal?: AbortSignal) {
 
 export function getDoctor(id: string, signal?: AbortSignal) {
   return apiRequest<Doctor>(`/v1/admin/doctors/${id}/`, { signal })
+}
+
+export function getDoctorOption(id: string, signal?: AbortSignal) {
+  return apiRequest<DoctorOption>(`/v1/admin/doctors/${id}/option/`, { signal })
 }
 
 export function createDoctor(values: DoctorWrite) {

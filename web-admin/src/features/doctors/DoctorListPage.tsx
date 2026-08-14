@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircleOutlined, DeleteOutlined, EditOutlined, LockOutlined, MoreOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, EditOutlined, MoreOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Dropdown, Input, Modal, Select, Space, message } from 'antd'
 import type { TableColumnsType } from 'antd'
@@ -163,7 +163,7 @@ export function DoctorListPage() {
     { title: '职称', dataIndex: 'title', width: 150 },
     { title: '状态', dataIndex: 'status', width: 100, render: (value: DoctorStatus) => <StatusTag status={value} /> },
     {
-      title: '操作', key: 'actions', width: compactActions ? 72 : 350, fixed: 'right',
+      title: '操作', key: 'actions', width: compactActions ? 72 : 220, fixed: 'right',
       render: (_value, row) => {
         const isSelf = currentUserRole === 'doctor' && currentLoginId === row.employee_no
         const openEditRow = () => openEdit(row)
@@ -183,12 +183,17 @@ export function DoctorListPage() {
             </Dropdown>
           )
         }
+        const secondaryItems = [
+          ...(!isSelf ? [{ key: 'reset', label: '重置密码', onClick: openReset }] : []),
+          { key: 'delete', label: '删除', danger: true, onClick: openDelete },
+        ]
         return (
           <Space size={4}>
             <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEditRow}>编辑</Button>
             {!isSelf ? <Button type="link" size="small" icon={row.status === 'active' ? <StopOutlined /> : <CheckCircleOutlined />} aria-label={`${row.status === 'active' ? '停用' : '启用'}${row.name}`} onClick={openStatus}>{row.status === 'active' ? '停用' : '启用'}</Button> : null}
-            {!isSelf ? <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={openReset}>重置密码</Button> : null}
-            <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={openDelete}>删除</Button>
+            <Dropdown menu={{ items: secondaryItems }} trigger={['click']}>
+              <Button type="link" size="small" icon={<MoreOutlined />} aria-label={`更多${row.name}操作`}>更多</Button>
+            </Dropdown>
           </Space>
         )
       },

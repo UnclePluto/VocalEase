@@ -53,6 +53,12 @@ class DoctorListSerializer(DoctorReadSerializer):
         return mask_phone(obj.phone)
 
 
+class DoctorOptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DoctorProfile
+        fields = ("id", "name", "employee_no")
+
+
 class DoctorListQuerySerializer(PaginationQuerySerializer):
     keyword = serializers.CharField(required=False, allow_blank=True, default="")
     department = serializers.CharField(required=False, allow_blank=True, default="")

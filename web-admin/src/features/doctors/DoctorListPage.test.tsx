@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
@@ -44,6 +44,25 @@ function useDoctorList(results = [doctor]) {
 }
 
 describe('医生管理页面', () => {
+  it('1440px桌面首屏以紧凑操作列完整展示状态与所有动作', async () => {
+    window.innerWidth = 1440
+    authenticate()
+    useDoctorList()
+
+    renderApp('/doctors')
+
+    const row = (await screen.findByText('李静')).closest('tr') as HTMLTableRowElement
+    expect(within(row).getByText('启用')).toBeInTheDocument()
+    expect(document.querySelector('col[style*="width: 220px"]')).toBeInTheDocument()
+    for (const label of ['编辑李静', '停用李静', '更多李静操作']) {
+      expect(row.querySelector(`button[aria-label="${label}"]`)).toBeInTheDocument()
+    }
+    fireEvent.click(row.querySelector('button[aria-label="更多李静操作"]') as HTMLButtonElement)
+    await waitFor(() => expect(
+      [...document.querySelectorAll('.ant-dropdown-menu [role="menuitem"]')].map((item) => item.textContent),
+    ).toEqual(expect.arrayContaining(['重置密码', '删除'])))
+  })
+
   it('把URL筛选作为唯一真相并把非法分页归一化', async () => {
     authenticate()
     useDoctorList()
@@ -120,13 +139,15 @@ describe('医生管理页面', () => {
     const user = userEvent.setup()
     renderApp('/doctors')
 
-    await user.click(await screen.findByRole('button', { name: '重置李静密码' }))
+    await user.click(await screen.findByRole('button', { name: '更多李静操作' }))
+    await user.click(screen.getByRole('menuitem', { name: '重置密码' }))
     expect(screen.getByText(/密码将恢复为 888888.*首次登录必须修改/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '确认重置' }))
     expect(await screen.findByText(/密码已重置为 888888/)).toBeInTheDocument()
     expect(server.calls(`/api/v1/admin/users/${doctor.user_id}/reset-password/`)).toHaveLength(1)
 
-    await user.click(screen.getByRole('button', { name: '删除李静' }))
+    await user.click(screen.getByRole('button', { name: '更多李静操作' }))
+    await user.click(screen.getByRole('menuitem', { name: '删除' }))
     expect(screen.getByText(/停用并隐藏.*历史保留/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '确认删除' }))
     expect(await screen.findByText('医生仍有在治患者，无法删除')).toBeInTheDocument()
@@ -174,9 +195,13 @@ describe('医生管理页面', () => {
 
     renderApp('/doctors')
 
-    expect(await screen.findByText('李静')).toBeInTheDocument()
+    const row = (await screen.findByText('李静')).closest('tr') as HTMLTableRowElement
     expect(screen.queryByRole('button', { name: '重置李静密码' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '停用李静' })).not.toBeInTheDocument()
+    fireEvent.click(row.querySelector('button[aria-label="更多李静操作"]') as HTMLButtonElement)
+    await waitFor(() => expect(
+      [...document.querySelectorAll('.ant-dropdown-menu [role="menuitem"]')].map((item) => item.textContent),
+    ).toEqual(['删除']))
   })
 
   it('编辑前读取授权详情并且不会把列表脱敏手机号填入表单', async () => {
@@ -232,7 +257,9 @@ describe('医生管理页面', () => {
     const more = await screen.findByRole('button', { name: '更多李静操作' })
     expect(screen.queryByRole('button', { name: '编辑李静' })).not.toBeInTheDocument()
     await user.click(more)
-    expect(await screen.findByRole('menuitem', { name: '编辑' })).toBeInTheDocument()
+    await waitFor(() => expect(
+      [...document.querySelectorAll('.ant-dropdown-menu [role="menuitem"]')].map((item) => item.textContent),
+    ).toEqual(['编辑', '停用', '重置密码', '删除']))
   })
 
   it('显示加载、错误请求编号、重试和空态', async () => {

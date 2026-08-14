@@ -1,7 +1,7 @@
 import { http, HttpResponse, delay } from 'msw'
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { useAuthStore } from '../../auth/store'
 import { renderApp } from '../../test/renderApp'
@@ -273,16 +273,60 @@ describe('病人管理页面', () => {
     server.use(
       http.get('/api/v1/admin/patients/', () => HttpResponse.json(envelope(list([])))),
       http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope(list([doctor])))),
-      http.get('/api/v1/admin/doctors/:id/', () => HttpResponse.json(envelope(selected))),
+      http.get('/api/v1/admin/doctors/:id/option/', () => HttpResponse.json(envelope({
+        id: selected.id,
+        name: selected.name,
+        employee_no: selected.employee_no,
+      }))),
     )
 
     renderApp(`/patients?doctor=${selected.id}`)
 
     const filter = await screen.findByRole('combobox', { name: '主治医生筛选' })
     await waitFor(() => expect(filter).toHaveAccessibleName('主治医生筛选'))
-    expect(await screen.findByText('第21位医生')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText(/第21位医生/)).toHaveLength(1))
     expect(screen.queryByText(selected.id)).not.toBeInTheDocument()
-    expect(server.calls(`/api/v1/admin/doctors/${selected.id}/`)).toHaveLength(1)
+    expect(server.calls(`/api/v1/admin/doctors/${selected.id}/option/`)).toHaveLength(1)
+    expect(server.calls(`/api/v1/admin/doctors/${selected.id}/`)).toHaveLength(0)
+  }, 20_000)
+
+  it('原始搜索词变化时立即隔离旧医生并仅在防抖后请求新关键词', async () => {
+    authenticate()
+    let releaseSearch: () => void = () => undefined
+    const searchGate = new Promise<void>((resolve) => { releaseSearch = resolve })
+    server.use(
+      http.get('/api/v1/admin/patients/', () => HttpResponse.json(envelope(list([])))),
+      http.get('/api/v1/admin/doctors/', async ({ request }) => {
+        const keyword = new URL(request.url).searchParams.get('keyword')
+        if (keyword === '新') {
+          await searchGate
+          return HttpResponse.json(envelope(list([{ ...doctor, id: `${doctor.id.slice(0, -1)}2`, name: '新医生' }])))
+        }
+        return HttpResponse.json(envelope(list([doctor])))
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp('/patients')
+    await user.click(await screen.findByRole('button', { name: '新增患者' }))
+    const dialog = screen.getByRole('dialog', { name: '新增患者' })
+    expect(await within(dialog).findByRole('option', { name: /王医生/ })).toBeInTheDocument()
+
+    vi.useFakeTimers()
+    fireEvent.change(within(dialog).getByLabelText('搜索主治医生选项'), { target: { value: '新' } })
+
+    expect(within(dialog).queryByRole('option', { name: /王医生/ })).not.toBeInTheDocument()
+    expect(within(dialog).getByLabelText('主治医生')).toBeDisabled()
+    expect(within(dialog).getByText(/正在加载医生/)).toBeInTheDocument()
+    expect(server.calls('/api/v1/admin/doctors/')).toHaveLength(1)
+    await act(async () => { vi.advanceTimersByTime(249) })
+    expect(server.calls('/api/v1/admin/doctors/')).toHaveLength(1)
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve() })
+    expect(server.calls('/api/v1/admin/doctors/')).toHaveLength(2)
+    expect(within(dialog).getByLabelText('主治医生')).toBeDisabled()
+
+    releaseSearch()
+    vi.useRealTimers()
+    expect(await within(dialog).findByRole('option', { name: /新医生/ })).toBeInTheDocument()
   }, 20_000)
 
   it('回切已加载两页的搜索词只重新请求第一页且不会自动恢复第二页', async () => {
