@@ -24,6 +24,7 @@ export function ExportStatus({ jobId, onClear }: { jobId: string; onClear: () =>
   const epoch = useAuthStore((state) => state.sessionEpoch)
   const [downloadError, setDownloadError] = useState<unknown>(null)
   const [downloading, setDownloading] = useState(false)
+  const [blockedPrivateUrl, setBlockedPrivateUrl] = useState<{ epoch: number; jobId: string; url: string } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const job = useQuery({
     queryKey: analyticsKeys.export(jobId, epoch), queryFn: ({ signal }) => getExportJob(jobId, signal), retry: false,
@@ -43,16 +44,37 @@ export function ExportStatus({ jobId, onClear }: { jobId: string; onClear: () =>
 
   async function freshPrivateUrl() {
     const refreshed = await privateUrl.refetch()
-    if (refreshed.error) await refreshJobAfterPrivateFailure(refreshed.error)
+    if (refreshed.error) {
+      if (refreshed.data) setBlockedPrivateUrl({ epoch, jobId, url: refreshed.data.url })
+      await refreshJobAfterPrivateFailure(refreshed.error)
+    }
     if (!refreshed.data) throw new ApiError('private_url_missing', '无法获取下载地址')
+    setBlockedPrivateUrl(null)
     return refreshed.data
   }
 
+  async function retryPrivateUrl() {
+    setDownloadError(null)
+    const refreshed = await privateUrl.refetch()
+    if (refreshed.error) {
+      if (refreshed.data) setBlockedPrivateUrl({ epoch, jobId, url: refreshed.data.url })
+      await job.refetch()
+      return
+    }
+    if (refreshed.data) setBlockedPrivateUrl(null)
+  }
+
+  const usablePrivateUrl = privateUrl.data && !(
+    blockedPrivateUrl?.epoch === epoch
+    && blockedPrivateUrl.jobId === jobId
+    && blockedPrivateUrl.url === privateUrl.data.url
+  ) ? privateUrl.data : undefined
+
   async function download(refreshBeforeDownload = false) {
-    if ((!privateUrl.data && !refreshBeforeDownload) || abortRef.current) return
+    if ((!usablePrivateUrl && !refreshBeforeDownload) || abortRef.current) return
     const controller = new AbortController(); abortRef.current = controller; setDownloadError(null); setDownloading(true)
     try {
-      let address = refreshBeforeDownload ? await freshPrivateUrl() : privateUrl.data
+      let address = refreshBeforeDownload ? await freshPrivateUrl() : usablePrivateUrl
       if (!address) return
       try {
         const file = await downloadExportFile(address.url, job.data?.format ?? 'csv', controller.signal)
@@ -78,8 +100,8 @@ export function ExportStatus({ jobId, onClear }: { jobId: string; onClear: () =>
   return <div className="export-status">
     <Alert type="success" showIcon title="导出文件已准备好" description={`共 ${value.count} 条数据；下载地址不会被保存。`} />
     {privateUrl.isPending ? <span role="status">正在获取下载地址</span> : null}
-    {privateUrl.isError ? <Alert type="error" showIcon title={errorText(privateUrl.error, '无法获取下载地址')} description={errorDescription(privateUrl.error)} action={<Button aria-label="重试获取下载地址" onClick={() => void privateUrl.refetch()}>重试</Button>} /> : null}
+    {privateUrl.isError ? <Alert type="error" showIcon title={errorText(privateUrl.error, '无法获取下载地址')} description={errorDescription(privateUrl.error)} action={<Button aria-label="重试获取下载地址" onClick={() => void retryPrivateUrl()}>重试</Button>} /> : null}
     {downloadError ? <Alert type="error" showIcon title={errorText(downloadError, '文件下载失败')} description={errorDescription(downloadError)} action={<Button aria-label="重试下载文件" onClick={() => void download(true)}>重试</Button>} /> : null}
-    {privateUrl.data ? <Button type="primary" aria-label="下载文件" onClick={() => void download()} loading={downloading}>下载文件</Button> : null}
+    {usablePrivateUrl ? <Button type="primary" aria-label="下载文件" onClick={() => void download()} loading={downloading}>下载文件</Button> : null}
   </div>
 }

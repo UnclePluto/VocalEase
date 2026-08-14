@@ -169,6 +169,43 @@ describe('异步导出状态', () => {
     expect(createUrl).not.toHaveBeenCalled()
   })
 
+  it('旧地址失效且重签失败后禁用旧地址，手动重试只获取新地址', async () => {
+    authenticate()
+    let privateAttempts = 0
+    const createUrl = vi.fn(() => 'blob:recovered-address')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    server.use(
+      ...dashboardHandlers(),
+      http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => HttpResponse.json(envelope(readyJob()))),
+      http.post(`/api/v1/admin/analytics/exports/${jobId}/private-url/`, () => {
+        privateAttempts += 1
+        if (privateAttempts === 1) return HttpResponse.json(envelope({ url: 'https://private.example/stale.csv', expires_at: '2026-08-16T00:00:00Z' }))
+        if (privateAttempts === 2) return HttpResponse.json({ code: 'resign_failed', message: '重签服务不可用', data: null, request_id: 'resign-request' }, { status: 503 })
+        return HttpResponse.json(envelope({ url: 'https://private.example/recovered.csv', expires_at: '2026-08-16T00:00:00Z' }))
+      }),
+      http.get('https://private.example/stale.csv', () => new HttpResponse(null, { status: 410 })),
+      http.get('https://private.example/recovered.csv', () => new HttpResponse('fresh', { headers: { 'content-type': 'text/csv' } })),
+    )
+    const user = userEvent.setup(); renderApp(`/analytics?export_job=${jobId}`)
+
+    await user.click(await screen.findByRole('button', { name: '下载文件' }))
+    expect(await screen.findByText('重签服务不可用')).toBeInTheDocument()
+    expect(screen.getByText('请求编号：resign-request')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '下载文件' })).not.toBeInTheDocument()
+    expect(server.calls('/stale.csv')).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: '重试获取下载地址' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '下载文件' })).toBeInTheDocument())
+    expect(privateAttempts).toBe(3)
+    expect(server.calls('/stale.csv')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: '下载文件' }))
+    await waitFor(() => expect(createUrl).toHaveBeenCalledOnce())
+    expect(server.calls('/stale.csv')).toHaveLength(1)
+    expect(server.calls('/recovered.csv')).toHaveLength(1)
+  })
+
   it('网络/CORS 失败稳定显示错误，手动重试会先重签且不会复用旧地址', async () => {
     authenticate()
     let privateAttempts = 0

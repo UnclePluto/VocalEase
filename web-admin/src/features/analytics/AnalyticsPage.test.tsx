@@ -254,6 +254,50 @@ describe('数据管理页面', () => {
     release()
   })
 
+  it.each([400, 409])('创建导出收到确定性 %i 后，重试使用新的幂等键', async (status) => {
+    authenticate(); useAnalyticsHandlers()
+    let attempts = 0
+    server.use(http.post('/api/v1/admin/analytics/exports/', () => {
+      attempts += 1
+      return attempts === 1
+        ? HttpResponse.json({ code: 'export_rejected', message: '导出请求无效', data: null, request_id: `export-${status}-request` }, { status })
+        : new HttpResponse('csv', { headers: { 'content-type': 'text/csv' } })
+    }))
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:deterministic-retry') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    const user = userEvent.setup(); renderApp('/analytics')
+
+    await screen.findByText('患者甲')
+    await user.click(screen.getByRole('button', { name: '导出报告 (0)' }))
+    await user.click(screen.getByRole('menuitem', { name: 'CSV' }))
+    expect(await screen.findByText('导出请求无效')).toBeInTheDocument()
+    const firstKey = (server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key
+
+    await user.click(screen.getByRole('button', { name: '重试创建导出' }))
+    await waitFor(() => expect(server.calls('/api/v1/admin/analytics/exports/')).toHaveLength(2))
+    expect((server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key).not.toBe(firstKey)
+  })
+
+  it('创建导出的请求内容变化时使用新的幂等键', async () => {
+    authenticate(); useAnalyticsHandlers()
+    server.use(http.post('/api/v1/admin/analytics/exports/', () => HttpResponse.json({ code: 'export_unknown', message: '导出结果未知', data: null, request_id: 'export-signature-request' }, { status: 503 })))
+    const user = userEvent.setup(); renderApp('/analytics')
+
+    await screen.findByText('患者甲')
+    await user.click(screen.getByRole('button', { name: '导出报告 (0)' }))
+    await user.click(screen.getByRole('menuitem', { name: 'CSV' }))
+    expect(await screen.findByText('导出结果未知')).toBeInTheDocument()
+    const firstRequest = server.lastJson('/api/v1/admin/analytics/exports/') as { format: string; idempotency_key: string }
+
+    await user.click(screen.getByRole('button', { name: '导出报告 (0)' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Excel' }))
+    await waitFor(() => expect(server.calls('/api/v1/admin/analytics/exports/')).toHaveLength(2))
+    const secondRequest = server.lastJson('/api/v1/admin/analytics/exports/') as { format: string; idempotency_key: string }
+    expect(secondRequest.format).toBe('xlsx')
+    expect(secondRequest.idempotency_key).not.toBe(firstRequest.idempotency_key)
+  })
+
   it('患者角色被守卫拒绝，且不请求 analytics 管理端接口', async () => {
     authenticate('patient')
     const requested = vi.fn()

@@ -133,6 +133,9 @@ function AnalyticsPageContent({ params, setParams }: { params: URLSearchParams; 
       }
     } catch (error) {
       if (!controller.signal.aborted) {
+        if (error instanceof ApiError && error.status !== undefined && error.status >= 400 && error.status < 500) {
+          requestKeyRef.current = null
+        }
         setExportError({ error, format })
       }
     } finally { if (controllerRef.current === controller) controllerRef.current = null; setExporting(false) }
