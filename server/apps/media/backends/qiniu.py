@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
@@ -11,6 +12,9 @@ from django.utils import timezone
 from qiniu import Auth, BucketManager, put_data, put_stream
 
 from apps.media.contracts import ObjectMetadata, PrivateUrl, StorageValidationError, UploadGrant, UploadReceipt, build_object_key, validate_media_request
+
+
+logger = logging.getLogger(__name__)
 
 
 class QiniuStorageBackend:
@@ -148,8 +152,15 @@ class QiniuStorageBackend:
     def create_private_url(self, object_key: str, *, ttl_seconds: int) -> PrivateUrl:
         expires_at = timezone.now() + timedelta(seconds=ttl_seconds)
         encoded_key = "/".join(quote(part, safe="") for part in object_key.split("/"))
-        unsigned = f"{self.domain}/{encoded_key}?e={int(expires_at.timestamp())}"
-        url = self.auth.private_download_url(f"{self.domain}/{encoded_key}", expires=ttl_seconds)
+        try:
+            url = self.auth.private_download_url(f"{self.domain}/{encoded_key}", expires=ttl_seconds)
+        except Exception as exc:
+            # SDK 异常文本可能携带完整 URL 或 token；这里只记录固定类别和异常类型。
+            logger.warning(
+                "qiniu_request_failed request_kind=private_download exception=%s",
+                exc.__class__.__name__,
+            )
+            raise StorageValidationError("七牛私有下载地址签发失败") from exc
         return PrivateUrl(url=url, expires_at=expires_at, token="")
 
     def mark_for_cleanup(self, object_key: str) -> None:

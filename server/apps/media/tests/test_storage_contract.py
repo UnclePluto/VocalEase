@@ -12,6 +12,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from apps.accounts.models import Role, User
 from apps.doctors.services import create_doctor
 from apps.media.backends.local import LocalStorageBackend
+from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import MEDIA_TYPES, StorageValidationError
 from apps.media.models import MediaAsset
 from apps.media.services import get_storage_backend
@@ -90,6 +91,59 @@ def test_storage_contract_rejects_unknown_type_mime_and_oversized_grant(tmp_path
 
 def test_media_type_contract_includes_all_planned_asset_categories():
     assert {"song_source", "song_accompaniment", "song_vocal", "lyrics", "singing_audio", "singing_video", "waveform", "export"} <= set(MEDIA_TYPES)
+
+
+@pytest.mark.parametrize("sdk_exception", [RuntimeError, ValueError])
+def test_qiniu_private_url_sdk_failure_is_safely_logged_and_normalized(caplog, sdk_exception):
+    secret_key = "test/export/private-patient-secret"
+
+    class FailingAuth:
+        def private_download_url(self, url, *, expires):
+            raise sdk_exception(f"sdk leaked {url} expires={expires} authorization-secret")
+
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private", domain="https://private.invalid",
+        callback_url="https://api.invalid/callback", environment="test",
+        auth=FailingAuth(), bucket_manager=object(),
+    )
+
+    with caplog.at_level("WARNING", logger="apps.media.backends.qiniu"):
+        with pytest.raises(StorageValidationError, match="七牛私有下载地址签发失败"):
+            backend.create_private_url(secret_key, ttl_seconds=60)
+
+    rendered = " ".join(record.getMessage() for record in caplog.records)
+    assert "qiniu_request_failed request_kind=private_download" in rendered
+    assert sdk_exception.__name__ in rendered
+    assert secret_key not in rendered
+    assert "authorization-secret" not in rendered
+    assert "private.invalid" not in rendered
+
+
+def test_qiniu_private_url_real_sdk_signing_regression():
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private", domain="https://private.invalid",
+        callback_url="https://api.invalid/callback", environment="test",
+    )
+
+    private = backend.create_private_url("test/export/患者.csv", ttl_seconds=60)
+
+    assert private.url.startswith("https://private.invalid/test/export/%E6%82%A3%E8%80%85.csv?")
+    assert private.expires_at > timezone.now()
+
+
+def test_qiniu_private_url_does_not_swallow_base_exception():
+    class InterruptingAuth:
+        def private_download_url(self, url, *, expires):
+            raise KeyboardInterrupt
+
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private", domain="https://private.invalid",
+        callback_url="https://api.invalid/callback", environment="test",
+        auth=InterruptingAuth(), bucket_manager=object(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        backend.create_private_url("test/export/private.csv", ttl_seconds=60)
 
 
 @pytest.mark.django_db

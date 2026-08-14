@@ -150,6 +150,27 @@ def test_more_than_1000_rows_never_builds_request_metrics_or_json_snapshot(docto
 
 
 @pytest.mark.django_db
+def test_async_over_1000_selected_ids_snapshot_only_normalized_filter_intersection(doctor, patient):
+    matching = _create_active_patients(doctor=doctor, count=1001, prefix="selected-filter")
+    selected_ids = [str(item.id) for item in matching] + [str(patient.id)]
+    client = APIClient(); client.force_authenticate(doctor.user)
+
+    response = client.post("/api/v1/admin/analytics/exports/", {
+        "format": "csv",
+        "filters": {"name": "批量患者"},
+        "selected_ids": selected_ids,
+        "idempotency_key": "async-over-1000-selected-filter-intersection",
+    }, format="json")
+
+    assert response.status_code == 202
+    job = ExportJob.objects.get(pk=response.json()["data"]["id"])
+    snapshot_ids = set(ExportJobItem.objects.filter(job=job).values_list("patient_id", flat=True))
+    assert job.snapshot_count == 1001 and len(snapshot_ids) == 1001
+    assert snapshot_ids == {item.id for item in matching}
+    assert patient.id not in snapshot_ids
+
+
+@pytest.mark.django_db
 def test_exactly_1000_rows_are_exported_synchronously(doctor, patient):
     _create_active_patients(doctor=doctor, count=999, prefix="boundary")
     client = APIClient(); client.force_authenticate(doctor.user)
@@ -575,3 +596,123 @@ def test_private_url_storage_signing_failure_is_stable_conflict(
 
     assert response.status_code == 409
     assert response.json()["code"] == "export_asset_unverifiable"
+
+
+@pytest.mark.django_db
+def test_qiniu_sdk_private_signing_exception_is_stable_409(
+    settings, doctor, monkeypatch, caplog,
+):
+    from datetime import timedelta
+    from apps.media.backends.qiniu import QiniuStorageBackend
+    from apps.media.services import STORAGE_BACKEND_FACTORIES
+
+    secret_key = "test/export/private-secret.csv"
+
+    class FailingAuth:
+        def private_download_url(self, url, *, expires):
+            raise RuntimeError(f"sdk leaked {url} expires={expires} token-secret")
+
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private", domain="https://private.invalid",
+        callback_url="https://api.invalid/callback", environment="test",
+        auth=FailingAuth(), bucket_manager=object(),
+        stat_transport=lambda key: {"fsize": 3, "mimeType": "text/csv", "hash": "trusted-etag"},
+    )
+    monkeypatch.setitem(STORAGE_BACKEND_FACTORIES, "qiniu", lambda: backend)
+    job = ExportJob.objects.create(
+        creator=doctor.user, normalized_filters={}, selected_ids=[], snapshot_count=0,
+        format="csv", expires_at=timezone.now() + timedelta(hours=1),
+        idempotency_key="qiniu-sdk-signing-error", request_fingerprint="5" * 64,
+    )
+    asset = MediaAsset.objects.create(
+        owner_type="export", owner_id=job.id, media_type="export", backend="qiniu",
+        object_key=secret_key, mime="text/csv", size=3, etag="trusted-etag", status="ready",
+        upload_expires_at=timezone.now() + timedelta(hours=1),
+    )
+    ExportJob.objects.filter(pk=job.id).update(
+        status="ready", result_asset_id=asset.id, completed_at=timezone.now(),
+    )
+    client = APIClient(); client.force_authenticate(doctor.user)
+
+    with caplog.at_level("WARNING", logger="apps.media.backends.qiniu"):
+        response = client.post(f"/api/v1/admin/analytics/exports/{job.id}/private-url/")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "export_asset_unverifiable"
+    rendered = " ".join(record.getMessage() for record in caplog.records)
+    assert secret_key not in rendered and "token-secret" not in rendered
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("variant", "expected_validation"),
+    [
+        ("orphan", "export_asset_missing"),
+        ("soft_deleted", "export_asset_missing"),
+        ("wrong_mime", "export_asset_invalid"),
+        ("disallowed_status", "export_asset_not_ready"),
+        ("receipt_mismatch", "export_asset_unverifiable"),
+        ("unknown_backend", "export_asset_unverifiable"),
+        ("wrong_owner", "export_asset_invalid"),
+    ],
+)
+def test_cleanup_untrusted_asset_matrix_never_mutates_target_or_unrelated_media(
+    settings, doctor, patient, tmp_path, monkeypatch, variant, expected_validation,
+):
+    from datetime import timedelta
+    import uuid
+    from apps.media.contracts import StorageValidationError
+    from apps.media.services import publish_generated_asset
+
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    job = ExportJob.objects.create(
+        creator=doctor.user, normalized_filters={"name": "敏感快照"},
+        selected_ids=[str(patient.id)], snapshot_count=1, format="csv",
+        expires_at=timezone.now() - timedelta(seconds=1),
+        idempotency_key=f"cleanup-matrix-{variant}", request_fingerprint="4" * 64,
+    )
+    ExportJobItem.objects.create(job=job, patient_id=patient.id, position=0)
+    unrelated = publish_generated_asset(owner_id=uuid.uuid4(), content=b"unrelated", mime="text/csv")
+    target = None
+    target_id = uuid.uuid4()
+    if variant != "orphan":
+        target = publish_generated_asset(owner_id=job.id, content=b"target", mime="text/csv")
+        target_id = target.id
+        updates = {}
+        if variant == "soft_deleted":
+            updates["deleted_at"] = timezone.now()
+        elif variant == "wrong_mime":
+            updates["mime"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        elif variant == "disallowed_status":
+            updates["status"] = "uploading"
+        elif variant == "receipt_mismatch":
+            updates["sha256"] = "0" * 64
+        elif variant == "wrong_owner":
+            updates["owner_id"] = uuid.uuid4()
+        if updates:
+            MediaAsset.objects.filter(pk=target.id).update(**updates)
+        if variant == "unknown_backend":
+            monkeypatch.setattr(
+                "apps.analytics.assets.backend_for_asset",
+                lambda asset: (_ for _ in ()).throw(StorageValidationError("未知媒体存储后端")),
+            )
+    ExportJob.objects.filter(pk=job.id).update(
+        status="ready", result_asset_id=target_id, completed_at=timezone.now(),
+    )
+    target_before = MediaAsset.objects.filter(pk=target_id).values().first()
+    unrelated_before = MediaAsset.objects.filter(pk=unrelated.id).values().get()
+
+    expire_export_job(job.id)
+
+    job.refresh_from_db()
+    target_after = MediaAsset.objects.filter(pk=target_id).values().first()
+    unrelated_after = MediaAsset.objects.filter(pk=unrelated.id).values().get()
+    audits = AuditLog.objects.filter(action="analytics.export_cleanup", target_id=job.id)
+    assert target_after == target_before
+    assert unrelated_after == unrelated_before
+    assert job.cleanup_status == "complete" and job.result_asset_id is None
+    assert job.normalized_filters == {} and job.selected_ids == []
+    assert not ExportJobItem.objects.filter(job=job).exists()
+    assert audits.count() == 1
+    assert audits.get().changes["asset_validation"] == expected_validation
