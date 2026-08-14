@@ -151,6 +151,12 @@ export const server = {
   useLogoutNetworkFailure() {
     mockServer.use(http.post('/api/v1/auth/logout/', () => HttpResponse.error()))
   },
+  useEmptyDoctorList() {
+    mockServer.use(http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 20, results: [] }))))
+  },
+  useEmptySongList() {
+    mockServer.use(http.get('/api/v1/admin/songs/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 20, results: [] }))))
+  },
   useChangePassword() {
     mockServer.use(http.post('/api/v1/auth/change-password/', () => HttpResponse.json(envelope({}))))
   },

@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { useAuthStore } from '../auth/store'
 import { renderApp } from '../test/renderApp'
@@ -9,6 +9,7 @@ import { server } from '../test/server'
 const admin = { login_id: 'A000001', role: 'system_admin' as const, must_change_password: false }
 
 describe('后台布局', () => {
+  beforeEach(() => { server.useEmptyDoctorList(); server.useEmptySongList() })
   it('呈现视觉稿中的六个导航标签', async () => {
     useAuthStore.setState({ accessToken: 'valid', user: admin, status: 'authenticated' })
     renderApp('/doctors')
@@ -19,7 +20,7 @@ describe('后台布局', () => {
     }
   })
 
-  it('从导航进入曲库占位页并显示选中状态', async () => {
+  it('从导航进入曲库管理页并显示选中状态', async () => {
     useAuthStore.setState({ accessToken: 'valid', user: admin, status: 'authenticated' })
     const user = userEvent.setup()
     renderApp('/doctors')

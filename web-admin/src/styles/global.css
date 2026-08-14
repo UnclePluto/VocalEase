@@ -148,6 +148,8 @@ textarea, select { font: inherit; }
 .muted, .song-preview-hint { color: #667085; font-size: 13px; }
 .song-preview-hint { margin: 16px 0 10px; }
 .song-list-error { margin-bottom: 16px; }
+.song-analysis-cell { display: grid; gap: 6px; }
+.song-analysis-cell .ant-alert { padding: 6px 8px; }
 .ant-modal audio { width: 100%; margin-top: 16px; }
 
 @media (max-width: 899px) {

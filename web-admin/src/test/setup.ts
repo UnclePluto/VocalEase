@@ -47,6 +47,8 @@ class TestResizeObserver implements ResizeObserver {
 
 Object.defineProperty(window, 'ResizeObserver', { configurable: true, value: TestResizeObserver })
 Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: TestResizeObserver })
+Object.defineProperty(HTMLMediaElement.prototype, 'pause', { configurable: true, value: vi.fn() })
+Object.defineProperty(HTMLMediaElement.prototype, 'load', { configurable: true, value: vi.fn() })
 
 beforeAll(() => server.listen())
 afterEach(() => {

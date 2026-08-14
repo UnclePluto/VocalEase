@@ -23,12 +23,32 @@ function songSearch(query: SongListQuery) {
 export function listSongs(query: SongListQuery, signal?: AbortSignal) {
   return apiRequest<PaginatedSongs>(`/v1/admin/songs/?${songSearch(query)}`, { signal })
 }
+export function getSong(id: string, signal?: AbortSignal) { return apiRequest<Song>(`/v1/admin/songs/${id}/`, { signal }) }
 export function createSong(values: SongWrite, signal?: AbortSignal) { return apiRequest<Song>('/v1/admin/songs/', { method: 'POST', body: JSON.stringify(values), signal }) }
+export async function createSongReliably(values: SongWrite, signal?: AbortSignal) {
+  try {
+    return await createSong(values, signal)
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'song_id_exists') throw error
+    const existing = await getSong(values.id, signal)
+    const matchesSubmittedSong = existing.id === values.id
+      && existing.source_asset === values.source_asset
+      && existing.title === values.title
+      && existing.artist === values.artist
+      && existing.genre === values.genre
+      && existing.language === values.language
+      && existing.duration_seconds === values.duration_seconds
+    if (!matchesSubmittedSong) {
+      throw new ApiError('song_reconciliation_conflict', '已有歌曲与本次提交内容不一致', error.requestId, undefined, 409)
+    }
+    return existing
+  }
+}
 export function updateSong(id: string, values: Partial<SongWrite>) { return apiRequest<Song>(`/v1/admin/songs/${id}/`, { method: 'PATCH', body: JSON.stringify(values) }) }
 export function deleteSong(id: string) { return apiRequest<void>(`/v1/admin/songs/${id}/`, { method: 'DELETE' }) }
 export function publishSong(id: string, publish: boolean) { return apiRequest<Song>(`/v1/admin/songs/${id}/${publish ? 'publish' : 'unpublish'}/`, { method: 'POST' }) }
-export function reanalyzeSong(id: string, taskType: AnalysisTask['task_type'] = 'vocal_separation') {
-  return apiRequest<{ task_id: string; status: string; is_mock: true }>(`/v1/admin/songs/${id}/reanalyze/`, { method: 'POST', body: JSON.stringify({ task_type: taskType, idempotency_key: crypto.randomUUID() }) })
+export function reanalyzeSong(id: string, idempotencyKey: string, taskType: AnalysisTask['task_type'] = 'vocal_separation') {
+  return apiRequest<{ task_id: string; status: string; is_mock: true }>(`/v1/admin/songs/${id}/reanalyze/`, { method: 'POST', body: JSON.stringify({ task_type: taskType, idempotency_key: idempotencyKey }) })
 }
 export function getSongAnalysis(id: string, signal?: AbortSignal) { return apiRequest<{ results: AnalysisTask[] }>(`/v1/admin/songs/${id}/analysis/`, { signal }) }
 export function requestUploadGrant(file: File, songId?: string, signal?: AbortSignal) {

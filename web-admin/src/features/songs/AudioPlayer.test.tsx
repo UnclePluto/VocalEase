@@ -47,4 +47,47 @@ describe('AudioPlayer', () => {
     fireEvent.error(await screen.findByLabelText('正在试听原唱'))
     await waitFor(() => expect(grants).toBe(4))
   })
+
+  it('刷新进行中的并发 error 不残留红错，刷新后真正失败才提示', async () => {
+    let attempt = 0
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    server.use(http.post(`/api/v1/admin/songs/${song.id}/preview/`, async () => {
+      attempt += 1
+      if (attempt === 2) await gate
+      return HttpResponse.json(envelope({ url: `https://private.example/${attempt}.mp3`, expires_at: '2026-08-13T00:10:00Z' }))
+    }))
+    render(<AudioPlayer song={song} artifacts={{ source: true }} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: '原唱试听' }))
+    const audio = await screen.findByLabelText('正在试听原唱')
+    fireEvent.error(audio)
+    fireEvent.error(audio)
+    await waitFor(() => expect(attempt).toBe(2))
+    const showedErrorWhileRefreshing = screen.queryByText('试听地址失效或媒体暂不可播放，请稍后重试') !== null
+    release()
+    expect(showedErrorWhileRefreshing).toBe(false)
+    expect(screen.queryByText('试听地址失效或媒体暂不可播放，请稍后重试')).not.toBeInTheDocument()
+    fireEvent.error(await screen.findByLabelText('正在试听原唱'))
+    expect(await screen.findByText('试听地址失效或媒体暂不可播放，请稍后重试')).toBeInTheDocument()
+  })
+
+  it('关闭时撤销签发请求且旧响应不能恢复音频资源', async () => {
+    let markStarted: () => void = () => undefined
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    server.use(http.post(`/api/v1/admin/songs/${song.id}/preview/`, async () => {
+      markStarted(); await gate
+      return HttpResponse.json(envelope({ url: 'https://private.example/stale.mp3', expires_at: '2026-08-13T00:10:00Z' }))
+    }))
+    const onClose = vi.fn()
+    render(<AudioPlayer song={song} artifacts={{ source: true }} onClose={onClose} />)
+    fireEvent.click(screen.getByRole('button', { name: '原唱试听' }))
+    await started
+    fireEvent.click(screen.getByRole('button', { name: /关\s*闭/ }))
+    release()
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+    expect(screen.queryByLabelText('正在试听原唱')).not.toBeInTheDocument()
+    expect(screen.queryByText('获取试听地址失败')).not.toBeInTheDocument()
+  })
 })

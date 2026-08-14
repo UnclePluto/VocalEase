@@ -63,4 +63,4 @@ export type UploadState =
   | { kind: 'confirming' }
   | { kind: 'creating-song' }
   | { kind: 'done'; songId: string }
-  | { kind: 'failed'; message: string }
+  | { kind: 'failed'; message: string; details?: string[] }

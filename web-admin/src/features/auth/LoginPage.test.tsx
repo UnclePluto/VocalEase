@@ -1,6 +1,6 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { apiRequest } from '../../api/client'
 import { useAuthStore } from '../../auth/store'
@@ -16,6 +16,7 @@ async function settlesWithin(promise: Promise<unknown>, milliseconds = 20): Prom
 }
 
 describe('后台认证', () => {
+  beforeEach(() => { server.useEmptyDoctorList() })
   it('首次登录用户只能进入修改初始密码', async () => {
     useAuthStore.setState({
       accessToken: 'first-login-token',
