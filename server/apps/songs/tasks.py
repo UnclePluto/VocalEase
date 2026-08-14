@@ -18,6 +18,13 @@ def start_song_availability_scan_task(batch_size: int = 100):
 
 
 @shared_task
-def refresh_song_availability_scan_batch_task(token: str, batch_size: int = 100):
+def refresh_song_availability_scan_batch_task(
+    token: str, batch_size: int = 100, batch_token: str | None = None,
+    batch_version: int | None = None,
+):
     from uuid import UUID
-    return run_song_availability_scan_batch(UUID(token), batch_size=batch_size)
+    return run_song_availability_scan_batch(
+        UUID(token), batch_size=batch_size,
+        batch_token=UUID(batch_token) if batch_token else None,
+        batch_version=batch_version,
+    )

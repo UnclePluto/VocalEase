@@ -97,10 +97,19 @@ class SongAvailabilityScanState(models.Model):
     claim_token = models.UUIDField(null=True, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     cursor = models.UUIDField(null=True, blank=True)
+    batch_version = models.PositiveBigIntegerField(default=0)
+    pending_batch_token = models.UUIDField(null=True, blank=True)
     stats = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.CheckConstraint(condition=Q(id=1), name="song_availability_scan_singleton"),
+            models.CheckConstraint(
+                condition=(
+                    Q(claim_token__isnull=True, lease_expires_at__isnull=True, pending_batch_token__isnull=True)
+                    | Q(claim_token__isnull=False, lease_expires_at__isnull=False, pending_batch_token__isnull=False)
+                ),
+                name="song_availability_scan_claim_valid",
+            ),
         ]

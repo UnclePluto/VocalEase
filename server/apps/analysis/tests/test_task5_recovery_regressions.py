@@ -2,6 +2,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
+from django.core.checks import run_checks
 from django.db import IntegrityError, connection
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -113,6 +114,78 @@ def test_dispatch_lease_suppresses_duplicate_broker_messages(tmp_path, settings,
     assert sent == [str(task.id)]
 
 
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local", ANALYSIS_TASK_LEASE_SECONDS=60)
+def test_schedule_preserves_active_fourth_attempt_claim(tmp_path, settings, monkeypatch):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    task = services.create_song_analysis(song=song, source_asset=asset)
+    AnalysisTask.objects.filter(pk=task.id).update(attempt=3)
+    claim = services.claim_analysis_task(task.id)
+    assert claim is not None
+    before = AnalysisTask.objects.get(pk=task.id)
+    monkeypatch.setattr("apps.analysis.tasks.run_analysis_task.delay", lambda *_args: pytest.fail("有效 claim 不得重新投递"))
+
+    assert services.schedule_analysis_task(task.id) is False
+
+    task.refresh_from_db()
+    assert task.status == AnalysisTask.Status.PROCESSING
+    assert task.claim_token == before.claim_token
+    assert task.lease_expires_at == before.lease_expires_at
+    payload = {"protocol_version": "1.0", "is_mock": True, "artifacts": [], "metrics": {}}
+    assert services.finalize_analysis_success(task.id, claim.claim_token, payload).status == AnalysisTask.Status.SUCCEEDED
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local", ANALYSIS_TASK_LEASE_SECONDS=60)
+def test_broker_failure_immediately_releases_selected_expired_processing_dispatch(tmp_path, settings, monkeypatch):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    task = services.create_song_analysis(song=song, source_asset=asset)
+    claim = services.claim_analysis_task(task.id)
+    expired_at = timezone.now() - timedelta(seconds=1)
+    AnalysisTask.objects.filter(pk=task.id).update(lease_expires_at=expired_at)
+    monkeypatch.setattr(
+        "apps.analysis.tasks.run_analysis_task.delay",
+        lambda *_args: (_ for _ in ()).throw(ConnectionError("redis://secret")),
+    )
+
+    assert services.schedule_analysis_task(task.id) is False
+
+    task.refresh_from_db()
+    assert task.status == AnalysisTask.Status.PROCESSING
+    assert task.claim_token == claim.claim_token
+    assert task.lease_expires_at == expired_at
+    assert task.next_dispatch_at is None
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local", ANALYSIS_TASK_LEASE_SECONDS=60)
+def test_old_broker_failure_cannot_clear_new_worker_dispatch_marker(tmp_path, settings, monkeypatch):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    task = services.create_song_analysis(song=song, source_asset=asset)
+    old_claim = services.claim_analysis_task(task.id)
+    AnalysisTask.objects.filter(pk=task.id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+    marker = timezone.now() + timedelta(minutes=5)
+    new_claims = []
+
+    def claim_then_fail(*_args):
+        new_claims.append(services.claim_analysis_task(task.id))
+        AnalysisTask.objects.filter(pk=task.id).update(next_dispatch_at=marker)
+        raise ConnectionError("redis://secret")
+
+    monkeypatch.setattr("apps.analysis.tasks.run_analysis_task.delay", claim_then_fail)
+
+    assert services.schedule_analysis_task(task.id) is False
+
+    task.refresh_from_db()
+    assert new_claims[0] is not None
+    assert new_claims[0].claim_token != old_claim.claim_token
+    assert task.claim_token == new_claims[0].claim_token
+    assert task.next_dispatch_at == marker
+
+
 def test_execution_context_and_automatic_lease_guard_exist():
     assert callable(getattr(services, "ExecutionContext", None))
     assert callable(getattr(services, "LeaseGuard", None))
@@ -123,6 +196,24 @@ def test_recovery_dispatch_lease_and_global_budget_fields_exist():
     assert "next_dispatch_at" in field_names
     assert getattr(services, "MAX_ATTEMPTS", None) == 4
     assert callable(getattr(services, "recover_analysis_tasks", None))
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+@pytest.mark.parametrize("invalid_lease", [0, -1])
+def test_invalid_analysis_lease_fails_closed_without_consuming_attempt(tmp_path, settings, invalid_lease):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    task = services.create_song_analysis(song=song, source_asset=asset)
+    settings.ANALYSIS_TASK_LEASE_SECONDS = invalid_lease
+
+    errors = run_checks()
+    assert any(error.id == "analysis.E001" for error in errors)
+    with pytest.raises(services.AnalysisConfigurationError):
+        services.claim_analysis_task(task.id)
+    task.refresh_from_db()
+    assert task.status == AnalysisTask.Status.PENDING
+    assert task.attempt == 0
 
 
 @pytest.mark.django_db
@@ -203,12 +294,15 @@ def test_availability_scan_chains_all_pages(tmp_path, settings):
         source_verified_etag="", source_verified_generation="",
     )
     queue = []
-    dispatcher = lambda token, batch_size: queue.append((token, batch_size))
+    dispatcher = lambda *args: queue.append(args)
 
     assert song_services.start_song_availability_scan(batch_size=1, dispatcher=dispatcher)
     while queue:
-        token, batch_size = queue.pop(0)
-        song_services.run_song_availability_scan_batch(token, batch_size=batch_size, dispatcher=dispatcher)
+        token, batch_size, batch_token, batch_version = queue.pop(0)
+        song_services.run_song_availability_scan_batch(
+            token, batch_size=batch_size, batch_token=batch_token,
+            batch_version=batch_version, dispatcher=dispatcher,
+        )
 
     assert Song.objects.filter(pk__in=[song.id for song in songs], source_available=True).count() == 3
     state = SongAvailabilityScanState.objects.get(pk=1)
@@ -219,14 +313,16 @@ def test_availability_scan_chains_all_pages(tmp_path, settings):
 @pytest.mark.django_db
 def test_availability_scan_has_singleton_lease_and_recovers_broker_failure():
     queued = []
-    dispatcher = lambda token, batch_size: queued.append((token, batch_size))
+    dispatcher = lambda *args: queued.append(args)
     assert song_services.start_song_availability_scan(batch_size=2, dispatcher=dispatcher)
     assert not song_services.start_song_availability_scan(batch_size=2, dispatcher=dispatcher)
     assert len(queued) == 1
 
-    SongAvailabilityScanState.objects.update(claim_token=None, lease_expires_at=None)
+    SongAvailabilityScanState.objects.update(
+        claim_token=None, lease_expires_at=None, pending_batch_token=None,
+    )
 
-    def broken_dispatcher(_token, _batch_size):
+    def broken_dispatcher(*_args):
         raise ConnectionError("redis://secret")
 
     assert not song_services.start_song_availability_scan(batch_size=2, dispatcher=broken_dispatcher)

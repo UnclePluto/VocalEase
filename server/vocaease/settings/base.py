@@ -127,7 +127,12 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
 CELERY_TASK_EAGER_PROPAGATES = os.getenv("CELERY_TASK_EAGER_PROPAGATES", "false").lower() == "true"
-ANALYSIS_TASK_LEASE_SECONDS = int(os.getenv("ANALYSIS_TASK_LEASE_SECONDS", "300"))
+_analysis_lease_raw = os.getenv("ANALYSIS_TASK_LEASE_SECONDS", "300")
+try:
+    ANALYSIS_TASK_LEASE_SECONDS = int(_analysis_lease_raw)
+except (TypeError, ValueError):
+    # 配置错误由 Django system check 稳定报告，避免 settings 导入阶段 traceback。
+    ANALYSIS_TASK_LEASE_SECONDS = 0
 CELERY_BEAT_SCHEDULE = {
     "recover-analysis-tasks": {
         "task": "apps.analysis.tasks.recover_analysis_tasks_task",

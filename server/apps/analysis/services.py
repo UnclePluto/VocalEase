@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 from threading import Event, Thread
 from uuid import UUID, uuid4
@@ -29,6 +29,17 @@ MAX_ATTEMPTS = 4
 DISPATCH_LEASE_SECONDS = 60
 
 
+class AnalysisConfigurationError(RuntimeError):
+    """分析 worker 配置无效时闭锁失败，不能领取或消耗尝试次数。"""
+
+
+def analysis_lease_seconds() -> int:
+    value = getattr(settings, "ANALYSIS_TASK_LEASE_SECONDS", None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AnalysisConfigurationError("分析任务租约配置无效")
+    return value
+
+
 class AnalysisIdempotencyConflict(APIException):
     status_code = 409
     default_code = "analysis_idempotency_conflict"
@@ -39,6 +50,16 @@ class AnalysisIdempotencyConflict(APIException):
 class AnalysisClaim:
     task_id: UUID
     claim_token: UUID
+
+
+@dataclass(frozen=True)
+class DispatchSelection:
+    task_id: UUID
+    song_id: UUID
+    status: str
+    claim_token: UUID | None
+    lease_expires_at: datetime | None
+    next_dispatch_at: datetime
 
 
 @dataclass(frozen=True)
@@ -81,7 +102,7 @@ class LeaseGuard:
     """执行期间自动续租；退出时可靠停止后台线程。"""
 
     def __init__(self, context: ExecutionContext, *, interval_seconds: float | None = None):
-        lease_seconds = max(float(settings.ANALYSIS_TASK_LEASE_SECONDS), 0.12)
+        lease_seconds = float(analysis_lease_seconds())
         self.context = context
         requested = interval_seconds if interval_seconds is not None else lease_seconds / 4
         self.interval_seconds = min(max(0.01, requested), lease_seconds / 4)
@@ -181,6 +202,50 @@ def create_song_analysis(**kwargs) -> AnalysisTask:
     return task
 
 
+def _has_active_claim(task: AnalysisTask, *, now) -> bool:
+    return bool(
+        task.status == AnalysisTask.Status.PROCESSING
+        and task.claim_token
+        and task.lease_expires_at
+        and task.lease_expires_at > now
+    )
+
+
+def _is_recoverable_task(task: AnalysisTask, *, now) -> bool:
+    return bool(
+        task.status in {AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING}
+        or task.status == AnalysisTask.Status.PROCESSING
+        and task.lease_expires_at
+        and task.lease_expires_at <= now
+    )
+
+
+def _recoverable_tasks_q(*, now):
+    return (
+        Q(status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING])
+        | Q(status=AnalysisTask.Status.PROCESSING, lease_expires_at__lte=now)
+    )
+
+
+def _release_failed_dispatch(selection: DispatchSelection) -> bool:
+    """仅释放仍与本次投递快照完全相同的可恢复任务。"""
+    now = timezone.now()
+    with transaction.atomic():
+        Song.objects.select_for_update().get(pk=selection.song_id)
+        task = AnalysisTask.objects.select_for_update().get(pk=selection.task_id)
+        if (
+            task.status != selection.status
+            or task.claim_token != selection.claim_token
+            or task.lease_expires_at != selection.lease_expires_at
+            or task.next_dispatch_at != selection.next_dispatch_at
+            or not _is_recoverable_task(task, now=now)
+        ):
+            return False
+        task.next_dispatch_at = None
+        task.save(update_fields=["next_dispatch_at", "updated_at"])
+        return True
+
+
 def schedule_analysis_task(task_id: UUID) -> bool:
     """带数据库投递租约的唯一 broker 出口。"""
     now = timezone.now()
@@ -195,16 +260,23 @@ def schedule_analysis_task(task_id: UUID) -> bool:
             AnalysisTask.Status.SUPERSEDED,
         }:
             return False
+        if _has_active_claim(task, now=now):
+            return False
+        if not _is_recoverable_task(task, now=now):
+            return False
         if task.attempt >= MAX_ATTEMPTS:
             _fail_exhausted_locked(task, now=now, song=song)
-            return False
-        if task.status == AnalysisTask.Status.PROCESSING and task.lease_expires_at and task.lease_expires_at > now:
             return False
         if task.next_dispatch_at and task.next_dispatch_at > now:
             return False
         dispatch_until = now + timedelta(seconds=DISPATCH_LEASE_SECONDS)
         task.next_dispatch_at = dispatch_until
         task.save(update_fields=["next_dispatch_at", "updated_at"])
+        selection = DispatchSelection(
+            task_id=task.id, song_id=song.id, status=task.status,
+            claim_token=task.claim_token, lease_expires_at=task.lease_expires_at,
+            next_dispatch_at=dispatch_until,
+        )
     try:
         from .tasks import run_analysis_task
         run_analysis_task.delay(str(task_id))
@@ -213,11 +285,13 @@ def schedule_analysis_task(task_id: UUID) -> bool:
             "analysis_dispatch_failed task_id=%s exception=%s",
             task_id, exc.__class__.__name__,
         )
-        AnalysisTask.objects.filter(
-            pk=task_id,
-            status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING],
-            next_dispatch_at=dispatch_until,
-        ).update(next_dispatch_at=None)
+        try:
+            _release_failed_dispatch(selection)
+        except Exception as release_exc:
+            logger.error(
+                "analysis_dispatch_release_failed task_id=%s exception=%s",
+                task_id, release_exc.__class__.__name__,
+            )
         return False
     return True
 
@@ -239,8 +313,7 @@ def recover_analysis_tasks(*, batch_size: int = 100) -> dict[str, int]:
     exhausted = 0
     exhausted_ids = list(
         AnalysisTask.objects.filter(
-            Q(status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING])
-            | Q(status=AnalysisTask.Status.PROCESSING, lease_expires_at__lte=now),
+            _recoverable_tasks_q(now=now),
             attempt__gte=MAX_ATTEMPTS,
         ).order_by("created_at").values_list("id", flat=True)[:limit]
     )
@@ -249,17 +322,12 @@ def recover_analysis_tasks(*, batch_size: int = 100) -> dict[str, int]:
         with transaction.atomic():
             song = Song.objects.select_for_update().get(pk=song_id)
             task = AnalysisTask.objects.select_for_update().get(pk=task_id, song_id=song.id)
-            if task.attempt >= MAX_ATTEMPTS and (
-                task.status in {AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING}
-                or task.status == AnalysisTask.Status.PROCESSING
-                and task.lease_expires_at and task.lease_expires_at <= now
-            ):
+            if task.attempt >= MAX_ATTEMPTS and _is_recoverable_task(task, now=now):
                 _fail_exhausted_locked(task, now=now, song=song)
                 exhausted += 1
     ids = list(
         AnalysisTask.objects.filter(
-            Q(status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING])
-            | Q(status=AnalysisTask.Status.PROCESSING, lease_expires_at__lte=now)
+            _recoverable_tasks_q(now=now)
         ).filter(attempt__lt=MAX_ATTEMPTS).filter(
             Q(next_dispatch_at__isnull=True) | Q(next_dispatch_at__lte=now)
         ).order_by("created_at").values_list("id", flat=True)[:limit]
@@ -332,6 +400,7 @@ def _fail_exhausted_locked(task: AnalysisTask, *, now=None, song: Song | None = 
 
 
 def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
+    lease_seconds = analysis_lease_seconds()
     now = now or timezone.now()
     song_id = AnalysisTask.objects.only("song_id").get(pk=task_id).song_id
     with transaction.atomic():
@@ -372,7 +441,7 @@ def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
         task.attempt += 1
         task.claim_token = token
         task.heartbeat_at = now
-        task.lease_expires_at = now + timedelta(seconds=settings.ANALYSIS_TASK_LEASE_SECONDS)
+        task.lease_expires_at = now + timedelta(seconds=lease_seconds)
         task.started_at = now
         task.error_code = ""
         task.error_summary = ""
@@ -384,13 +453,14 @@ def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
 
 
 def heartbeat_analysis_task(task_id: UUID, claim_token: UUID, *, now=None) -> bool:
+    lease_seconds = analysis_lease_seconds()
     now = now or timezone.now()
     with transaction.atomic():
         task = AnalysisTask.objects.select_for_update().get(pk=task_id)
         if task.status != AnalysisTask.Status.PROCESSING or task.claim_token != claim_token or not task.lease_expires_at or task.lease_expires_at <= now:
             return False
         task.heartbeat_at = now
-        task.lease_expires_at = now + timedelta(seconds=settings.ANALYSIS_TASK_LEASE_SECONDS)
+        task.lease_expires_at = now + timedelta(seconds=lease_seconds)
         task.save(update_fields=["heartbeat_at", "lease_expires_at", "updated_at"])
         return True
 

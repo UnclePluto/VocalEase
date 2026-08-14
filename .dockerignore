@@ -1,0 +1,7 @@
+server/.venv
+server/.pytest_cache
+**/__pycache__
+**/*.pyc
+.git
+.worktrees
+.superpowers

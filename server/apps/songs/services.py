@@ -315,14 +315,19 @@ def refresh_song_source_availability(*, batch_size: int = 100, after_id: UUID | 
 SONG_AVAILABILITY_SCAN_LEASE_SECONDS = 600
 
 
-def _dispatch_availability_scan(token: UUID, batch_size: int) -> None:
+def _dispatch_availability_scan(token: UUID, batch_size: int, batch_token: UUID, batch_version: int) -> None:
     from .tasks import refresh_song_availability_scan_batch_task
-    refresh_song_availability_scan_batch_task.apply_async(args=[str(token), batch_size])
+    refresh_song_availability_scan_batch_task.apply_async(
+        args=[str(token), batch_size, str(batch_token), batch_version],
+    )
 
 
-def _release_scan_after_dispatch_failure(token: UUID) -> None:
-    SongAvailabilityScanState.objects.filter(pk=1, claim_token=token).update(
-        claim_token=None, lease_expires_at=None,
+def _release_scan_after_dispatch_failure(token: UUID, batch_token: UUID, batch_version: int) -> None:
+    SongAvailabilityScanState.objects.filter(
+        pk=1, claim_token=token, pending_batch_token=batch_token,
+        batch_version=batch_version,
+    ).update(
+        claim_token=None, lease_expires_at=None, pending_batch_token=None,
     )
 
 
@@ -339,24 +344,35 @@ def start_song_availability_scan(*, batch_size: int = 100, dispatcher=None) -> b
         token = uuid4()
         state.claim_token = token
         state.lease_expires_at = now + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
+        state.batch_version += 1
+        batch_version = state.batch_version
+        batch_token = uuid4()
+        state.pending_batch_token = batch_token
         if state.cursor is None:
             state.stats = {"verified": 0, "unavailable": 0, "deferred": 0, "processed": 0}
         state.save()
     try:
-        dispatcher(token, batch_size)
+        dispatcher(token, batch_size, batch_token, batch_version)
     except Exception as exc:
         logger.error("song_availability_scan_dispatch_failed exception=%s", exc.__class__.__name__)
-        _release_scan_after_dispatch_failure(token)
+        _release_scan_after_dispatch_failure(token, batch_token, batch_version)
         return False
     return True
 
 
-def run_song_availability_scan_batch(token: UUID, *, batch_size: int = 100, dispatcher=None) -> dict[str, int | str]:
+def run_song_availability_scan_batch(
+    token: UUID, *, batch_size: int = 100, batch_token: UUID | None = None,
+    batch_version: int | None = None, dispatcher=None,
+) -> dict[str, int | str]:
     dispatcher = dispatcher or _dispatch_availability_scan
     now = timezone.now()
     with transaction.atomic():
         state = SongAvailabilityScanState.objects.select_for_update().get(pk=1)
-        if state.claim_token != token or not state.lease_expires_at or state.lease_expires_at <= now:
+        if (
+            state.claim_token != token or state.pending_batch_token != batch_token
+            or state.batch_version != batch_version or not state.lease_expires_at
+            or state.lease_expires_at <= now
+        ):
             return {"status": "lease_lost"}
         cursor = state.cursor
         state.lease_expires_at = now + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
@@ -366,8 +382,12 @@ def run_song_availability_scan_batch(token: UUID, *, batch_size: int = 100, disp
     next_cursor = UUID(page["next_after_id"]) if page["next_after_id"] else None
     with transaction.atomic():
         state = SongAvailabilityScanState.objects.select_for_update().get(pk=1)
-        if state.claim_token != token:
-            return {"status": "lease_lost"}
+        if (
+            state.claim_token != token or state.pending_batch_token != batch_token
+            or state.batch_version != batch_version or state.cursor != cursor
+            or not state.lease_expires_at or state.lease_expires_at <= timezone.now()
+        ):
+            return {"status": "stale_batch"}
         aggregate = dict(state.stats)
         for key in ("verified", "unavailable", "deferred", "processed"):
             aggregate[key] = int(aggregate.get(key, 0)) + int(page[key])
@@ -376,14 +396,19 @@ def run_song_availability_scan_batch(token: UUID, *, batch_size: int = 100, disp
         if next_cursor is None:
             state.claim_token = None
             state.lease_expires_at = None
+            state.pending_batch_token = None
         else:
             state.lease_expires_at = timezone.now() + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
+            state.batch_version += 1
+            next_batch_version = state.batch_version
+            next_batch_token = uuid4()
+            state.pending_batch_token = next_batch_token
         state.save()
     if next_cursor is not None:
         try:
-            dispatcher(token, batch_size)
+            dispatcher(token, batch_size, next_batch_token, next_batch_version)
         except Exception as exc:
             logger.error("song_availability_scan_dispatch_failed exception=%s", exc.__class__.__name__)
-            _release_scan_after_dispatch_failure(token)
+            _release_scan_after_dispatch_failure(token, next_batch_token, next_batch_version)
             return {**aggregate, "status": "dispatch_failed", "next_after_id": str(next_cursor)}
     return {**aggregate, "status": "completed" if next_cursor is None else "continued", "next_after_id": str(next_cursor or "")}

@@ -1,11 +1,13 @@
 import io
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from time import sleep
 from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
 from django.db import connection, connections
+from django.utils import timezone
 
 from apps.analysis.executors import MockSongExecutor
 from apps.analysis.models import AnalysisTask
@@ -219,7 +221,7 @@ def test_postgresql_concurrent_availability_scan_starts_once():
             barrier.wait(timeout=5)
             return song_services.start_song_availability_scan(
                 batch_size=1,
-                dispatcher=lambda token, size: dispatched.append((token, size)),
+                dispatcher=lambda *args: dispatched.append(args),
             )
         finally:
             connections.close_all()
@@ -229,3 +231,145 @@ def test_postgresql_concurrent_availability_scan_starts_once():
 
     assert sorted(started) == [False, True]
     assert len(dispatched) == 1
+
+
+@pytest.mark.postgresql
+@pytest.mark.django_db(transaction=True)
+def test_postgresql_duplicate_scan_batch_commits_and_chains_once(monkeypatch):
+    if connection.vendor != "postgresql":
+        pytest.skip("扫描批次 CAS 由真实 PostgreSQL 行锁测试证明")
+    barrier = Barrier(2)
+    dispatched = []
+    next_cursor = uuid4()
+
+    def fixed_page(**_kwargs):
+        barrier.wait(timeout=5)
+        return {
+            "verified": 1, "unavailable": 0, "deferred": 0,
+            "processed": 1, "next_after_id": str(next_cursor),
+        }
+
+    monkeypatch.setattr(song_services, "refresh_song_source_availability", fixed_page)
+    assert song_services.start_song_availability_scan(
+        batch_size=1,
+        dispatcher=lambda *args: dispatched.append(args),
+    )
+    initial = dispatched.pop()
+    assert len(initial) == 4
+
+    def run_duplicate():
+        connections.close_all()
+        try:
+            token, batch_size, batch_token, batch_version = initial
+            return song_services.run_song_availability_scan_batch(
+                token, batch_size=batch_size, batch_token=batch_token,
+                batch_version=batch_version,
+                dispatcher=lambda *args: dispatched.append(args),
+            )["status"]
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(lambda _index: run_duplicate(), range(2)))
+
+    assert sorted(statuses) == ["continued", "stale_batch"]
+    state = song_services.SongAvailabilityScanState.objects.get(pk=1)
+    assert state.stats["processed"] == 1
+    assert state.cursor == next_cursor
+    assert len(dispatched) == 1
+
+
+@pytest.mark.postgresql
+@pytest.mark.django_db(transaction=True)
+def test_postgresql_recovery_does_not_fail_active_fourth_attempt(tmp_path, settings, monkeypatch):
+    if connection.vendor != "postgresql":
+        pytest.skip("第 4 次有效 claim 与恢复调度交错由真实 PostgreSQL 行锁证明")
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    settings.ANALYSIS_TASK_LEASE_SECONDS = 60
+    song_id = uuid4()
+    asset, grant = create_upload_grant(owner_type="song", owner_id=song_id, media_type="song_source", mime="audio/mpeg", size=4)
+    backend = get_storage_backend()
+    nonce = claim_local_upload(asset=asset)
+    prepared = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"last"), mime="audio/mpeg", asset_id=asset.id)
+    publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=prepared, backend=backend)
+    asset = complete_local_asset(asset=asset)
+    song = Song.objects.create(id=song_id, title="末次", artist="测试", genre="流行", language="中文", duration_seconds=1, source_asset=asset)
+    task = create_song_analysis(song=song, source_asset=asset)
+    AnalysisTask.objects.filter(pk=task.id).update(attempt=3)
+    started, release = Event(), Event()
+
+    def paused_fourth(_self, _task, **_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return {"protocol_version": "1.0", "is_mock": True, "artifacts": [], "metrics": {}}
+
+    monkeypatch.setattr(MockSongExecutor, "execute", paused_fourth)
+
+    def worker():
+        connections.close_all()
+        try:
+            return run_analysis(task.id).status
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(worker)
+        assert started.wait(timeout=5)
+        active = AnalysisTask.objects.get(pk=task.id)
+        active_token = active.claim_token
+        assert active.attempt == 4
+        assert analysis_services.schedule_analysis_task(task.id) is False
+        active.refresh_from_db()
+        assert active.status == AnalysisTask.Status.PROCESSING
+        assert active.claim_token == active_token
+        release.set()
+        assert future.result(timeout=5) == AnalysisTask.Status.SUCCEEDED
+
+
+@pytest.mark.postgresql
+@pytest.mark.django_db(transaction=True)
+def test_postgresql_expired_scan_takeover_rejects_old_batch_commit(monkeypatch):
+    if connection.vendor != "postgresql":
+        pytest.skip("扫描接管后的旧批次写回由真实 PostgreSQL 行锁证明")
+    started, release = Event(), Event()
+    old_messages = []
+    new_messages = []
+
+    def paused_page(**_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return {"verified": 1, "unavailable": 0, "deferred": 0, "processed": 1, "next_after_id": str(uuid4())}
+
+    monkeypatch.setattr(song_services, "refresh_song_source_availability", paused_page)
+    assert song_services.start_song_availability_scan(batch_size=1, dispatcher=lambda *args: old_messages.append(args))
+    old = old_messages.pop()
+
+    def old_worker():
+        connections.close_all()
+        try:
+            token, batch_size, batch_token, batch_version = old
+            return song_services.run_song_availability_scan_batch(
+                token, batch_size=batch_size, batch_token=batch_token,
+                batch_version=batch_version, dispatcher=lambda *args: old_messages.append(args),
+            )["status"]
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(old_worker)
+        assert started.wait(timeout=5)
+        song_services.SongAvailabilityScanState.objects.update(
+            lease_expires_at=timezone.now() - timedelta(seconds=1),
+        )
+        assert song_services.start_song_availability_scan(
+            batch_size=1, dispatcher=lambda *args: new_messages.append(args),
+        )
+        release.set()
+        assert future.result(timeout=5) == "stale_batch"
+
+    state = song_services.SongAvailabilityScanState.objects.get(pk=1)
+    assert state.stats["processed"] == 0
+    assert state.cursor is None
+    assert old_messages == []
+    assert len(new_messages) == 1

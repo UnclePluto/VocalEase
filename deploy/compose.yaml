@@ -37,7 +37,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-    command: uv run python manage.py runserver 0.0.0.0:8000
+      MEDIA_BACKEND: ${MEDIA_BACKEND:-local}
+      MEDIA_LOCAL_ROOT: /app/private-media
+    command: uv run --no-sync python manage.py runserver 0.0.0.0:8000
     ports:
       - "8000:8000"
     depends_on:
@@ -45,6 +47,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - private_media:/app/private-media
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health/live/')"]
       interval: 10s
@@ -65,12 +69,16 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-    command: uv run celery -A vocaease worker --loglevel=INFO
+      MEDIA_BACKEND: ${MEDIA_BACKEND:-local}
+      MEDIA_LOCAL_ROOT: /app/private-media
+    command: uv run --no-sync celery -A vocaease worker --loglevel=INFO
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - private_media:/app/private-media
 
   celery-beat:
     build:
@@ -86,12 +94,17 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-    command: uv run celery -A vocaease beat --loglevel=INFO
+      MEDIA_BACKEND: ${MEDIA_BACKEND:-local}
+      MEDIA_LOCAL_ROOT: /app/private-media
+    command: uv run --no-sync celery -A vocaease beat --loglevel=INFO
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - private_media:/app/private-media
 
 volumes:
   postgres_data:
+  private_media:
