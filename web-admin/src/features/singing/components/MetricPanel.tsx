@@ -3,7 +3,7 @@ import type { AnalysisResult } from '../types'
 
 export function nearestMetricSample(values: number[], intervalMs: number, seconds: number) {
   if (!values.length || intervalMs <= 0) return undefined
-  return values[Math.min(values.length - 1, Math.max(0, Math.floor(seconds * 1000 / intervalMs)))]
+  return values[Math.min(values.length - 1, Math.max(0, Math.round(seconds * 1000 / intervalMs)))]
 }
 export function MetricPanel({ seconds, result }: { seconds: number; result?: AnalysisResult }) {
   const read = (name: string) => {

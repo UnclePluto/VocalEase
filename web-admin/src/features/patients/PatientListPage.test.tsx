@@ -38,6 +38,7 @@ function usePatientHandlers(results = [patient]) {
     http.get('/api/v1/admin/patients/:id/', () => HttpResponse.json(envelope(patient))),
     http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope(list([doctor])))),
     http.get('/api/v1/admin/singing-sessions/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 10, results: [] }))),
+    http.get('/api/v1/admin/analytics/patients/', () => HttpResponse.json(envelope({ metric_version: '1.0', count: 0, page: 1, page_size: 1, results: [] }))),
   )
 }
 
@@ -178,7 +179,7 @@ describe('病人管理页面', () => {
     await user.click(screen.getByRole('button', { name: '查看患者甲数据' }))
 
     expect(await screen.findByRole('heading', { name: '患者数据' })).toBeInTheDocument()
-    expect(screen.getByText(patient.id)).toBeInTheDocument()
+    expect(await screen.findByText(patient.medical_record_no)).toBeInTheDocument()
   }, 20_000)
 
   it('编辑第101位医生患者时即使当前选项页不含该医生也稳定回显', async () => {

@@ -77,4 +77,42 @@ describe('WaveformPlayer', () => {
     expect(await screen.findByText('录像加载失败，已降级为音频回放。')).toBeInTheDocument()
     expect(container.querySelector('audio')).toBeInTheDocument()
   })
+
+  it('WaveSurfer error 也只触发一次授权刷新并在卸载时取消监听', async () => {
+    let waveError!: () => void
+    const unsubscribe = vi.fn(); const refresh = vi.fn().mockResolvedValue('/fresh.mp3')
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn(), onError: (listener) => { waveError = listener; return unsubscribe } })} />)
+    waveError(); waveError()
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
+    view.unmount()
+    expect(unsubscribe).toHaveBeenCalledTimes(2)
+  })
+
+  it('授权 URL 刷新后替换 audio DOM，避免同一元素二次创建 MediaElementSource', async () => {
+    const refresh = vi.fn().mockResolvedValue('/fresh.mp3')
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/old.mp3' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    const oldAudio = view.container.querySelector('audio')!
+    fireEvent.error(oldAudio)
+    await waitFor(() => expect(view.container.querySelector('audio')).not.toBe(oldAudio))
+    expect(view.container.querySelector('audio')).toHaveAttribute('src', '/fresh.mp3')
+  })
+
+  it('录像失败后手动重试成功会恢复录像元素', async () => {
+    const refresh = vi.fn().mockRejectedValueOnce(new Error('录像失败')).mockResolvedValueOnce('/video-fresh.mp4')
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' }, video: { assetId: 'video', url: '/video.mp4' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    fireEvent.error(view.container.querySelector('video')!)
+    await screen.findByText('录像加载失败，已降级为音频回放。')
+    fireEvent.click(screen.getByRole('button', { name: '重试媒体授权' }))
+    await waitFor(() => expect(view.container.querySelector('video')).toHaveAttribute('src', '/video-fresh.mp4'))
+  })
+
+  it('真实分轨存在时切换活动轨道并恢复主时钟进度', async () => {
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'mix', url: '/mix.mp3' }, vocal: { assetId: 'vocal', url: '/vocal.mp3' }, accompaniment: { assetId: 'acc', url: '/acc.mp3' } }} events={[]} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    const first = view.container.querySelector('audio')!
+    Object.defineProperty(first, 'currentTime', { value: 12, writable: true })
+    fireEvent.click(screen.getByRole('tab', { name: '仅人声' }))
+    await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/vocal.mp3'))
+    expect(view.container.querySelector('audio')!.currentTime).toBe(12)
+    expect(screen.getByRole('tab', { name: '仅人声' })).toHaveAttribute('aria-selected', 'true')
+  })
 })

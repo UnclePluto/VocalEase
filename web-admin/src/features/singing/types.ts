@@ -8,3 +8,14 @@ export type SingingSession = {
 }
 export type SingingPage = { count: number; page: number; page_size: number; results: SingingSession[] }
 export type PrivateMediaUrl = { url: string; expires_at: string }
+export type PatientMetric = {
+  medical_record_no: string
+  treatment_progress: string | null
+  completed_count: number
+  total_duration_seconds: number
+  average_score: string | null
+  score_trend: { difference: string | null; direction: 'up' | 'down' | 'flat'; has_enough_data: boolean }
+  burp_improvement: string | null
+  is_mock: boolean
+}
+export type PatientMetricsPage = { metric_version: string; count: number; page: number; page_size: number; results: PatientMetric[] }

@@ -26,4 +26,14 @@ describe('VisualizerAdapter', () => {
     adapter.destroy()
     expect(cancelFrame).toHaveBeenCalledWith(9); expect(disconnectSource).toHaveBeenCalledOnce(); expect(disconnectAnalyser).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce()
   })
+
+  it('Waviz 吞掉媒体源异常而未初始化时通过健康探针启动 fallback', async () => {
+    const context = { state: 'running', destination: {}, createMediaElementSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })), createAnalyser: vi.fn(() => ({ frequencyBinCount: 32, getByteFrequencyData: vi.fn(), connect: vi.fn(), disconnect: vi.fn() })), resume: vi.fn(), close: vi.fn() }
+    const cleanup = vi.fn()
+    const adapter = createVisualizerAdapter({ loadWaviz: vi.fn().mockResolvedValue({ Waviz: class { cleanup = cleanup; getFrequencyData = () => null; simpleBars = vi.fn() } }), createContext: () => context as unknown as AudioContext, requestFrame: vi.fn().mockReturnValue(1) })
+    const canvas = document.createElement('canvas'); vi.spyOn(canvas, 'getContext').mockReturnValue({ clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '' } as unknown as CanvasRenderingContext2D)
+    await adapter.start(document.createElement('audio'), canvas)
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect(context.createMediaElementSource).toHaveBeenCalledOnce()
+  })
 })

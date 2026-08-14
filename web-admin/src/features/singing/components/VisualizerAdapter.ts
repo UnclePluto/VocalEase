@@ -1,6 +1,6 @@
 export interface VisualizerAdapter { start(media: HTMLMediaElement, canvas: HTMLCanvasElement): Promise<void>; stop(): void; destroy(): void }
 
-type WavizInstance = { simpleBars?: () => Promise<void> | void; stop?: () => void; cleanup?: () => void }
+type WavizInstance = { simpleBars?: () => Promise<void> | void; getFrequencyData?: () => Uint8Array | null; stop?: () => void; cleanup?: () => void }
 type WavizConstructor = new (canvas: HTMLCanvasElement, source: HTMLMediaElement, context?: AudioContext) => WavizInstance
 export type VisualizerDependencies = {
   loadWaviz?: () => Promise<{ Waviz: WavizConstructor }>
@@ -52,6 +52,11 @@ export function createVisualizerAdapter(dependencies: VisualizerDependencies = {
         const { Waviz } = await loadWaviz()
         if (destroyed) return
         waviz = new Waviz(canvas, media)
+        if (waviz.getFrequencyData?.() === null) {
+          waviz.cleanup?.()
+          waviz = null
+          throw new Error('Waviz 未能连接媒体元素')
+        }
         await waviz.simpleBars?.()
       } catch {
         if (destroyed || raf) return

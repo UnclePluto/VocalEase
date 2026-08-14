@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
@@ -15,6 +15,7 @@ const envelope = (data: unknown) => ({ code: 'ok', message: '', data, request_id
 describe('SingingDetailPage', () => {
   it('展示明确的模拟指标，并以最近的主时钟采样值读取空序列安全降级', async () => {
     expect(nearestMetricSample([1, 2, 3], 1000, 2.4)).toBe(3)
+    expect(nearestMetricSample([1, 2, 3], 1000, 1.6)).toBe(3)
     expect(nearestMetricSample([], 1000, 2.4)).toBeUndefined()
     render(<QueryClientProvider client={new QueryClient()}><SingingDetailContent session={session} /></QueryClientProvider>)
     expect(screen.getByText('模拟分析结果，不用于临床诊断或现场监测')).toBeInTheDocument()
@@ -46,5 +47,41 @@ describe('SingingDetailPage', () => {
     expect(await screen.findByText('授权已过期')).toBeInTheDocument()
     expect(screen.getByText('请求编号：media-request')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试媒体授权' })).toBeInTheDocument()
+  })
+
+  it('视频授权失败不会拖垮已授权音频，并可独立重试', async () => {
+    useAuthStore.setState({ accessToken: 'valid', user: { login_id: 'A', role: 'doctor', must_change_password: false }, status: 'authenticated' })
+    server.use(
+      http.get('/api/v1/admin/singing-sessions/:id/', () => HttpResponse.json(envelope({ ...session, media: [
+        { asset_id: 'audio-1', media_type: 'singing_audio', status: 'ready', mime: 'audio/mpeg', size: 1 },
+        { asset_id: 'video-1', media_type: 'singing_video', status: 'ready', mime: 'video/mp4', size: 1 },
+      ] }))),
+      http.post('/api/v1/admin/media/audio-1/private-url/', () => HttpResponse.json(envelope({ url: '/audio.mp3', expires_at: '2026-08-15T10:00:00Z' }))),
+      http.post('/api/v1/admin/media/video-1/private-url/', () => HttpResponse.json({ code: 'video_denied', message: '录像授权失败', data: {}, request_id: 'video-request' }, { status: 403 })),
+    )
+    renderApp('/singing/session-1')
+    expect(await screen.findByLabelText('演唱回放')).toBeInTheDocument()
+    expect(document.querySelector('audio')).toHaveAttribute('src', '/audio.mp3')
+    expect(screen.getByText('录像授权失败')).toBeInTheDocument()
+    expect(screen.getByText('请求编号：video-request')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试录像授权' })).toBeInTheDocument()
+  })
+
+  it('私有 URL 以认证 epoch 隔离且离开页面即回收，不复用旧用户授权', async () => {
+    useAuthStore.setState({ accessToken: 'valid', user: { login_id: 'A', role: 'doctor', must_change_password: false }, status: 'authenticated' })
+    let calls = 0
+    server.use(http.post('/api/v1/admin/media/audio-1/private-url/', () => {
+      calls += 1
+      return HttpResponse.json(envelope({ url: `/audio-${calls}.mp3`, expires_at: '2026-08-15T10:00:00Z' }))
+    }))
+    const withAudio = { ...session, media: [{ asset_id: 'audio-1', media_type: 'singing_audio' as const, status: 'ready', mime: 'audio/mpeg', size: 1 }] }
+    const client = new QueryClient()
+    const first = render(<QueryClientProvider client={client}><SingingDetailContent session={withAudio} /></QueryClientProvider>)
+    await waitFor(() => expect(first.container.querySelector('audio')).toHaveAttribute('src', '/audio-1.mp3'))
+    act(() => useAuthStore.setState({ sessionEpoch: useAuthStore.getState().sessionEpoch + 1 }))
+    await waitFor(() => expect(first.container.querySelector('audio')).toHaveAttribute('src', '/audio-2.mp3'))
+    first.unmount()
+    render(<QueryClientProvider client={client}><SingingDetailContent session={withAudio} /></QueryClientProvider>)
+    await waitFor(() => expect(calls).toBe(3))
   })
 })
