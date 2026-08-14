@@ -235,21 +235,40 @@ def test_postgresql_concurrent_availability_scan_starts_once():
 
 @pytest.mark.postgresql
 @pytest.mark.django_db(transaction=True)
-def test_postgresql_duplicate_scan_batch_commits_and_chains_once(monkeypatch):
+def test_postgresql_duplicate_scan_batch_commits_and_chains_once(tmp_path, settings, monkeypatch):
     if connection.vendor != "postgresql":
         pytest.skip("扫描批次 CAS 由真实 PostgreSQL 行锁测试证明")
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song_id = uuid4()
+    content = b"duplicate-scan"
+    asset, grant = create_upload_grant(
+        owner_type="song", owner_id=song_id, media_type="song_source",
+        mime="audio/mpeg", size=len(content),
+    )
+    backend = get_storage_backend()
+    nonce = claim_local_upload(asset=asset)
+    prepared = backend.prepare_authorized_stream(
+        object_key=asset.object_key, token=grant.upload_token,
+        stream=io.BytesIO(content), mime="audio/mpeg", asset_id=asset.id,
+    )
+    publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=prepared, backend=backend)
+    asset = complete_local_asset(asset=asset)
+    song = Song.objects.create(
+        id=song_id, title="重复批次", artist="测试", genre="流行",
+        language="中文", duration_seconds=1, source_asset=asset,
+        source_available=False,
+    )
     barrier = Barrier(2)
     dispatched = []
-    next_cursor = uuid4()
 
-    def fixed_page(**_kwargs):
-        barrier.wait(timeout=5)
-        return {
-            "verified": 1, "unavailable": 0, "deferred": 0,
-            "processed": 1, "next_after_id": str(next_cursor),
-        }
+    class BarrierAfterRealStat:
+        def stat(self, object_key):
+            metadata = backend.stat(object_key)
+            barrier.wait(timeout=5)
+            return metadata
 
-    monkeypatch.setattr(song_services, "refresh_song_source_availability", fixed_page)
+    monkeypatch.setattr(song_services, "backend_for_asset", lambda _asset: BarrierAfterRealStat())
     assert song_services.start_song_availability_scan(
         batch_size=1,
         dispatcher=lambda *args: dispatched.append(args),
@@ -274,8 +293,10 @@ def test_postgresql_duplicate_scan_batch_commits_and_chains_once(monkeypatch):
 
     assert sorted(statuses) == ["continued", "stale_batch"]
     state = song_services.SongAvailabilityScanState.objects.get(pk=1)
+    song.refresh_from_db()
+    assert song.source_available is True
     assert state.stats["processed"] == 1
-    assert state.cursor == next_cursor
+    assert state.cursor == song.id
     assert len(dispatched) == 1
 
 
@@ -329,20 +350,45 @@ def test_postgresql_recovery_does_not_fail_active_fourth_attempt(tmp_path, setti
 
 @pytest.mark.postgresql
 @pytest.mark.django_db(transaction=True)
-def test_postgresql_expired_scan_takeover_rejects_old_batch_commit(monkeypatch):
+def test_postgresql_expired_scan_takeover_preserves_new_trusted_song_snapshot(tmp_path, settings, monkeypatch):
     if connection.vendor != "postgresql":
-        pytest.skip("扫描接管后的旧批次写回由真实 PostgreSQL 行锁证明")
-    started, release = Event(), Event()
+        pytest.skip("扫描接管后的旧批次业务写回由真实 PostgreSQL 行锁证明")
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song_id = uuid4()
+    content = b"availability-source"
+    asset, grant = create_upload_grant(
+        owner_type="song", owner_id=song_id, media_type="song_source",
+        mime="audio/mpeg", size=len(content),
+    )
+    backend = get_storage_backend()
+    nonce = claim_local_upload(asset=asset)
+    prepared = backend.prepare_authorized_stream(
+        object_key=asset.object_key, token=grant.upload_token,
+        stream=io.BytesIO(content), mime="audio/mpeg", asset_id=asset.id,
+    )
+    publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=prepared, backend=backend)
+    asset = complete_local_asset(asset=asset)
+    song = Song.objects.create(
+        id=song_id, title="扫描接管", artist="测试", genre="流行",
+        language="中文", duration_seconds=1, source_asset=asset,
+        source_available=False,
+    )
+
+    stat_finished, release = Event(), Event()
     old_messages = []
     new_messages = []
 
-    def paused_page(**_kwargs):
-        started.set()
-        assert release.wait(timeout=5)
-        return {"verified": 1, "unavailable": 0, "deferred": 0, "processed": 1, "next_after_id": str(uuid4())}
+    class PauseAfterRealStat:
+        def stat(self, object_key):
+            metadata = backend.stat(object_key)
+            if not stat_finished.is_set():
+                stat_finished.set()
+                assert release.wait(timeout=5)
+            return metadata
 
-    monkeypatch.setattr(song_services, "refresh_song_source_availability", paused_page)
-    assert song_services.start_song_availability_scan(batch_size=1, dispatcher=lambda *args: old_messages.append(args))
+    monkeypatch.setattr(song_services, "backend_for_asset", lambda _asset: PauseAfterRealStat())
+    assert song_services.start_song_availability_scan(batch_size=100, dispatcher=lambda *args: old_messages.append(args))
     old = old_messages.pop()
 
     def old_worker():
@@ -358,18 +404,45 @@ def test_postgresql_expired_scan_takeover_rejects_old_batch_commit(monkeypatch):
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(old_worker)
-        assert started.wait(timeout=5)
+        assert stat_finished.wait(timeout=5)
+        # 旧 worker 已完成真实 stat，但尚未返回；同一资产此时发布一个新的真实可信回执。
+        replacement = b"availability-updated"
+        prepared_replacement = backend._prepare_stream(
+            object_key=asset.object_key, stream=io.BytesIO(replacement), mime=asset.mime,
+            asset_id=asset.id, expected_size=len(replacement),
+        )
+        published_replacement = backend.publish_manifest(
+            prepared_replacement, expected_generation=asset.manifest_generation,
+        )
+        backend.finalize_publish(published_replacement)
+        asset.__class__.objects.filter(pk=asset.id).update(
+            size=len(replacement), sha256=prepared_replacement.sha256,
+            manifest_generation=prepared_replacement.generation,
+        )
         song_services.SongAvailabilityScanState.objects.update(
             lease_expires_at=timezone.now() - timedelta(seconds=1),
         )
         assert song_services.start_song_availability_scan(
-            batch_size=1, dispatcher=lambda *args: new_messages.append(args),
+            batch_size=100, dispatcher=lambda *args: new_messages.append(args),
         )
+        new = new_messages.pop()
+        token, batch_size, batch_token, batch_version = new
+        assert song_services.run_song_availability_scan_batch(
+            token, batch_size=batch_size, batch_token=batch_token,
+            batch_version=batch_version, dispatcher=lambda *args: new_messages.append(args),
+        )["status"] == "completed"
         release.set()
         assert future.result(timeout=5) == "stale_batch"
 
+    song.refresh_from_db()
+    asset.refresh_from_db()
     state = song_services.SongAvailabilityScanState.objects.get(pk=1)
-    assert state.stats["processed"] == 0
+    assert song.source_available is True
+    assert song.source_verified_asset_id == asset.id
+    assert song.source_verified_generation == prepared_replacement.generation
+    assert song.source_receipt_fingerprint == song_services.source_receipt_fingerprint(asset)
+    assert state.stats["processed"] == 1
+    assert state.stats["verified"] == 1
     assert state.cursor is None
     assert old_messages == []
-    assert len(new_messages) == 1
+    assert new_messages == []

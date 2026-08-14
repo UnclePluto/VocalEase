@@ -311,6 +311,82 @@ def test_availability_scan_chains_all_pages(tmp_path, settings):
 
 
 @pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_availability_evaluation_is_pure_until_cas_apply(tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, _asset = song_with_source()
+    Song.objects.filter(pk=song.id).update(
+        source_available=False, source_verified_at=None, source_verified_asset_id=None,
+        source_receipt_fingerprint="", source_verified_backend="",
+        source_verified_object_key="", source_verified_size=None,
+        source_verified_mime="", source_verified_sha256="",
+        source_verified_etag="", source_verified_generation="",
+    )
+    song = Song.objects.select_related("source_asset").get(pk=song.id)
+
+    evaluation = song_services.evaluate_song_source_availability(song)
+
+    song.refresh_from_db()
+    assert evaluation.outcome == "verified"
+    assert song.source_available is False
+    assert song_services.apply_song_availability_evaluations([evaluation]) == {
+        "verified": 1, "unavailable": 0, "deferred": 0, "processed": 1,
+    }
+    song.refresh_from_db()
+    assert song.source_available is True
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_availability_apply_skips_changed_receipt_snapshot(tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    Song.objects.filter(pk=song.id).update(
+        source_available=False, source_verified_at=None, source_verified_asset_id=None,
+        source_receipt_fingerprint="", source_verified_backend="",
+        source_verified_object_key="", source_verified_size=None,
+        source_verified_mime="", source_verified_sha256="",
+        source_verified_etag="", source_verified_generation="",
+    )
+    song = Song.objects.select_related("source_asset").get(pk=song.id)
+    evaluation = song_services.evaluate_song_source_availability(song)
+
+    MediaAsset.objects.filter(pk=asset.id).update(status="failed")
+
+    assert song_services.apply_song_availability_evaluations([evaluation])["processed"] == 0
+    song.refresh_from_db()
+    assert song.source_available is False
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_availability_deferred_evaluation_preserves_last_trusted_snapshot(tmp_path, settings, monkeypatch):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    song_services.validate_source_asset(song=song, asset=asset)
+    song.refresh_from_db()
+    trusted_fingerprint = song.source_receipt_fingerprint
+
+    class TemporarilyUnavailableBackend:
+        def stat(self, _object_key):
+            raise RuntimeError("temporary storage outage")
+
+    monkeypatch.setattr(
+        song_services, "backend_for_asset", lambda _asset: TemporarilyUnavailableBackend(),
+    )
+    song = Song.objects.select_related("source_asset").get(pk=song.id)
+    evaluation = song_services.evaluate_song_source_availability(song)
+
+    assert evaluation.outcome == "deferred"
+    assert song_services.apply_song_availability_evaluations([evaluation]) == {
+        "verified": 0, "unavailable": 0, "deferred": 1, "processed": 1,
+    }
+    song.refresh_from_db()
+    assert song.source_available is True
+    assert song.source_receipt_fingerprint == trusted_fingerprint
+
+
+@pytest.mark.django_db
 def test_availability_scan_has_singleton_lease_and_recovers_broker_failure():
     queued = []
     dispatcher = lambda *args: queued.append(args)

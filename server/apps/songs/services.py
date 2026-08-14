@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -290,25 +291,181 @@ def preview_source(*, actor, request_id: str, song: Song):
     return private_url
 
 
-def refresh_song_source_availability(*, batch_size: int = 100, after_id: UUID | None = None) -> dict[str, int | str]:
+@dataclass(frozen=True)
+class SourceReceiptSnapshot:
+    asset_id: UUID
+    owner_type: str
+    owner_id: UUID
+    media_type: str
+    backend: str
+    object_key: str
+    mime: str
+    size: int
+    sha256: str
+    etag: str
+    manifest_generation: str
+    status: str
+    deleted_at: object | None
+
+    @classmethod
+    def from_asset(cls, asset: MediaAsset) -> SourceReceiptSnapshot:
+        return cls(
+            asset_id=asset.id, owner_type=asset.owner_type, owner_id=asset.owner_id,
+            media_type=asset.media_type, backend=asset.backend,
+            object_key=asset.object_key, mime=asset.mime, size=asset.size,
+            sha256=asset.sha256, etag=asset.etag,
+            manifest_generation=asset.manifest_generation,
+            status=asset.status, deleted_at=asset.deleted_at,
+        )
+
+    def matches(self, asset: MediaAsset) -> bool:
+        return self == SourceReceiptSnapshot.from_asset(asset)
+
+
+@dataclass(frozen=True)
+class AvailabilityEvaluation:
+    """一次远程复核的纯结果；创建它不会写 Song。"""
+
+    song_id: UUID
+    expected_source_asset_id: UUID
+    expected_receipt: SourceReceiptSnapshot
+    outcome: str
+    new_snapshot: dict[str, object] | None
+
+
+@dataclass(frozen=True)
+class AvailabilityEvaluationPage:
+    evaluations: tuple[AvailabilityEvaluation, ...]
+    next_after_id: UUID | None
+
+
+def _availability_snapshot(*, asset: MediaAsset, available: bool, verified_at) -> dict[str, object]:
+    return {
+        "source_available": available,
+        "source_verified_at": verified_at,
+        "source_verified_asset_id": asset.id if available else None,
+        "source_receipt_fingerprint": source_receipt_fingerprint(asset) if available else "",
+        "source_verified_backend": asset.backend if available else "",
+        "source_verified_object_key": asset.object_key if available else "",
+        "source_verified_size": asset.size if available else None,
+        "source_verified_mime": asset.mime if available else "",
+        "source_verified_sha256": asset.sha256 if available else "",
+        "source_verified_etag": asset.etag if available else "",
+        "source_verified_generation": asset.manifest_generation if available else "",
+    }
+
+
+def evaluate_song_source_availability(song: Song) -> AvailabilityEvaluation:
+    """在事务外做远程 I/O，仅返回评估，不修改 Song 或 MediaAsset。"""
+    asset = song.source_asset
+    if asset is None:
+        raise ValueError("availability evaluation requires source_asset")
+    expected_receipt = SourceReceiptSnapshot.from_asset(asset)
+
+    def evaluation(outcome: str, *, available: bool | None = None) -> AvailabilityEvaluation:
+        snapshot = None if available is None else _availability_snapshot(
+            asset=asset, available=available, verified_at=timezone.now(),
+        )
+        return AvailabilityEvaluation(
+            song_id=song.id, expected_source_asset_id=asset.id,
+            expected_receipt=expected_receipt, outcome=outcome,
+            new_snapshot=snapshot,
+        )
+
+    if (
+        song.deleted_at is not None or asset.deleted_at is not None
+        or asset.owner_type != MediaAsset.OwnerType.SONG
+        or asset.owner_id != song.id or asset.media_type != "song_source"
+        or asset.status != MediaAsset.Status.READY
+    ):
+        return evaluation("unavailable", available=False)
+    try:
+        metadata = backend_for_asset(asset).stat(asset.object_key)
+    except StorageValidationError as exc:
+        if asset.backend == "qiniu" and "查询失败" in str(exc):
+            logger.warning(
+                "song_source_verify_deferred song_id=%s asset_id=%s reason=storage_unavailable",
+                song.id, asset.id,
+            )
+            return evaluation("deferred")
+        return evaluation("unavailable", available=False)
+    except Exception:
+        logger.warning(
+            "song_source_verify_deferred song_id=%s asset_id=%s reason=backend_exception",
+            song.id, asset.id,
+        )
+        return evaluation("deferred")
+    if metadata.object_key != asset.object_key or metadata.size != asset.size or metadata.mime != asset.mime:
+        return evaluation("unavailable", available=False)
+    if asset.backend == "local" and (
+        not asset.sha256 or metadata.sha256 != asset.sha256
+        or metadata.generation != asset.manifest_generation
+    ):
+        return evaluation("unavailable", available=False)
+    if asset.backend == "qiniu" and (not asset.etag or metadata.etag != asset.etag):
+        return evaluation("unavailable", available=False)
+    return evaluation("verified", available=True)
+
+
+def evaluate_song_availability_page(*, batch_size: int = 100, after_id: UUID | None = None) -> AvailabilityEvaluationPage:
     batch_size = max(1, min(int(batch_size), 500))
-    stats: dict[str, int | str] = {"verified": 0, "unavailable": 0, "deferred": 0, "processed": 0, "next_after_id": ""}
-    queryset = Song.objects.filter(deleted_at__isnull=True, source_asset__isnull=False).select_related("source_asset").order_by("id")
+    queryset = Song.objects.filter(
+        deleted_at__isnull=True, source_asset__isnull=False,
+    ).select_related("source_asset").order_by("id")
     if after_id is not None:
         queryset = queryset.filter(id__gt=after_id)
     songs = list(queryset[:batch_size])
-    for song in songs:
-        try:
-            validate_source_asset(song=song, asset=song.source_asset)
-        except SourceVerificationTemporary:
-            stats["deferred"] += 1
-        except SourceAssetInvalid:
-            stats["unavailable"] += 1
-        else:
-            stats["verified"] += 1
+    evaluations = tuple(evaluate_song_source_availability(song) for song in songs)
+    next_after_id = songs[-1].id if len(songs) == batch_size else None
+    return AvailabilityEvaluationPage(evaluations=evaluations, next_after_id=next_after_id)
+
+
+def _apply_song_availability_evaluations_locked(
+    evaluations: tuple[AvailabilityEvaluation, ...] | list[AvailabilityEvaluation],
+) -> dict[str, int]:
+    """调用方须在 atomic 中；统一锁序为 Song→MediaAsset。"""
+    stats = {"verified": 0, "unavailable": 0, "deferred": 0, "processed": 0}
+    ordered = sorted(evaluations, key=lambda item: str(item.song_id))
+    song_ids = sorted({item.song_id for item in ordered}, key=str)
+    songs = {
+        song.id: song
+        for song in Song.objects.select_for_update().filter(id__in=song_ids).order_by("id")
+    }
+    asset_ids = sorted({item.expected_source_asset_id for item in ordered}, key=str)
+    assets = {
+        asset.id: asset
+        for asset in MediaAsset.objects.select_for_update().filter(id__in=asset_ids).order_by("id")
+    }
+    for item in ordered:
+        song = songs.get(item.song_id)
+        asset = assets.get(item.expected_source_asset_id)
+        if (
+            song is None or song.deleted_at is not None
+            or song.source_asset_id != item.expected_source_asset_id
+            or asset is None or not item.expected_receipt.matches(asset)
+        ):
+            continue
+        if item.new_snapshot is not None:
+            Song.objects.filter(
+                pk=song.id, source_asset_id=item.expected_source_asset_id,
+            ).update(**item.new_snapshot)
+        stats[item.outcome] += 1
         stats["processed"] += 1
-    if len(songs) == batch_size:
-        stats["next_after_id"] = str(songs[-1].id)
+    return stats
+
+
+def apply_song_availability_evaluations(
+    evaluations: tuple[AvailabilityEvaluation, ...] | list[AvailabilityEvaluation],
+) -> dict[str, int]:
+    with transaction.atomic():
+        return _apply_song_availability_evaluations_locked(evaluations)
+
+
+def refresh_song_source_availability(*, batch_size: int = 100, after_id: UUID | None = None) -> dict[str, int | str]:
+    """兼容单批刷新入口：远程评估在事务外，短事务只做回执 CAS 写入。"""
+    page = evaluate_song_availability_page(batch_size=batch_size, after_id=after_id)
+    stats: dict[str, int | str] = apply_song_availability_evaluations(page.evaluations)
+    stats["next_after_id"] = str(page.next_after_id or "")
     return stats
 
 
@@ -378,19 +535,23 @@ def run_song_availability_scan_batch(
         state.lease_expires_at = now + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
         state.save(update_fields=["lease_expires_at", "updated_at"])
 
-    page = refresh_song_source_availability(batch_size=batch_size, after_id=cursor)
-    next_cursor = UUID(page["next_after_id"]) if page["next_after_id"] else None
+    # 远程 stat/回执判断必须在任何业务行锁之外完成；此阶段只产生纯评估。
+    page = evaluate_song_availability_page(batch_size=batch_size, after_id=cursor)
+    next_cursor = page.next_after_id
     with transaction.atomic():
         state = SongAvailabilityScanState.objects.select_for_update().get(pk=1)
+        cas_now = timezone.now()
         if (
             state.claim_token != token or state.pending_batch_token != batch_token
             or state.batch_version != batch_version or state.cursor != cursor
-            or not state.lease_expires_at or state.lease_expires_at <= timezone.now()
+            or not state.lease_expires_at or state.lease_expires_at <= cas_now
         ):
             return {"status": "stale_batch"}
+        # 全局锁序固定为 ScanState→Song(UUID)→MediaAsset(UUID)。CAS 通过前零业务写入。
+        applied = _apply_song_availability_evaluations_locked(page.evaluations)
         aggregate = dict(state.stats)
         for key in ("verified", "unavailable", "deferred", "processed"):
-            aggregate[key] = int(aggregate.get(key, 0)) + int(page[key])
+            aggregate[key] = int(aggregate.get(key, 0)) + int(applied[key])
         state.stats = aggregate
         state.cursor = next_cursor
         if next_cursor is None:
