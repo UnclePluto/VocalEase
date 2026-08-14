@@ -8,6 +8,7 @@ const ChangePasswordPage = lazy(() => import('../features/auth/ChangePasswordPag
 const AdminLayout = lazy(() => import('../layouts/AdminLayout').then((module) => ({ default: module.AdminLayout })))
 const DoctorListPage = lazy(() => import('../features/doctors/DoctorListPage').then((module) => ({ default: module.DoctorListPage })))
 const PatientListPage = lazy(() => import('../features/patients/PatientListPage').then((module) => ({ default: module.PatientListPage })))
+const SongListPage = lazy(() => import('../features/songs/SongListPage').then((module) => ({ default: module.SongListPage })))
 
 function Suspended({ children }: { children: ReactNode }) {
   return <Suspense fallback={<div className="route-loading" role="status">页面加载中</div>}>{children}</Suspense>
@@ -49,7 +50,7 @@ export const appRoutes: RouteObject[] = [
               { path: '/doctors', element: <Suspended><DoctorListPage /></Suspended> },
               { path: '/patients', element: <Suspended><PatientListPage /></Suspended> },
               { path: '/patients/:patientId/data', element: <PatientDataPlaceholder /> },
-              { path: '/songs', element: <Placeholder title="曲库管理" /> },
+              { path: '/songs', element: <Suspended><SongListPage /></Suspended> },
               { path: '/patient-data', element: <Placeholder title="病人数据" /> },
               { path: '/analytics', element: <Placeholder title="数据管理" /> },
             ],

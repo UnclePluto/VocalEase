@@ -145,6 +145,10 @@ textarea, select { font: inherit; }
 .form-api-error, .form-plan-hint { margin-bottom: 18px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .inline-error { color: #d92d20; }
+.muted, .song-preview-hint { color: #667085; font-size: 13px; }
+.song-preview-hint { margin: 16px 0 10px; }
+.song-list-error { margin-bottom: 16px; }
+.ant-modal audio { width: 100%; margin-top: 16px; }
 
 @media (max-width: 899px) {
   .admin-main { margin-left: 0; }
