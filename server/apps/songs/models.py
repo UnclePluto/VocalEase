@@ -22,6 +22,10 @@ class Song(UUIDSoftDeleteModel):
     language = models.CharField(max_length=64)
     duration_seconds = models.PositiveIntegerField()
     source_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="source_songs")
+    source_available = models.BooleanField(default=False)
+    source_verified_at = models.DateTimeField(null=True, blank=True)
+    source_verified_asset_id = models.UUIDField(null=True, blank=True)
+    source_receipt_fingerprint = models.CharField(max_length=64, blank=True)
     analysis_status = models.CharField(max_length=16, choices=AnalysisStatus.choices, default=AnalysisStatus.PENDING)
     publication_status = models.CharField(max_length=16, choices=PublicationStatus.choices, default=PublicationStatus.DRAFT)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -33,6 +37,13 @@ class Song(UUIDSoftDeleteModel):
             models.CheckConstraint(condition=Q(duration_seconds__gt=0), name="song_duration_positive"),
             models.CheckConstraint(condition=Q(analysis_status__in=["pending", "processing", "succeeded", "failed", "retrying"]), name="song_analysis_status_valid"),
             models.CheckConstraint(condition=Q(publication_status__in=["draft", "published"]), name="song_publication_status_valid"),
+            models.CheckConstraint(
+                condition=(
+                    Q(source_available=True, source_asset__isnull=False, source_verified_at__isnull=False, source_verified_asset_id__isnull=False, source_verified_asset_id=models.F("source_asset_id"), source_receipt_fingerprint__gt="")
+                    | Q(source_available=False, source_verified_asset_id__isnull=True, source_receipt_fingerprint="")
+                ),
+                name="song_source_availability_valid",
+            ),
         ]
 
 

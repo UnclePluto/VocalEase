@@ -6,13 +6,13 @@ from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.accounts.models import Role
 from apps.accounts.views import api_response
 from apps.analysis.models import AnalysisTask
-from apps.analysis.services import create_song_analysis
-from apps.analysis.tasks import run_analysis_task
+from apps.analysis.services import request_song_analysis
 from apps.audit.services import record
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
@@ -45,6 +45,8 @@ def _validated_song_query(request, serializer_class):
 
 class SongUploadGrantView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "credential_upload"
 
     def post(self, request):
         serializer = SongUploadGrantSerializer(data=request.data)
@@ -140,10 +142,8 @@ class AdminSongReanalyzeView(APIView):
         song = get_object_or_404(songs_for_admin().select_related("source_asset"), pk=song_id)
         if not song.source_asset:
             return Response({"code": "song_source_invalid", "message": "歌曲源媒体不可用或验证失败", "data": None, "request_id": request.request_id}, status=status.HTTP_409_CONFLICT)
-        task = create_song_analysis(song=song, source_asset=song.source_asset, **serializer.validated_data)
+        task = request_song_analysis(song=song, source_asset=song.source_asset, **serializer.validated_data)
         record(actor=request.user, action="song.reanalyze", target=song, changes={"task_id": str(task.id), "task_type": task.task_type}, request_id=request.request_id)
-        # 测试环境显式 eager；生产只发送 JSON UUID，不传媒体地址或输入内容。
-        run_analysis_task.delay(str(task.id))
         return api_response(data={"task_id": str(task.id), "status": task.status, "is_mock": True}, request_id=request.request_id, status_code=status.HTTP_202_ACCEPTED)
 
 
@@ -162,17 +162,9 @@ class PatientSongListView(APIView):
 
     def get(self, request):
         query = _validated_song_query(request, PatientSongListQuerySerializer)
-        # 发布状态是必要条件，但不以 DB 的 ready 标记冒充真实对象可用性。
-        candidates = songs_for_patient(keyword=query["keyword"], ordering=query["sort"])
-        available = []
-        for song in candidates:
-            try:
-                validate_source_asset(song=song, asset=song.source_asset)
-            except SourceAssetInvalid:
-                continue
-            available.append(song)
-        start = (query["page"] - 1) * query["page_size"]
-        data = {"count": len(available), "page": query["page"], "page_size": query["page_size"], "results": PatientSongReadSerializer(available[start:start + query["page_size"]], many=True).data}
+        queryset = songs_for_patient(keyword=query["keyword"], ordering=query["sort"])
+        data = paginated_data(queryset, page=query["page"], page_size=query["page_size"])
+        data["results"] = PatientSongReadSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
 

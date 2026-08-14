@@ -1,4 +1,4 @@
-from django.db.models import Q
+from django.db.models import F, Q
 
 from .models import Song
 
@@ -20,4 +20,10 @@ def songs_for_admin(*, keyword: str = "", genre: str = "", language: str = "", a
 
 def songs_for_patient(*, keyword: str = "", ordering: str = "-created_at"):
     queryset = songs_for_admin(keyword=keyword, publication_status=Song.PublicationStatus.PUBLISHED, ordering=ordering)
-    return queryset.filter(source_asset__status="ready", source_asset__deleted_at__isnull=True)
+    return queryset.filter(
+        source_available=True,
+        source_verified_asset_id=F("source_asset_id"),
+        source_receipt_fingerprint__gt="",
+        source_asset__status="ready",
+        source_asset__deleted_at__isnull=True,
+    )
