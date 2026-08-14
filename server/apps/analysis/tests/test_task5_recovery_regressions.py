@@ -323,6 +323,7 @@ def test_availability_evaluation_is_pure_until_cas_apply(tmp_path, settings):
         source_verified_etag="", source_verified_generation="",
     )
     song = Song.objects.select_related("source_asset").get(pk=song.id)
+    before_apply = song.updated_at
 
     evaluation = song_services.evaluate_song_source_availability(song)
 
@@ -334,6 +335,7 @@ def test_availability_evaluation_is_pure_until_cas_apply(tmp_path, settings):
     }
     song.refresh_from_db()
     assert song.source_available is True
+    assert song.updated_at > before_apply
 
 
 @pytest.mark.django_db
@@ -349,6 +351,7 @@ def test_availability_apply_skips_changed_receipt_snapshot(tmp_path, settings):
         source_verified_etag="", source_verified_generation="",
     )
     song = Song.objects.select_related("source_asset").get(pk=song.id)
+    before_apply = song.updated_at
     evaluation = song_services.evaluate_song_source_availability(song)
 
     MediaAsset.objects.filter(pk=asset.id).update(status="failed")
@@ -356,6 +359,7 @@ def test_availability_apply_skips_changed_receipt_snapshot(tmp_path, settings):
     assert song_services.apply_song_availability_evaluations([evaluation])["processed"] == 0
     song.refresh_from_db()
     assert song.source_available is False
+    assert song.updated_at == before_apply
 
 
 @pytest.mark.django_db
@@ -366,6 +370,7 @@ def test_availability_deferred_evaluation_preserves_last_trusted_snapshot(tmp_pa
     song_services.validate_source_asset(song=song, asset=asset)
     song.refresh_from_db()
     trusted_fingerprint = song.source_receipt_fingerprint
+    before_apply = song.updated_at
 
     class TemporarilyUnavailableBackend:
         def stat(self, _object_key):
@@ -384,6 +389,28 @@ def test_availability_deferred_evaluation_preserves_last_trusted_snapshot(tmp_pa
     song.refresh_from_db()
     assert song.source_available is True
     assert song.source_receipt_fingerprint == trusted_fingerprint
+    assert song.updated_at == before_apply
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_availability_deterministic_clear_updates_song_timestamp(tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song, asset = song_with_source()
+    song_services.validate_source_asset(song=song, asset=asset)
+    song.refresh_from_db()
+    before_apply = song.updated_at
+    MediaAsset.objects.filter(pk=asset.id).update(status="failed")
+    song = Song.objects.select_related("source_asset").get(pk=song.id)
+    evaluation = song_services.evaluate_song_source_availability(song)
+
+    assert evaluation.outcome == "unavailable"
+    assert song_services.apply_song_availability_evaluations([evaluation]) == {
+        "verified": 0, "unavailable": 1, "deferred": 0, "processed": 1,
+    }
+    song.refresh_from_db()
+    assert song.source_available is False
+    assert song.updated_at > before_apply
 
 
 @pytest.mark.django_db

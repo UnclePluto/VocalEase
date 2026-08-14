@@ -1,8 +1,10 @@
 import io
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import timedelta
 from time import sleep
-from threading import Barrier, Event
+from threading import Barrier, Event, Lock
 from uuid import uuid4
 
 import pytest
@@ -20,6 +22,43 @@ from apps.songs.models import SongUploadIntent
 from apps.songs.services import SongStateConflict, publish_song, update_song
 from apps.songs import services as song_services
 from apps.analysis import services as analysis_services
+
+
+@contextmanager
+def count_postgresql_song_updates(song_id):
+    """用测试库触发器记录真实 UPDATE；跨 worker 连接可见。"""
+    suffix = uuid4().hex
+    table_name = f"test_song_update_audit_{suffix}"
+    function_name = f"test_song_update_audit_fn_{suffix}"
+    trigger_name = f"test_song_update_audit_trigger_{suffix}"
+    with connection.cursor() as cursor:
+        cursor.execute(f'CREATE TABLE "{table_name}" (song_id uuid NOT NULL)')
+        cursor.execute(
+            f'''CREATE FUNCTION "{function_name}"() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO "{table_name}" (song_id) VALUES (NEW.id);
+                RETURN NEW;
+            END;
+            $$'''
+        )
+        cursor.execute(
+            f'''CREATE TRIGGER "{trigger_name}" AFTER UPDATE ON "songs_song"
+            FOR EACH ROW WHEN (NEW.id = '{song_id}'::uuid)
+            EXECUTE FUNCTION "{function_name}"()'''
+        )
+
+    def update_count():
+        with connection.cursor() as cursor:
+            cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+            return cursor.fetchone()[0]
+
+    try:
+        yield update_count
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}" ON "songs_song"')
+            cursor.execute(f'DROP FUNCTION IF EXISTS "{function_name}"()')
+            cursor.execute(f'DROP TABLE IF EXISTS "{table_name}"')
 
 
 @pytest.mark.postgresql
@@ -259,16 +298,25 @@ def test_postgresql_duplicate_scan_batch_commits_and_chains_once(tmp_path, setti
         language="中文", duration_seconds=1, source_asset=asset,
         source_available=False,
     )
-    barrier = Barrier(2)
+    evaluation_barrier = Barrier(2)
+    evaluation_lock = Lock()
+    evaluation_times = []
     dispatched = []
+    real_evaluate_page = song_services.evaluate_song_availability_page
 
-    class BarrierAfterRealStat:
-        def stat(self, object_key):
-            metadata = backend.stat(object_key)
-            barrier.wait(timeout=5)
-            return metadata
+    def synchronized_real_evaluation(**kwargs):
+        page = real_evaluate_page(**kwargs)
+        with evaluation_lock:
+            ordinal = len(evaluation_times) + 1
+            distinct_time = timezone.now() + timedelta(microseconds=ordinal)
+            evaluation_times.append(distinct_time)
+        item = page.evaluations[0]
+        snapshot = {**item.new_snapshot, "source_verified_at": distinct_time}
+        page = replace(page, evaluations=(replace(item, new_snapshot=snapshot),))
+        evaluation_barrier.wait(timeout=5)
+        return page
 
-    monkeypatch.setattr(song_services, "backend_for_asset", lambda _asset: BarrierAfterRealStat())
+    monkeypatch.setattr(song_services, "evaluate_song_availability_page", synchronized_real_evaluation)
     assert song_services.start_song_availability_scan(
         batch_size=1,
         dispatcher=lambda *args: dispatched.append(args),
@@ -288,13 +336,17 @@ def test_postgresql_duplicate_scan_batch_commits_and_chains_once(tmp_path, setti
         finally:
             connections.close_all()
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        statuses = list(pool.map(lambda _index: run_duplicate(), range(2)))
+    with count_postgresql_song_updates(song.id) as update_count:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = list(pool.map(lambda _index: run_duplicate(), range(2)))
+        assert update_count() == 1
 
     assert sorted(statuses) == ["continued", "stale_batch"]
     state = song_services.SongAvailabilityScanState.objects.get(pk=1)
     song.refresh_from_db()
     assert song.source_available is True
+    assert len(set(evaluation_times)) == 2
+    assert song.source_verified_at in evaluation_times
     assert state.stats["processed"] == 1
     assert state.cursor == song.id
     assert len(dispatched) == 1
@@ -402,37 +454,40 @@ def test_postgresql_expired_scan_takeover_preserves_new_trusted_song_snapshot(tm
         finally:
             connections.close_all()
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(old_worker)
-        assert stat_finished.wait(timeout=5)
-        # 旧 worker 已完成真实 stat，但尚未返回；同一资产此时发布一个新的真实可信回执。
-        replacement = b"availability-updated"
-        prepared_replacement = backend._prepare_stream(
-            object_key=asset.object_key, stream=io.BytesIO(replacement), mime=asset.mime,
-            asset_id=asset.id, expected_size=len(replacement),
-        )
-        published_replacement = backend.publish_manifest(
-            prepared_replacement, expected_generation=asset.manifest_generation,
-        )
-        backend.finalize_publish(published_replacement)
-        asset.__class__.objects.filter(pk=asset.id).update(
-            size=len(replacement), sha256=prepared_replacement.sha256,
-            manifest_generation=prepared_replacement.generation,
-        )
-        song_services.SongAvailabilityScanState.objects.update(
-            lease_expires_at=timezone.now() - timedelta(seconds=1),
-        )
-        assert song_services.start_song_availability_scan(
-            batch_size=100, dispatcher=lambda *args: new_messages.append(args),
-        )
-        new = new_messages.pop()
-        token, batch_size, batch_token, batch_version = new
-        assert song_services.run_song_availability_scan_batch(
-            token, batch_size=batch_size, batch_token=batch_token,
-            batch_version=batch_version, dispatcher=lambda *args: new_messages.append(args),
-        )["status"] == "completed"
-        release.set()
-        assert future.result(timeout=5) == "stale_batch"
+    with count_postgresql_song_updates(song.id) as update_count:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(old_worker)
+            assert stat_finished.wait(timeout=5)
+            # 旧 worker 已完成真实 stat，但尚未返回；同一资产此时发布一个新的真实可信回执。
+            replacement = b"availability-updated"
+            prepared_replacement = backend._prepare_stream(
+                object_key=asset.object_key, stream=io.BytesIO(replacement), mime=asset.mime,
+                asset_id=asset.id, expected_size=len(replacement),
+            )
+            published_replacement = backend.publish_manifest(
+                prepared_replacement, expected_generation=asset.manifest_generation,
+            )
+            backend.finalize_publish(published_replacement)
+            asset.__class__.objects.filter(pk=asset.id).update(
+                size=len(replacement), sha256=prepared_replacement.sha256,
+                manifest_generation=prepared_replacement.generation,
+            )
+            song_services.SongAvailabilityScanState.objects.update(
+                lease_expires_at=timezone.now() - timedelta(seconds=1),
+            )
+            assert song_services.start_song_availability_scan(
+                batch_size=100, dispatcher=lambda *args: new_messages.append(args),
+            )
+            new = new_messages.pop()
+            token, batch_size, batch_token, batch_version = new
+            assert song_services.run_song_availability_scan_batch(
+                token, batch_size=batch_size, batch_token=batch_token,
+                batch_version=batch_version, dispatcher=lambda *args: new_messages.append(args),
+            )["status"] == "completed"
+            winner_updated_at = Song.objects.get(pk=song.id).updated_at
+            release.set()
+            assert future.result(timeout=5) == "stale_batch"
+        assert update_count() == 1
 
     song.refresh_from_db()
     asset.refresh_from_db()
@@ -441,6 +496,7 @@ def test_postgresql_expired_scan_takeover_preserves_new_trusted_song_snapshot(tm
     assert song.source_verified_asset_id == asset.id
     assert song.source_verified_generation == prepared_replacement.generation
     assert song.source_receipt_fingerprint == song_services.source_receipt_fingerprint(asset)
+    assert song.updated_at == winner_updated_at
     assert state.stats["processed"] == 1
     assert state.stats["verified"] == 1
     assert state.cursor is None

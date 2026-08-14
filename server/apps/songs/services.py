@@ -448,7 +448,7 @@ def _apply_song_availability_evaluations_locked(
         if item.new_snapshot is not None:
             Song.objects.filter(
                 pk=song.id, source_asset_id=item.expected_source_asset_id,
-            ).update(**item.new_snapshot)
+            ).update(**item.new_snapshot, updated_at=timezone.now())
         stats[item.outcome] += 1
         stats["processed"] += 1
     return stats
