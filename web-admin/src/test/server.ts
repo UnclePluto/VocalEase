@@ -6,6 +6,7 @@ import type { AuthPayload } from '../api/types'
 type RecordedCall = {
   method: string
   path: string
+  search: string
   headers: Headers
   json?: unknown
 }
@@ -32,6 +33,7 @@ async function recordRequest(input: RequestInfo | URL, init?: RequestInit) {
   const entry: RecordedCall = {
     method: target.method,
     path: new URL(target.url).pathname,
+    search: new URL(target.url).search,
     headers: new Headers(target.headers),
   }
   const body = await target.clone().text()
@@ -72,7 +74,7 @@ export const server = {
     return path ? calls.filter((call) => call.path === path) : [...calls]
   },
   lastJson(path: string) {
-    return calls.filter((call) => call.path === path).at(-1)?.json
+    return calls.filter((call) => call.path === path && call.json !== undefined).at(-1)?.json
   },
   queueExportStates(...states: unknown[]) {
     exportStates.push(...states)

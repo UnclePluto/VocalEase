@@ -5,6 +5,10 @@ import { ConfigProvider } from 'antd'
 import { AuthBootstrap } from '../auth/guards'
 import { antdTheme } from '../styles/tokens'
 
+const appTheme = import.meta.env.MODE === 'test'
+  ? { ...antdTheme, token: { ...antdTheme.token, motion: false } }
+  : antdTheme
+
 export function AppProviders({ children }: { children: ReactNode }) {
   const [queryClient] = useState(() => new QueryClient({
     defaultOptions: {
@@ -13,7 +17,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     },
   }))
   return (
-    <ConfigProvider theme={antdTheme}>
+    <ConfigProvider theme={appTheme}>
       <QueryClientProvider client={queryClient}>
         <AuthBootstrap>{children}</AuthBootstrap>
       </QueryClientProvider>

@@ -11,6 +11,8 @@ from apps.audit.models import AuditLog
 from apps.doctors.models import SequenceCounter
 from apps.doctors.services import create_doctor, soft_delete_doctor
 from apps.patients.models import PatientProfile, TreatmentPlan
+from apps.patients.selectors import patients_for_list
+from apps.patients.serializers import PatientReadSerializer
 from apps.patients.services import (
     create_patient,
     create_treatment_plan,
@@ -144,6 +146,61 @@ def test_patient_list_supports_filters_and_pagination(api_client, admin_user, pa
     assert body["results"][0]["name"] == "患者乙"
     assert body["page"] == 1
     assert body["page_size"] == 1
+
+
+@pytest.mark.django_db
+def test_patient_list_filters_real_treatment_status(api_client, admin_user, patient, doctor):
+    patient.treatment_plans.update(status=TreatmentPlan.Status.ACTIVE)
+    create_patient(
+        name="待开始患者", gender="male", enrollment_age=33, phone="13500000004",
+        doctor=doctor, start_date="2026-01-01", cycle_weeks=1,
+    )
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.get("/api/v1/admin/patients/?status=active")
+
+    body = response.json()["data"]
+    assert body["count"] == 1
+    assert body["results"][0]["id"] == str(patient.id)
+    assert body["results"][0]["user_id"] == str(patient.user_id)
+    assert body["results"][0]["treatment_plan"]["status"] == "active"
+
+
+@pytest.mark.django_db
+def test_patient_status_filter_matches_the_current_plan(api_client, admin_user, patient):
+    patient.treatment_plans.update(status=TreatmentPlan.Status.ACTIVE)
+    create_treatment_plan(
+        patient=patient,
+        start_date="2026-03-01",
+        cycle_weeks=4,
+        status=TreatmentPlan.Status.PENDING,
+    )
+    api_client.force_authenticate(admin_user)
+
+    active = api_client.get("/api/v1/admin/patients/?status=active")
+    pending = api_client.get("/api/v1/admin/patients/?status=pending")
+
+    assert active.status_code == 200
+    assert active.json()["data"]["count"] == 0
+    assert pending.status_code == 200
+    assert pending.json()["data"]["count"] == 1
+    assert pending.json()["data"]["results"][0]["treatment_plan"]["status"] == "pending"
+
+
+@pytest.mark.django_db
+def test_patient_list_serialization_uses_prefetched_plans_without_n_plus_one(
+    doctor, patient, django_assert_num_queries
+):
+    create_patient(
+        name="患者乙", gender="male", enrollment_age=33, phone="13500000004",
+        doctor=doctor, start_date="2026-02-01", cycle_weeks=2,
+    )
+    patients = list(patients_for_list())
+
+    with django_assert_num_queries(0):
+        data = PatientReadSerializer(patients, many=True).data
+
+    assert len(data) == 2
 
 
 @pytest.mark.django_db

@@ -6,6 +6,8 @@ import { AnonymousOnly, RequireAuth, RequirePasswordChange, RequirePasswordChang
 const LoginPage = lazy(() => import('../features/auth/LoginPage').then((module) => ({ default: module.LoginPage })))
 const ChangePasswordPage = lazy(() => import('../features/auth/ChangePasswordPage').then((module) => ({ default: module.ChangePasswordPage })))
 const AdminLayout = lazy(() => import('../layouts/AdminLayout').then((module) => ({ default: module.AdminLayout })))
+const DoctorListPage = lazy(() => import('../features/doctors/DoctorListPage').then((module) => ({ default: module.DoctorListPage })))
+const PatientListPage = lazy(() => import('../features/patients/PatientListPage').then((module) => ({ default: module.PatientListPage })))
 
 function Suspended({ children }: { children: ReactNode }) {
   return <Suspense fallback={<div className="route-loading" role="status">页面加载中</div>}>{children}</Suspense>
@@ -33,8 +35,8 @@ export const appRoutes: RouteObject[] = [
           {
             element: <Suspended><AdminLayout /></Suspended>,
             children: [
-              { path: '/doctors', element: <Placeholder title="医生管理" /> },
-              { path: '/patients', element: <Placeholder title="病人管理" /> },
+              { path: '/doctors', element: <Suspended><DoctorListPage /></Suspended> },
+              { path: '/patients', element: <Suspended><PatientListPage /></Suspended> },
               { path: '/songs', element: <Placeholder title="曲库管理" /> },
               { path: '/patient-data', element: <Placeholder title="病人数据" /> },
               { path: '/analytics', element: <Placeholder title="数据管理" /> },

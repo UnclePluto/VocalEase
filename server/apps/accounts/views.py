@@ -17,7 +17,11 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.audit.services import record
-from common.api.permissions import MustChangePasswordPermission, SystemAdminPermission
+from common.api.permissions import (
+    IsAdminNamespaceUser,
+    MustChangePasswordPermission,
+    SystemAdminPermission,
+)
 
 from .serializers import (
     AccountSnapshotSerializer,
@@ -26,7 +30,7 @@ from .serializers import (
     LogoutSerializer,
     RefreshSerializer,
 )
-from .models import User
+from .models import Role, User
 from .services import change_password, login, reset_password
 from .tokens import ActiveUserJWTAuthentication, revoke_refresh_token, rotate_refresh_token
 
@@ -263,12 +267,23 @@ class AdminMeView(APIView):
 
 
 class AdminResetPasswordView(APIView):
-    permission_classes = [IsAuthenticated, MustChangePasswordPermission, SystemAdminPermission]
+    permission_classes = [IsAuthenticated, MustChangePasswordPermission, IsAdminNamespaceUser]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_reset_password"
 
     def post(self, request, user_id):
         target = get_object_or_404(User, pk=user_id, deleted_at__isnull=True)
+        if request.user.role == Role.DOCTOR:
+            if target.pk == request.user.pk:
+                raise PermissionDenied(
+                    "医生不能通过后台为自己重置密码",
+                    code="password_reset_self_forbidden",
+                )
+            if target.role == Role.SYSTEM_ADMIN:
+                raise PermissionDenied(
+                    "医生不能重置系统管理员密码",
+                    code="password_reset_target_forbidden",
+                )
         reset_password(
             actor=request.user,
             user=target,

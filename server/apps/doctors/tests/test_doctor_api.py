@@ -145,6 +145,35 @@ def test_doctor_list_supports_keyword_filter_and_pagination(api_client, admin_us
 
 
 @pytest.mark.django_db
+def test_doctor_list_exposes_account_identity_and_filters_status(api_client, admin_user, doctor):
+    inactive = create_doctor(
+        name="停用医生", gender="female", phone="13800000005", department="康复科", title="医师"
+    )
+    inactive.user.is_active = False
+    inactive.user.save(update_fields=["is_active"])
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.get("/api/v1/admin/doctors/?status=inactive")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["count"] == 1
+    assert body["results"] == [
+        {
+            "id": str(inactive.id),
+            "user_id": str(inactive.user_id),
+            "employee_no": inactive.employee_no,
+            "name": "停用医生",
+            "gender": "female",
+            "phone": "13800000005",
+            "department": "康复科",
+            "title": "医师",
+            "status": "inactive",
+        }
+    ]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(("query", "field"), [("page=not-a-number", "page"), ("page_size=0", "page_size")])
 def test_doctor_list_rejects_invalid_pagination(api_client, admin_user, query, field):
     api_client.force_authenticate(admin_user)

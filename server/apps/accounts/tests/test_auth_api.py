@@ -647,8 +647,13 @@ def test_system_admin_can_reset_user_password_through_throttled_http_api(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("role", [Role.DOCTOR, Role.PATIENT])
-def test_non_system_admin_cannot_call_password_reset_api(api_client, doctor_user, role):
+@pytest.mark.parametrize(
+    ("role", "expected_status"),
+    [(Role.DOCTOR, 200), (Role.PATIENT, 403)],
+)
+def test_backoffice_roles_follow_password_reset_permissions(
+    api_client, doctor_user, role, expected_status
+):
     actor = User.objects.create_user(
         login_id=f"reset-actor-{role}", password="888888", role=role,
         must_change_password=False,
@@ -659,7 +664,40 @@ def test_non_system_admin_cannot_call_password_reset_api(api_client, doctor_user
         f"/api/v1/admin/users/{doctor_user.id}/reset-password/", format="json"
     )
 
-    assert response.status_code == 403
+    assert response.status_code == expected_status
+
+
+@pytest.mark.django_db
+def test_doctor_can_reset_patient_but_not_system_admin_or_self(api_client):
+    actor = User.objects.create_user(
+        login_id="reset-doctor", password="888888", role=Role.DOCTOR,
+        must_change_password=False,
+    )
+    patient = User.objects.create_user(
+        login_id="reset-patient", password="888888", role=Role.PATIENT,
+        must_change_password=False,
+    )
+    administrator = User.objects.create_user(
+        login_id="reset-admin", password="888888", role=Role.SYSTEM_ADMIN,
+        must_change_password=False,
+    )
+    api_client.force_authenticate(actor)
+
+    allowed = api_client.post(
+        f"/api/v1/admin/users/{patient.id}/reset-password/", format="json"
+    )
+    forbidden_admin = api_client.post(
+        f"/api/v1/admin/users/{administrator.id}/reset-password/", format="json"
+    )
+    forbidden_self = api_client.post(
+        f"/api/v1/admin/users/{actor.id}/reset-password/", format="json"
+    )
+
+    assert allowed.status_code == 200
+    assert forbidden_admin.status_code == 403
+    assert forbidden_admin.json()["code"] == "password_reset_target_forbidden"
+    assert forbidden_self.status_code == 403
+    assert forbidden_self.json()["code"] == "password_reset_self_forbidden"
 
 
 @pytest.mark.django_db

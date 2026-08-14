@@ -23,11 +23,19 @@ export function AuthBootstrap({ children }: { children: ReactNode }) {
 
 export function RequireAuth() {
   const status = useAuthStore((state) => state.status)
+  const role = useAuthStore((state) => state.user?.role)
   const location = useLocation()
+  if (status === 'authenticated' && role === 'patient') return <RejectPatientAccount />
   if (status !== 'authenticated') {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
   return <Outlet />
+}
+
+function RejectPatientAccount() {
+  const reset = useAuthStore((state) => state.reset)
+  useEffect(() => reset(), [reset])
+  return null
 }
 
 export function RequirePasswordChanged() {

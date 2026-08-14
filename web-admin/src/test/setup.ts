@@ -39,6 +39,15 @@ Object.defineProperty(window, 'matchMedia', {
   }),
 })
 
+class TestResizeObserver implements ResizeObserver {
+  disconnect() {}
+  observe() {}
+  unobserve() {}
+}
+
+Object.defineProperty(window, 'ResizeObserver', { configurable: true, value: TestResizeObserver })
+Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: TestResizeObserver })
+
 beforeAll(() => server.listen())
 afterEach(() => {
   cleanup()
