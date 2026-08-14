@@ -387,6 +387,43 @@ describe('后台认证', () => {
     await expect(resource).rejects.toMatchObject({ code: 'session_changed' })
   })
 
+  it('新登录发生在旧响应体读取期间时拒绝旧 JSON body', async () => {
+    useAuthStore.setState({
+      accessToken: 'old-access',
+      user: { login_id: 'old-doctor', role: 'doctor', must_change_password: false },
+      status: 'authenticated',
+    })
+    const delayed = server.useDeferredBodyResource()
+    const resource = apiRequest('/v1/admin/deferred-body/')
+    await delayed.readStarted
+    server.useLogin({
+      access: 'new-access', refresh_expires_at: '2026-09-15T00:00:00Z',
+      user: { login_id: 'new-doctor', role: 'doctor', must_change_password: false },
+    })
+
+    await useAuthStore.getState().login({ login_id: 'new-doctor', password: 'new-password', remember_me: false })
+    delayed.release()
+
+    await expect(resource).rejects.toMatchObject({ code: 'session_changed' })
+  })
+
+  it('退出发生在旧响应体读取期间时拒绝旧 JSON body', async () => {
+    useAuthStore.setState({
+      accessToken: 'old-access',
+      user: { login_id: 'old-doctor', role: 'doctor', must_change_password: false },
+      status: 'authenticated',
+    })
+    const delayed = server.useDeferredBodyResource()
+    server.useLogout()
+    const resource = apiRequest('/v1/admin/deferred-body/')
+    await delayed.readStarted
+
+    await useAuthStore.getState().logout()
+    delayed.release()
+
+    await expect(resource).rejects.toMatchObject({ code: 'session_changed' })
+  })
+
   it('新登录后拒绝旧会话401刷新重放的延迟成功响应', async () => {
     useAuthStore.setState({
       accessToken: 'expired-access',

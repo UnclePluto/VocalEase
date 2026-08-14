@@ -205,6 +205,24 @@ export const server = {
     }))
     return { started, release }
   },
+  useDeferredBodyResource() {
+    let markReadStarted: () => void = () => undefined
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        markReadStarted()
+        await gate
+        controller.enqueue(new TextEncoder().encode(JSON.stringify(envelope({ source: 'stale-body' }))))
+        controller.close()
+      },
+    })
+    mockServer.use(http.get('/api/v1/admin/deferred-body/', () => new HttpResponse(stream, {
+      headers: { 'content-type': 'application/json' },
+    })))
+    return { readStarted, release }
+  },
   useUnauthorizedThenDeferredResource() {
     let attempt = 0
     let markReplayStarted: () => void = () => undefined

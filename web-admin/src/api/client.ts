@@ -84,9 +84,50 @@ function fieldErrorsFrom(data: unknown): FieldErrors | undefined {
   return data as FieldErrors
 }
 
-async function parseResponse<T>(response: Response): Promise<T> {
-  const requestId = response.headers.get('x-request-id') ?? ''
-  const contentType = response.headers.get('content-type') ?? ''
+export type FencedResponse = {
+  readonly status: number
+  readonly ok: boolean
+  readonly headers: Headers
+  readonly contentType: string
+  readonly requestId: string
+  json: <T = unknown>() => Promise<T>
+  blob: () => Promise<Blob>
+  arrayBuffer: () => Promise<ArrayBuffer>
+  text: () => Promise<string>
+}
+
+function fencedResponse(response: Response, signal: AbortSignal | null | undefined, assertSessionIsCurrent: () => void): FencedResponse {
+  const readBody = async <T>(reader: () => Promise<T>): Promise<T> => {
+    assertSessionIsCurrent()
+    try {
+      const body = await reader()
+      assertSessionIsCurrent()
+      return body
+    } catch (error) {
+      assertSessionIsCurrent()
+      if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+        throw new ApiError('request_aborted', '请求已取消')
+      }
+      if (error instanceof TypeError) throw new ApiError('network_error', '网络连接失败，请稍后重试')
+      throw error
+    }
+  }
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: new Headers(response.headers),
+    contentType: response.headers.get('content-type') ?? '',
+    requestId: response.headers.get('x-request-id') ?? '',
+    json: <T = unknown>() => readBody(() => response.json() as Promise<T>),
+    blob: () => readBody(() => response.blob()),
+    arrayBuffer: () => readBody(() => response.arrayBuffer()),
+    text: () => readBody(() => response.text()),
+  }
+}
+
+async function parseResponse<T>(response: FencedResponse): Promise<T> {
+  const requestId = response.requestId
+  const contentType = response.contentType
   if (!contentType.toLowerCase().includes('application/json')) {
     if (response.ok) return undefined as T
     throw new ApiError('http_error', '服务暂时不可用', requestId, undefined, response.status)
@@ -94,8 +135,9 @@ async function parseResponse<T>(response: Response): Promise<T> {
 
   let payload: ApiEnvelope<T>
   try {
-    payload = (await response.json()) as ApiEnvelope<T>
-  } catch {
+    payload = await response.json<ApiEnvelope<T>>()
+  } catch (error) {
+    if (error instanceof ApiError) throw error
     throw new ApiError('invalid_response', '服务响应格式异常', requestId, undefined, response.status)
   }
 
@@ -116,7 +158,7 @@ async function fetchApiResponse(
   init: RequestInit,
   accessToken: string | null,
   sessionFence?: () => void,
-): Promise<Response> {
+): Promise<FencedResponse> {
   let response: Response
   try {
     response = await fetch(`${API_PREFIX}${path}`, {
@@ -130,8 +172,9 @@ async function fetchApiResponse(
     }
     throw new ApiError('network_error', '网络连接失败，请稍后重试')
   }
-  sessionFence?.()
-  return response
+  const assertSessionIsCurrent = sessionFence ?? (() => undefined)
+  assertSessionIsCurrent()
+  return fencedResponse(response, init.signal, assertSessionIsCurrent)
 }
 
 async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
@@ -174,7 +217,7 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
   return flight.promise
 }
 
-export async function apiRawRequest(path: string, init: RequestInit = {}): Promise<Response> {
+export async function apiRawRequest(path: string, init: RequestInit = {}): Promise<FencedResponse> {
   const started = bridge.getSession()
   const requiresSessionFence = !path.startsWith(AUTH_PREFIX)
   const assertSessionIsCurrent = () => {
@@ -218,6 +261,29 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const data = await parseResponse<T>(response)
   if (!path.startsWith(AUTH_PREFIX) && bridge.getSession().epoch !== started.epoch) throw sessionChanged()
   return data
+}
+
+export async function sessionFencedFetch(url: string, init: RequestInit = {}): Promise<FencedResponse> {
+  const startedEpoch = bridge.getSession().epoch
+  const assertSessionIsCurrent = () => {
+    if (bridge.getSession().epoch !== startedEpoch) throw sessionChanged()
+  }
+  const headers = new Headers(init.headers)
+  headers.delete('authorization')
+  headers.delete('cookie')
+  headers.delete('x-csrftoken')
+  let response: Response
+  try {
+    response = await fetch(url, { ...init, credentials: 'omit', headers })
+  } catch (error) {
+    assertSessionIsCurrent()
+    if (init.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+      throw new ApiError('request_aborted', '请求已取消')
+    }
+    throw new ApiError('network_error', '网络连接失败，请稍后重试')
+  }
+  assertSessionIsCurrent()
+  return fencedResponse(response, init.signal, assertSessionIsCurrent)
 }
 
 export async function refreshSession(expectedEpoch: number): Promise<AuthPayload> {

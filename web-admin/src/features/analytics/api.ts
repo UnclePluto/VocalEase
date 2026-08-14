@@ -1,10 +1,10 @@
-import { apiRawRequest, apiRequest } from '../../api/client'
+import { apiRawRequest, apiRequest, sessionFencedFetch, type FencedResponse } from '../../api/client'
 import { ApiError } from '../../api/errors'
 import type { AnalyticsFilters, AnalyticsQuery, DashboardMetrics, ExportFormat, ExportJob, ExportPrivateUrl, PatientMetricsPage } from './types'
 
 export const analyticsKeys = {
-  dashboard: () => ['analytics', 'dashboard'] as const,
-  patients: (query: AnalyticsQuery) => ['analytics', 'patients', query] as const,
+  dashboard: (epoch: number) => ['analytics', 'dashboard', epoch] as const,
+  patients: (query: AnalyticsQuery, epoch: number) => ['analytics', 'patients', query, epoch] as const,
   export: (jobId: string, epoch: number) => ['analytics', 'export', jobId, epoch] as const,
   privateUrl: (jobId: string, epoch: number) => ['analytics', 'private-url', jobId, epoch] as const,
 }
@@ -27,21 +27,41 @@ export function getExportJob(id: string, signal?: AbortSignal) { return apiReque
 export function getExportPrivateUrl(id: string, signal?: AbortSignal) { return apiRequest<ExportPrivateUrl>(`/v1/admin/analytics/exports/${id}/private-url/`, { method: 'POST', signal }) }
 
 export type CreateExportInput = { format: ExportFormat; filters: AnalyticsFilters; selected_ids: string[]; idempotency_key: string }
-export type ExportResult = { mode: 'sync'; response: Response } | { mode: 'async'; job: ExportJob }
+export type ExportResult = { mode: 'sync'; response: FencedResponse } | { mode: 'async'; job: ExportJob }
 
 export async function createExport(input: CreateExportInput, signal?: AbortSignal): Promise<ExportResult> {
   const response = await apiRawRequest('/v1/admin/analytics/exports/', {
     method: 'POST', signal,
     body: JSON.stringify({ format: input.format, filters: payloadFilters(input.filters), selected_ids: input.selected_ids, idempotency_key: input.idempotency_key }),
   })
-  const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+  const contentType = response.contentType.toLowerCase()
   if (!contentType.includes('application/json')) return { mode: 'sync', response }
   try {
-    const envelope = await response.json() as { data?: ExportJob }
+    const envelope = await response.json<{ data?: ExportJob }>()
     if (!envelope.data?.id) throw new Error('invalid')
     return { mode: 'async', job: envelope.data }
-  } catch {
-    throw new ApiError('invalid_response', '服务响应格式异常', response.headers.get('x-request-id') ?? '', undefined, response.status)
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    throw new ApiError('invalid_response', '服务响应格式异常', response.requestId, undefined, response.status)
+  }
+}
+
+export async function downloadExportFile(url: string, format: ExportFormat, signal?: AbortSignal) {
+  const response = await sessionFencedFetch(url, { signal })
+  if (!response.ok) {
+    const authorizationExpired = response.status === 401 || response.status === 403 || response.status === 410
+    throw new ApiError(
+      authorizationExpired ? 'download_authorization_expired' : 'download_failed',
+      authorizationExpired ? '下载地址已失效' : '文件下载失败',
+      response.requestId,
+      undefined,
+      response.status,
+    )
+  }
+  const blob = await response.blob()
+  return {
+    blob,
+    filename: safeDownloadFilename(response.headers.get('content-disposition'), `vocaease-export.${format}`),
   }
 }
 

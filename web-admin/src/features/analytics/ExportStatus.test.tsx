@@ -14,6 +14,31 @@ function authenticate() {
   useAuthStore.setState({ accessToken: 'valid', user: { login_id: 'A000001', role: 'system_admin', must_change_password: false }, status: 'authenticated' })
 }
 
+function dashboardHandlers() {
+  return [
+    http.get('/api/v1/admin/analytics/dashboard/', () => HttpResponse.json(envelope({ metric_version: '1.0', active_patient_count: 0, completed_session_count: 0, average_score: null, average_burp_count: null, is_mock: false }))),
+    http.get('/api/v1/admin/analytics/patients/', () => HttpResponse.json(envelope({ metric_version: '1.0', count: 0, page: 1, page_size: 20, results: [] }))),
+    http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 20, results: [] }))),
+  ]
+}
+
+function readyJob(overrides: Record<string, unknown> = {}) {
+  return { id: jobId, format: 'csv', status: 'ready', count: 1, failure_reason: '', expires_at: '2026-09-01T00:00:00Z', result_asset_id: 'asset', ...overrides }
+}
+
+function deferredBody() {
+  let release!: () => void
+  const wait = new Promise<void>((resolve) => { release = resolve })
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      await wait
+      controller.enqueue(new TextEncoder().encode('export-bytes'))
+      controller.close()
+    },
+  })
+  return { stream, release }
+}
+
 describe('异步导出状态', () => {
   it('仅轮询 pending/processing，ready 后获取私有地址并下载，同时从 URL 恢复 job', async () => {
     authenticate()
@@ -24,6 +49,7 @@ describe('异步导出状态', () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
     const states = ['pending', 'processing', 'ready']
     server.use(
+      http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 20, results: [] }))),
       http.get('/api/v1/admin/analytics/dashboard/', () => HttpResponse.json(envelope({ metric_version: '1.0', active_patient_count: 0, completed_session_count: 0, average_score: null, average_burp_count: null, is_mock: false }))),
       http.get('/api/v1/admin/analytics/patients/', () => HttpResponse.json(envelope({ metric_version: '1.0', count: 0, page: 1, page_size: 20, results: [] }))),
       http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => HttpResponse.json(envelope({ id: jobId, format: 'xlsx', status: states.shift() ?? 'ready', count: 1001, failure_reason: '', expires_at: '2026-09-01T00:00:00Z', result_asset_id: 'asset' }))),
@@ -48,6 +74,7 @@ describe('异步导出状态', () => {
     authenticate()
     let privateAttempts = 0
     server.use(
+      http.get('/api/v1/admin/doctors/', () => HttpResponse.json(envelope({ count: 0, page: 1, page_size: 20, results: [] }))),
       http.get('/api/v1/admin/analytics/dashboard/', () => HttpResponse.json(envelope({ metric_version: '1.0', active_patient_count: 0, completed_session_count: 0, average_score: null, average_burp_count: null, is_mock: false }))),
       http.get('/api/v1/admin/analytics/patients/', () => HttpResponse.json(envelope({ metric_version: '1.0', count: 0, page: 1, page_size: 20, results: [] }))),
       http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => HttpResponse.json(envelope({ id: jobId, format: 'csv', status: 'ready', count: 1, failure_reason: '', expires_at: '2026-09-01T00:00:00Z', result_asset_id: 'asset' }))),
@@ -63,5 +90,108 @@ describe('异步导出状态', () => {
     expect(screen.getByText('请求编号：private-request')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '重试获取下载地址' }))
     expect(await screen.findByRole('button', { name: '下载文件' })).toBeInTheDocument()
+  })
+
+  it('外部文件响应体读取期间换账号后拒绝旧结果，且请求不携带认证与 Cookie', async () => {
+    authenticate()
+    const body = deferredBody()
+    const createUrl = vi.fn(() => 'blob:must-not-exist')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl })
+    server.use(
+      ...dashboardHandlers(),
+      http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => HttpResponse.json(envelope(readyJob()))),
+      http.post(`/api/v1/admin/analytics/exports/${jobId}/private-url/`, () => HttpResponse.json(envelope({ url: 'https://private.example/delayed.csv', expires_at: '2026-08-16T00:00:00Z' }))),
+      http.get('https://private.example/delayed.csv', ({ request }) => {
+        expect(request.headers.get('authorization')).toBeNull()
+        expect(request.headers.get('cookie')).toBeNull()
+        return new HttpResponse(body.stream, { headers: { 'content-type': 'text/csv' } })
+      }),
+    )
+    const user = userEvent.setup(); renderApp(`/analytics?export_job=${jobId}`)
+    await user.click(await screen.findByRole('button', { name: '下载文件' }))
+    act(() => {
+      const current = useAuthStore.getState()
+      useAuthStore.setState({ accessToken: 'new-session', user: { login_id: 'A000002', role: 'system_admin', must_change_password: false }, status: 'authenticated', sessionEpoch: current.sessionEpoch + 1 })
+      body.release()
+    })
+    expect(await screen.findByText('登录状态已变更')).toBeInTheDocument()
+    expect(createUrl).not.toHaveBeenCalled()
+  })
+
+  it.each([401, 403, 410])('下载地址 %i 时只重签一次，并用新地址重试下载', async (expiredStatus) => {
+    authenticate()
+    let privateAttempts = 0
+    const createUrl = vi.fn(() => 'blob:resigned')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    server.use(
+      ...dashboardHandlers(),
+      http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => HttpResponse.json(envelope(readyJob()))),
+      http.post(`/api/v1/admin/analytics/exports/${jobId}/private-url/`, () => {
+        privateAttempts += 1
+        return HttpResponse.json(envelope({ url: `https://private.example/${privateAttempts === 1 ? 'old' : 'fresh'}.csv`, expires_at: '2026-08-16T00:00:00Z' }))
+      }),
+      http.get('https://private.example/old.csv', () => new HttpResponse(null, { status: expiredStatus })),
+      http.get('https://private.example/fresh.csv', () => new HttpResponse('fresh', { headers: { 'content-type': 'text/csv' } })),
+    )
+    const user = userEvent.setup(); renderApp(`/analytics?export_job=${jobId}`)
+    await user.click(await screen.findByRole('button', { name: '下载文件' }))
+    await waitFor(() => expect(createUrl).toHaveBeenCalledOnce())
+    expect(privateAttempts).toBe(2)
+    expect(server.calls('/old.csv')).toHaveLength(1)
+    expect(server.calls('/fresh.csv')).toHaveLength(1)
+  })
+
+  it('重签发现任务已经过期时刷新任务并显示 expired，不继续下载', async () => {
+    authenticate()
+    let jobAttempts = 0
+    let privateAttempts = 0
+    const createUrl = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl })
+    server.use(
+      ...dashboardHandlers(),
+      http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => {
+        jobAttempts += 1
+        return HttpResponse.json(envelope(readyJob(jobAttempts === 1 ? {} : { status: 'expired', failure_reason: '文件已过期' })))
+      }),
+      http.post(`/api/v1/admin/analytics/exports/${jobId}/private-url/`, () => {
+        privateAttempts += 1
+        return privateAttempts === 1
+          ? HttpResponse.json(envelope({ url: 'https://private.example/expired.csv', expires_at: '2026-08-16T00:00:00Z' }))
+          : HttpResponse.json({ code: 'export_expired', message: '导出已过期', data: null, request_id: 'expired-request' }, { status: 410 })
+      }),
+      http.get('https://private.example/expired.csv', () => new HttpResponse(null, { status: 410 })),
+    )
+    const user = userEvent.setup(); renderApp(`/analytics?export_job=${jobId}`)
+    await user.click(await screen.findByRole('button', { name: '下载文件' }))
+    expect(await screen.findByText('导出文件已过期')).toBeInTheDocument()
+    expect(jobAttempts).toBe(2)
+    expect(createUrl).not.toHaveBeenCalled()
+  })
+
+  it('网络/CORS 失败稳定显示错误，手动重试会先重签且不会复用旧地址', async () => {
+    authenticate()
+    let privateAttempts = 0
+    const createUrl = vi.fn(() => 'blob:manual-retry')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    server.use(
+      ...dashboardHandlers(),
+      http.get(`/api/v1/admin/analytics/exports/${jobId}/`, () => HttpResponse.json(envelope(readyJob()))),
+      http.post(`/api/v1/admin/analytics/exports/${jobId}/private-url/`, () => {
+        privateAttempts += 1
+        return HttpResponse.json(envelope({ url: `https://private.example/${privateAttempts === 1 ? 'cors' : 'manual-fresh'}.csv`, expires_at: '2026-08-16T00:00:00Z' }))
+      }),
+      http.get('https://private.example/cors.csv', () => HttpResponse.error()),
+      http.get('https://private.example/manual-fresh.csv', () => new HttpResponse('fresh', { headers: { 'content-type': 'text/csv' } })),
+    )
+    const user = userEvent.setup(); renderApp(`/analytics?export_job=${jobId}`)
+    await user.click(await screen.findByRole('button', { name: '下载文件' }))
+    expect(await screen.findByText('网络连接失败，请稍后重试')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '重试下载文件' }))
+    await waitFor(() => expect(createUrl).toHaveBeenCalledOnce())
+    expect(privateAttempts).toBe(2)
+    expect(server.calls('/cors.csv')).toHaveLength(1)
+    expect(server.calls('/manual-fresh.csv')).toHaveLength(1)
   })
 })

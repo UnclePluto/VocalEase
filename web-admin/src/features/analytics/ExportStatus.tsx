@@ -4,10 +4,14 @@ import { useEffect, useRef, useState } from 'react'
 
 import { ApiError } from '../../api/errors'
 import { useAuthStore } from '../../auth/store'
-import { analyticsKeys, getExportJob, getExportPrivateUrl, safeDownloadFilename, triggerBlobDownload } from './api'
+import { analyticsKeys, downloadExportFile, getExportJob, getExportPrivateUrl, triggerBlobDownload } from './api'
 import type { ExportJob } from './types'
 
 const POLL_INTERVAL_MS = 1_500
+
+class PrivateUrlRefreshFailure extends Error {
+  constructor(readonly original: unknown) { super('private_url_refresh_failed') }
+}
 
 function errorText(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -32,17 +36,36 @@ export function ExportStatus({ jobId, onClear }: { jobId: string; onClear: () =>
   })
   useEffect(() => () => abortRef.current?.abort(), [])
 
-  async function download() {
-    if (!privateUrl.data || abortRef.current) return
+  async function refreshJobAfterPrivateFailure(error: unknown) {
+    await job.refetch()
+    throw new PrivateUrlRefreshFailure(error)
+  }
+
+  async function freshPrivateUrl() {
+    const refreshed = await privateUrl.refetch()
+    if (refreshed.error) await refreshJobAfterPrivateFailure(refreshed.error)
+    if (!refreshed.data) throw new ApiError('private_url_missing', '无法获取下载地址')
+    return refreshed.data
+  }
+
+  async function download(refreshBeforeDownload = false) {
+    if ((!privateUrl.data && !refreshBeforeDownload) || abortRef.current) return
     const controller = new AbortController(); abortRef.current = controller; setDownloadError(null); setDownloading(true)
     try {
-      const response = await fetch(privateUrl.data.url, { signal: controller.signal })
-      if (!response.ok) throw new ApiError('download_failed', '文件下载失败', response.headers.get('x-request-id') ?? '', undefined, response.status)
-      const blob = await response.blob()
-      const extension = job.data?.format === 'xlsx' ? 'xlsx' : 'csv'
-      triggerBlobDownload(blob, safeDownloadFilename(response.headers.get('content-disposition'), `vocaease-export.${extension}`))
+      let address = refreshBeforeDownload ? await freshPrivateUrl() : privateUrl.data
+      if (!address) return
+      try {
+        const file = await downloadExportFile(address.url, job.data?.format ?? 'csv', controller.signal)
+        triggerBlobDownload(file.blob, file.filename)
+      } catch (error) {
+        const needsResign = error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 410)
+        if (!needsResign) throw error
+        address = await freshPrivateUrl()
+        const file = await downloadExportFile(address.url, job.data?.format ?? 'csv', controller.signal)
+        triggerBlobDownload(file.blob, file.filename)
+      }
     } catch (error) {
-      if (!controller.signal.aborted) setDownloadError(error)
+      if (!controller.signal.aborted && !(error instanceof PrivateUrlRefreshFailure)) setDownloadError(error)
     } finally { if (abortRef.current === controller) abortRef.current = null; setDownloading(false) }
   }
 
@@ -56,7 +79,7 @@ export function ExportStatus({ jobId, onClear }: { jobId: string; onClear: () =>
     <Alert type="success" showIcon title="导出文件已准备好" description={`共 ${value.count} 条数据；下载地址不会被保存。`} />
     {privateUrl.isPending ? <span role="status">正在获取下载地址</span> : null}
     {privateUrl.isError ? <Alert type="error" showIcon title={errorText(privateUrl.error, '无法获取下载地址')} description={errorDescription(privateUrl.error)} action={<Button aria-label="重试获取下载地址" onClick={() => void privateUrl.refetch()}>重试</Button>} /> : null}
-    {downloadError ? <Alert type="error" showIcon title={errorText(downloadError, '文件下载失败')} description={errorDescription(downloadError)} action={<Button aria-label="重试下载文件" onClick={() => void download()}>重试</Button>} /> : null}
+    {downloadError ? <Alert type="error" showIcon title={errorText(downloadError, '文件下载失败')} description={errorDescription(downloadError)} action={<Button aria-label="重试下载文件" onClick={() => void download(true)}>重试</Button>} /> : null}
     {privateUrl.data ? <Button type="primary" aria-label="下载文件" onClick={() => void download()} loading={downloading}>下载文件</Button> : null}
   </div>
 }
