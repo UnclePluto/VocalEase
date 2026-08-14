@@ -11,6 +11,7 @@ const PatientListPage = lazy(() => import('../features/patients/PatientListPage'
 const SongListPage = lazy(() => import('../features/songs/SongListPage').then((module) => ({ default: module.SongListPage })))
 const PatientDataPage = lazy(() => import('../features/singing/PatientDataPage').then((module) => ({ default: module.PatientDataPage })))
 const SingingDetailPage = lazy(() => import('../features/singing/SingingDetailPage').then((module) => ({ default: module.SingingDetailPage })))
+const AnalyticsPage = lazy(() => import('../features/analytics/AnalyticsPage').then((module) => ({ default: module.AnalyticsPage })))
 
 function Suspended({ children }: { children: ReactNode }) {
   return <Suspense fallback={<div className="route-loading" role="status">页面加载中</div>}>{children}</Suspense>
@@ -44,7 +45,7 @@ export const appRoutes: RouteObject[] = [
               { path: '/singing/:sessionId', element: <Suspended><SingingDetailPage /></Suspended> },
               { path: '/songs', element: <Suspended><SongListPage /></Suspended> },
               { path: '/patient-data', element: <Placeholder title="病人数据" /> },
-              { path: '/analytics', element: <Placeholder title="数据管理" /> },
+              { path: '/analytics', element: <Suspended><AnalyticsPage /></Suspended> },
             ],
           },
         ],

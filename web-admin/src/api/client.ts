@@ -111,12 +111,12 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return payload.data
 }
 
-async function fetchApi<T>(
+async function fetchApiResponse(
   path: string,
   init: RequestInit,
   accessToken: string | null,
   sessionFence?: () => void,
-): Promise<T> {
+): Promise<Response> {
   let response: Response
   try {
     response = await fetch(`${API_PREFIX}${path}`, {
@@ -131,9 +131,7 @@ async function fetchApi<T>(
     throw new ApiError('network_error', '网络连接失败，请稍后重试')
   }
   sessionFence?.()
-  const data = await parseResponse<T>(response)
-  sessionFence?.()
-  return data
+  return response
 }
 
 async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
@@ -143,7 +141,7 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
 
   const flight = {} as RefreshFlight
   flight.epoch = expectedEpoch
-  flight.promise = enqueueWebAuthMutation(() => fetchApi<AuthPayload>(
+  flight.promise = enqueueWebAuthMutation(() => fetchApiResponse(
     `${AUTH_PREFIX}refresh/`,
     {
       method: 'POST',
@@ -151,7 +149,7 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
       body: JSON.stringify({ client_kind: 'web' }),
     },
     null,
-  ))
+  ).then(async (response) => parseResponse<AuthPayload>(response)))
     .then((payload) => {
       try {
         if (!bridge.acceptAuth(payload, expectedEpoch)) throw sessionChanged()
@@ -176,14 +174,17 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
   return flight.promise
 }
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiRawRequest(path: string, init: RequestInit = {}): Promise<Response> {
   const started = bridge.getSession()
   const requiresSessionFence = !path.startsWith(AUTH_PREFIX)
   const assertSessionIsCurrent = () => {
     if (requiresSessionFence && bridge.getSession().epoch !== started.epoch) throw sessionChanged()
   }
   try {
-    return await fetchApi<T>(path, init, started.accessToken, assertSessionIsCurrent)
+    const response = await fetchApiResponse(path, init, started.accessToken, assertSessionIsCurrent)
+    if (!response.ok) await parseResponse(response)
+    assertSessionIsCurrent()
+    return response
   } catch (error) {
     assertSessionIsCurrent()
     const canRefresh =
@@ -198,7 +199,10 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     if (refreshed.epoch !== started.epoch) throw sessionChanged()
 
     try {
-      return await fetchApi<T>(path, init, refreshed.accessToken, assertSessionIsCurrent)
+      const response = await fetchApiResponse(path, init, refreshed.accessToken, assertSessionIsCurrent)
+      if (!response.ok) await parseResponse(response)
+      assertSessionIsCurrent()
+      return response
     } catch (replayError) {
       if (replayError instanceof ApiError && replayError.status === 401) {
         bridge.clearSession(started.epoch)
@@ -206,6 +210,14 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
       throw replayError
     }
   }
+}
+
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const started = bridge.getSession()
+  const response = await apiRawRequest(path, init)
+  const data = await parseResponse<T>(response)
+  if (!path.startsWith(AUTH_PREFIX) && bridge.getSession().epoch !== started.epoch) throw sessionChanged()
+  return data
 }
 
 export async function refreshSession(expectedEpoch: number): Promise<AuthPayload> {
