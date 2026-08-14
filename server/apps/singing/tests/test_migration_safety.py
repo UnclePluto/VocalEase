@@ -1,5 +1,9 @@
+import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from threading import Event
+
 import pytest
-from django.db import connection
+from django.db import DatabaseError, connection, connections
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.recorder import MigrationRecorder
@@ -104,6 +108,154 @@ def test_singing_reverse_barrier_allows_empty_or_song_only_downgrade(contents):
                 song_id, task_type = cursor.fetchone()
                 assert str(song_id).replace("-", "") == task.song_id.hex
                 assert task_type == "vocal_separation"
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+@pytest.mark.postgresql
+@pytest.mark.django_db(transaction=True, databases="__all__")
+def test_postgresql_reverse_barrier_locks_before_check_and_blocks_new_singing_task():
+    if connection.vendor != "postgresql":
+        pytest.skip("需要真实 PostgreSQL")
+    asset = MediaAsset.objects.create(
+        owner_type="system",
+        owner_id=uuid.uuid4(),
+        media_type="waveform",
+        backend="qiniu",
+        object_key=f"test/waveform/{uuid.uuid4().hex}",
+        mime="application/json",
+        size=3,
+        etag="barrier-source",
+        status="ready",
+        upload_expires_at=timezone.now(),
+    )
+    lock_acquired = Event()
+    release_migration = Event()
+    insert_entered = Event()
+
+    def migrate_back():
+        connections.close_all()
+        thread_connection = connections["default"]
+
+        def observe_lock(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "analysis_target_destructive_barrier" in sql:
+                lock_acquired.set()
+                assert release_migration.wait(10)
+            return result
+
+        with thread_connection.execute_wrapper(observe_lock):
+            MigrationExecutor(thread_connection).migrate(
+                [("analysis", "0003_analysistask_next_dispatch_at")]
+            )
+        thread_connection.close()
+
+    def insert_singing_task():
+        connections.close_all()
+        thread_connection = connections["default"]
+
+        def observe_insert(execute, sql, params, many, context):
+            if 'INSERT INTO "analysis_analysistask"' in sql:
+                insert_entered.set()
+            return execute(sql, params, many, context)
+
+        try:
+            with thread_connection.execute_wrapper(observe_insert):
+                AnalysisTask.objects.create(
+                    target_type="singing_session",
+                    target_id=uuid.uuid4(),
+                    source_asset_id=asset.id,
+                    task_type="singing_audio_metrics",
+                    executor="mock_singing",
+                    generation=0,
+                    idempotency_key=f"barrier-writer:{uuid.uuid4()}",
+                    input_snapshot={},
+                )
+        except DatabaseError:
+            return "rejected-after-schema-change"
+        finally:
+            thread_connection.close()
+        return "unexpectedly-created"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            migration_future = pool.submit(migrate_back)
+            assert lock_acquired.wait(10), "回退必须先获得数据库表锁"
+            writer_future = pool.submit(insert_singing_task)
+            assert insert_entered.wait(10)
+            with pytest.raises(FutureTimeoutError):
+                writer_future.result(timeout=0.25)
+            release_migration.set()
+            migration_future.result(timeout=20)
+            assert writer_future.result(timeout=20) == "rejected-after-schema-change"
+        with connection.cursor() as cursor:
+            assert "singing_singingsession" not in connection.introspection.table_names(cursor)
+            columns = {
+                column.name
+                for column in connection.introspection.get_table_description(
+                    cursor, "analysis_analysistask"
+                )
+            }
+        assert "target_type" not in columns
+    finally:
+        release_migration.set()
+        connections.close_all()
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+@pytest.mark.django_db(transaction=True, databases="__all__")
+def test_generation_cleanup_migration_preserves_existing_result_and_series_payloads():
+    old_targets = [
+        ("analysis", "0005_analysisresult_generation_analysistask_generation_and_more"),
+        ("singing", "0003_analysistimeseries_generation_and_more"),
+    ]
+    try:
+        executor = MigrationExecutor(connection)
+        executor.migrate(old_targets)
+        old_apps = executor.loader.project_state(old_targets).apps
+        patient, session = uploaded_session()
+        audio = session.media_bindings.get(media_type="singing_audio").asset
+        task = AnalysisTask.objects.create(
+            target_type="singing_session",
+            target_id=session.id,
+            source_asset=audio,
+            task_type="singing_audio_metrics",
+            executor="mock_singing",
+            generation=7,
+            idempotency_key=f"migration-generation:{session.id}",
+            input_snapshot={},
+        )
+        OldResult = old_apps.get_model("analysis", "AnalysisResult")
+        OldSeries = old_apps.get_model("singing", "AnalysisTimeSeries")
+        OldResult.objects.create(
+            task_id=task.id,
+            protocol_version="1.0",
+            is_mock=True,
+            generation=99,
+            payload={"kept": "result"},
+        )
+        OldSeries.objects.create(
+            session_id=session.id,
+            task_id=task.id,
+            metric_type="volume",
+            generation=99,
+            sample_interval_ms=1000,
+            values=[0.1, 0.2],
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+        from apps.analysis.models import AnalysisResult
+        from apps.singing.models import AnalysisTimeSeries
+
+        assert AnalysisResult.objects.get(task_id=task.id).payload == {"kept": "result"}
+        assert AnalysisTimeSeries.objects.get(task_id=task.id).values == [0.1, 0.2]
+        assert "generation" not in {field.name for field in AnalysisResult._meta.fields}
+        assert "generation" not in {field.name for field in AnalysisTimeSeries._meta.fields}
+        assert AnalysisTask.objects.get(pk=task.id).generation == 7
     finally:
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())

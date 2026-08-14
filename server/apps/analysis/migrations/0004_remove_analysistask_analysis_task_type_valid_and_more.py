@@ -2,11 +2,27 @@
 
 import django.db.models.deletion
 from django.db import migrations, models
+from django.db.migrations.exceptions import IrreversibleError
 
 
 def populate_song_targets(apps, schema_editor):
     AnalysisTask = apps.get_model("analysis", "AnalysisTask")
     AnalysisTask.objects.filter(song_id__isnull=False, target_id__isnull=True).update(target_type="song", target_id=models.F("song_id"))
+
+
+def guard_singing_target_downgrade(apps, schema_editor):
+    connection = schema_editor.connection
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'LOCK TABLE "analysis_analysistask" IN ACCESS EXCLUSIVE MODE '
+                '/* analysis_target_destructive_barrier */'
+            )
+    elif connection.vendor != "sqlite":
+        raise IrreversibleError("当前数据库不支持安全回退通用演唱任务")
+    AnalysisTask = apps.get_model("analysis", "AnalysisTask")
+    if AnalysisTask.objects.using(connection.alias).filter(target_type="singing_session").exists():
+        raise IrreversibleError("通用演唱任务无法无损降级")
 
 
 class Migration(migrations.Migration):
@@ -57,4 +73,5 @@ class Migration(migrations.Migration):
             model_name='analysistask',
             constraint=models.CheckConstraint(condition=models.Q(models.Q(('executor', 'mock_song'), ('song__isnull', False), ('target_id', models.F('song_id')), ('target_type', 'song'), ('task_type__in', ['vocal_separation', 'accompaniment_generation', 'lyrics_recognition'])), models.Q(('executor', 'mock_singing'), ('song__isnull', True), ('target_id__isnull', False), ('target_type', 'singing_session'), ('task_type__in', ['singing_audio_metrics', 'face_landmarks'])), _connector='OR'), name='analysis_task_target_contract_valid'),
         ),
+        migrations.RunPython(migrations.RunPython.noop, guard_singing_target_downgrade),
     ]

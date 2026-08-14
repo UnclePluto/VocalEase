@@ -147,6 +147,66 @@ def test_database_rejects_completed_session_without_mock_result_and_invalid_targ
         )
 
 
+@pytest.mark.django_db(transaction=True)
+def test_database_rejects_duplicate_singing_task_in_same_generation():
+    patient, session = uploaded_session()
+    from apps.singing.services import submit_session
+
+    submit_session(
+        session_id=session.id,
+        patient_id=patient.id,
+        idempotency_key="unique-generation",
+    )
+    original = AnalysisTask.objects.get(
+        target_id=session.id,
+        generation=0,
+        task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+    )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        AnalysisTask.objects.create(
+            target_type=original.target_type,
+            target_id=original.target_id,
+            source_asset=original.source_asset,
+            task_type=original.task_type,
+            executor=original.executor,
+            generation=original.generation,
+            idempotency_key="duplicate-generation-direct-db",
+            input_snapshot=original.input_snapshot,
+        )
+
+
+@pytest.mark.django_db
+def test_result_and_time_series_have_no_writable_generation_second_truth():
+    patient, session = uploaded_session()
+    from apps.singing.services import submit_session
+
+    task_id = submit_session(
+        session_id=session.id,
+        patient_id=patient.id,
+        idempotency_key="single-generation-truth",
+    ).task_ids[0]
+    task = AnalysisTask.objects.get(pk=task_id)
+
+    with pytest.raises(TypeError):
+        AnalysisResult(
+            task=task,
+            protocol_version="1.0",
+            is_mock=True,
+            generation=99,
+            payload={},
+        )
+    with pytest.raises(TypeError):
+        AnalysisTimeSeries(
+            session=session,
+            task=task,
+            metric_type="volume",
+            generation=99,
+            sample_interval_ms=1000,
+            values=[],
+        )
+
+
 @pytest.mark.django_db
 def test_one_failed_task_atomically_hides_and_clears_successful_generation(monkeypatch):
     patient, session = uploaded_session()
@@ -239,7 +299,7 @@ def test_retry_creates_fresh_generation_and_fences_late_previous_worker(monkeypa
     assert session.status == "completed" and session.analysis_generation == 1
     assert AnalysisResult.objects.filter(
         task__target_id=session.id,
-        generation=1,
+        task__generation=1,
     ).count() == 2
 
 

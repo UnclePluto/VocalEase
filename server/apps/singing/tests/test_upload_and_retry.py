@@ -1,10 +1,12 @@
 import io
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta, timezone as datetime_timezone
 import uuid
 
 import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
+from qiniu import Auth
 
 from apps.analysis.contracts import TransientAnalysisError
 from apps.analysis.models import AnalysisResult, AnalysisTask
@@ -14,6 +16,7 @@ from apps.singing.models import SessionMedia, SingingSession
 from apps.singing.services import submit_session
 from apps.media.backends.local import LocalStorageBackend
 from apps.media.backends.qiniu import QiniuStorageBackend
+from apps.media.contracts import StorageValidationError
 from apps.media.services import (
     MediaConflict,
     STORAGE_BACKEND_FACTORIES,
@@ -166,10 +169,15 @@ def test_qiniu_idempotent_reissue_keeps_object_deadline_and_insert_only_policy(m
     class RecordingAuth:
         def __init__(self):
             self.calls = []
+            self.signed_policies = []
 
         def upload_token(self, bucket, object_key, *, expires, policy, strict_policy):
             self.calls.append((bucket, object_key, expires, dict(policy), strict_policy))
             return f"token-{len(self.calls)}"
+
+        def token_with_data(self, data):
+            self.signed_policies.append(json.loads(data))
+            return f"reissued-token-{len(self.signed_policies)}"
 
     auth = RecordingAuth()
     backend = QiniuStorageBackend(
@@ -186,11 +194,12 @@ def test_qiniu_idempotent_reissue_keeps_object_deadline_and_insert_only_policy(m
 
     assert second.object_key == first.object_key == asset.object_key
     assert second.expires_at == asset.upload_expires_at
-    assert auth.calls[-1][3]["scope"] == f"private:{asset.object_key}"
-    assert auth.calls[-1][3]["insertOnly"] == 1
-    assert auth.calls[-1][3]["fsizeLimit"] == 6
-    assert auth.calls[-1][3]["mimeLimit"] == "audio/mpeg"
-    assert auth.calls[-1][4] is True
+    policy = auth.signed_policies[-1]
+    assert policy["scope"] == f"private:{asset.object_key}"
+    assert policy["insertOnly"] == 1
+    assert policy["fsizeLimit"] == 6
+    assert policy["mimeLimit"] == "audio/mpeg"
+    assert policy["deadline"] == int(asset.upload_expires_at.timestamp())
 
 
 @pytest.mark.django_db
@@ -381,16 +390,16 @@ def test_local_reissued_signature_never_exceeds_database_deadline(tmp_path, monk
     assert grant.expires_at == database_deadline
 
 
-def test_qiniu_reissued_token_ttl_never_exceeds_database_deadline(monkeypatch):
+def test_qiniu_reissued_token_uses_database_absolute_deadline(monkeypatch):
     fixed_now = timezone.now().replace(microsecond=0)
     database_deadline = fixed_now + timedelta(seconds=2, microseconds=200_000)
 
     class RecordingAuth:
         def __init__(self):
-            self.expires = None
+            self.policy = None
 
-        def upload_token(self, bucket, object_key, *, expires, policy, strict_policy):
-            self.expires = expires
+        def token_with_data(self, data):
+            self.policy = json.loads(data)
             return "deadline-token"
 
     auth = RecordingAuth()
@@ -415,6 +424,62 @@ def test_qiniu_reissued_token_ttl_never_exceeds_database_deadline(monkeypatch):
         expires_at=database_deadline,
     )
 
-    actual_deadline = int(fixed_now.timestamp()) + auth.expires
-    assert actual_deadline <= database_deadline.timestamp()
+    assert auth.policy["deadline"] == int(database_deadline.timestamp())
     assert grant.expires_at == database_deadline
+
+
+@pytest.mark.parametrize(
+    ("now_offset", "deadline_offset"),
+    [
+        (0.9, 0.2),
+        (0.1, 0.8),
+        (0.1, 120.7),
+    ],
+)
+def test_qiniu_real_auth_reissue_signs_exact_database_deadline_across_seconds(
+    now_offset,
+    deadline_offset,
+    monkeypatch,
+):
+    epoch = 1_786_700_000
+    fixed_now = datetime.fromtimestamp(epoch + now_offset, tz=datetime_timezone.utc)
+    database_deadline = fixed_now + timedelta(seconds=deadline_offset)
+    auth = Auth("ak", "sk")
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private", domain="https://cdn.test",
+        callback_url="https://api.test/callback", environment="test", auth=auth,
+        bucket_manager=object(),
+    )
+    monkeypatch.setattr("apps.media.backends.qiniu.timezone.now", lambda: fixed_now)
+    monkeypatch.setattr("qiniu.auth.time.time", lambda: fixed_now.timestamp() + 1.1)
+
+    grant = backend.reissue_upload_grant(
+        object_key="test/singing_audio/2026/08/14/exact-deadline",
+        owner_id=uuid.uuid4(), media_type="singing_audio", mime="audio/mpeg", size=6,
+        expires_at=database_deadline,
+    )
+
+    _ak, _signature, policy = Auth.up_token_decode(grant.upload_token)
+    assert policy["deadline"] == int(database_deadline.timestamp())
+    assert policy["deadline"] <= database_deadline.timestamp()
+    assert policy["scope"] == "private:test/singing_audio/2026/08/14/exact-deadline"
+    assert policy["insertOnly"] == 1
+    assert policy["fsizeLimit"] == 6
+    assert policy["mimeLimit"] == "audio/mpeg"
+
+
+def test_qiniu_absolute_deadline_reissue_fails_closed_without_positive_time(monkeypatch):
+    fixed_now = datetime.fromtimestamp(1_786_700_000.5, tz=datetime_timezone.utc)
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private", domain="https://cdn.test",
+        callback_url="https://api.test/callback", environment="test", auth=Auth("ak", "sk"),
+        bucket_manager=object(),
+    )
+    monkeypatch.setattr("apps.media.backends.qiniu.timezone.now", lambda: fixed_now)
+
+    with pytest.raises(StorageValidationError):
+        backend.reissue_upload_grant(
+            object_key="test/singing_audio/2026/08/14/expired",
+            owner_id=uuid.uuid4(), media_type="singing_audio", mime="audio/mpeg", size=6,
+            expires_at=fixed_now,
+        )

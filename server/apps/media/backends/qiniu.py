@@ -47,14 +47,17 @@ class QiniuStorageBackend:
         remaining_seconds = (expires_at - timezone.now()).total_seconds()
         if remaining_seconds <= 0:
             raise StorageValidationError("上传凭证已过期")
-        remaining = max(0, int(remaining_seconds))
+        deadline = int(expires_at.timestamp())
         policy = {
             "scope": f"{self.bucket}:{object_key}", "insertOnly": 1, "fsizeLimit": size,
             "mimeLimit": mime, "detectMime": 1, "callbackUrl": self.callback_url,
             "callbackBodyType": self.callback_content_type,
             "callbackBody": "key=$(key)&hash=$(etag)&fsize=$(fsize)&mime=$(mimeType)",
+            "deadline": deadline,
         }
-        token = self.auth.upload_token(self.bucket, object_key, expires=remaining, policy=policy.copy(), strict_policy=True)
+        # 七牛 upload_token 接收的是相对 TTL，内部会再次读取系统时间。重签必须以
+        # 数据库截止时间为唯一真相，因此用 SDK 官方低层签名原语签标准 PutPolicy。
+        token = self.auth.token_with_data(json.dumps(policy, separators=(",", ":")))
         return UploadGrant(
             object_key=object_key, expires_at=expires_at,
             upload_url=settings.QINIU_UPLOAD_URL, upload_token=token, fields={"key": object_key, "token": token},

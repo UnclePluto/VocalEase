@@ -94,15 +94,12 @@ class SingingSessionReadSerializer(SingingSessionSummarySerializer):
         rows = []
         for task in self._current_tasks(obj):
             result = getattr(task, "analysis_result", None)
-            if result is not None and result.generation != obj.analysis_generation:
-                result = None
             series = {
                 item.metric_type: {
                     "sample_interval_ms": item.sample_interval_ms,
                     "values": item.values,
                 }
                 for item in task.time_series.all()
-                if item.generation == obj.analysis_generation
             }
             rows.append({
                 "id": str(task.id), "task_type": task.task_type, "status": task.status,

@@ -3,6 +3,35 @@
 import django.db.models.deletion
 import uuid
 from django.db import migrations, models
+from django.db.migrations.exceptions import IrreversibleError
+
+
+def guard_singing_table_drop(apps, schema_editor):
+    connection = schema_editor.connection
+    if connection.vendor == "postgresql":
+        tables = (
+            "analysis_analysistask",
+            "singing_analysistimeseries",
+            "singing_sessionmedia",
+            "singing_singingsession",
+        )
+        quoted = ", ".join(connection.ops.quote_name(table) for table in tables)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"LOCK TABLE {quoted} IN ACCESS EXCLUSIVE MODE "
+                "/* singing_table_destructive_barrier */"
+            )
+    elif connection.vendor != "sqlite":
+        raise IrreversibleError("当前数据库不支持安全删除演唱表")
+    SingingSession = apps.get_model("singing", "SingingSession")
+    AnalysisTask = apps.get_model("analysis", "AnalysisTask")
+    if (
+        SingingSession.objects.using(connection.alias).exists()
+        or AnalysisTask.objects.using(connection.alias).filter(
+            target_type="singing_session"
+        ).exists()
+    ):
+        raise IrreversibleError("演唱数据无法无损删除")
 
 
 class Migration(migrations.Migration):
@@ -113,4 +142,5 @@ class Migration(migrations.Migration):
             model_name='analysistimeseries',
             constraint=models.CheckConstraint(condition=models.Q(('sample_interval_ms__gt', 0)), name='analysis_time_series_interval_positive'),
         ),
+        migrations.RunPython(migrations.RunPython.noop, guard_singing_table_drop),
     ]

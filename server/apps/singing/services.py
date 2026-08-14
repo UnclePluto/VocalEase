@@ -578,7 +578,6 @@ def finalize_singing_success(task_id: UUID, claim_token: UUID, payload):
             defaults={
                 "protocol_version": parsed.protocol_version,
                 "is_mock": parsed.is_mock,
-                "generation": task.generation,
                 "payload": stored_payload,
             },
         )
@@ -586,7 +585,7 @@ def finalize_singing_success(task_id: UUID, claim_token: UUID, payload):
         if task.task_type == AnalysisTask.TaskType.SINGING_AUDIO_METRICS:
             AnalysisTimeSeries.objects.bulk_create([
                 AnalysisTimeSeries(
-                    session=session, task=task, generation=task.generation, metric_type=metric,
+                    session=session, task=task, metric_type=metric,
                     sample_interval_ms=parsed.sample_interval_ms, values=list(values),
                 )
                 for metric, values in parsed.series.items()
@@ -608,7 +607,6 @@ def finalize_singing_success(task_id: UUID, claim_token: UUID, payload):
                 task__target_id=session.id,
                 task__task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
                 task__generation=session.analysis_generation,
-                generation=session.analysis_generation,
             ).payload
             session.status = SingingSession.Status.COMPLETED
             session.score = audio_result["score"]

@@ -114,7 +114,6 @@ class AnalysisTimeSeries(models.Model):
     session = models.ForeignKey(SingingSession, on_delete=models.CASCADE, related_name="time_series")
     task = models.ForeignKey("analysis.AnalysisTask", on_delete=models.CASCADE, related_name="time_series")
     metric_type = models.CharField(max_length=32)
-    generation = models.PositiveIntegerField(default=0)
     sample_interval_ms = models.PositiveIntegerField()
     values = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)

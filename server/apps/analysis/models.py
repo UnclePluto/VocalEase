@@ -58,6 +58,11 @@ class AnalysisTask(models.Model):
             ),
         ]
         constraints = [
+            models.UniqueConstraint(
+                fields=["target_type", "target_id", "generation", "task_type"],
+                condition=Q(target_type="singing_session"),
+                name="analysis_singing_task_generation_unique",
+            ),
             models.CheckConstraint(condition=Q(status__in=["pending", "processing", "succeeded", "failed", "retrying", "superseded"]), name="analysis_task_status_valid"),
             models.CheckConstraint(condition=Q(attempt__gte=0), name="analysis_task_attempt_nonnegative"),
             models.CheckConstraint(condition=Q(generation__gte=0), name="analysis_task_generation_nonnegative"),
@@ -89,6 +94,5 @@ class AnalysisResult(models.Model):
     task = models.OneToOneField(AnalysisTask, on_delete=models.CASCADE, related_name="analysis_result")
     protocol_version = models.CharField(max_length=16)
     is_mock = models.BooleanField(default=False)
-    generation = models.PositiveIntegerField(default=0)
     payload = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
