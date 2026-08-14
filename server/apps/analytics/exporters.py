@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from io import BytesIO, StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 import re
 from typing import Iterable, Mapping
 
@@ -49,6 +49,18 @@ class CsvExporter:
             writer.writerow([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
         return b"\xef\xbb\xbf" + stream.getvalue().encode("utf-8")
 
+    def render_to(self, stream, rows: Iterable[Mapping[str, object]]) -> None:
+        stream.write(b"\xef\xbb\xbf")
+        text_stream = TextIOWrapper(stream, encoding="utf-8", newline="", write_through=True)
+        try:
+            writer = csv.writer(text_stream, lineterminator="\r\n")
+            writer.writerow([label for _, label in EXPORT_COLUMNS])
+            for row in rows:
+                writer.writerow([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
+            text_stream.flush()
+        finally:
+            text_stream.detach()
+
 
 class XlsxExporter:
     mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -64,9 +76,24 @@ class XlsxExporter:
         workbook.save(stream)
         return stream.getvalue()
 
+    def render_to(self, stream, rows: Iterable[Mapping[str, object]]) -> None:
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet("患者统计")
+        worksheet.append([label for _, label in EXPORT_COLUMNS])
+        for row in rows:
+            worksheet.append([escape_sheet_cell(row.get(key)) for key, _ in EXPORT_COLUMNS])
+        workbook.save(stream)
+
 
 def export_rows(rows: Iterable[Mapping[str, object]], export_format: str) -> bytes:
     exporter = CsvExporter() if export_format == "csv" else XlsxExporter() if export_format == "xlsx" else None
     if exporter is None:
         raise ValueError("不支持的导出格式")
     return exporter.render(rows)
+
+
+def export_rows_to(stream, rows: Iterable[Mapping[str, object]], export_format: str) -> None:
+    exporter = CsvExporter() if export_format == "csv" else XlsxExporter() if export_format == "xlsx" else None
+    if exporter is None:
+        raise ValueError("不支持的导出格式")
+    exporter.render_to(stream, rows)

@@ -1,8 +1,9 @@
 from io import BytesIO
+import tempfile
 
 from openpyxl import load_workbook
 
-from apps.analytics.exporters import CsvExporter, XlsxExporter
+from apps.analytics.exporters import CsvExporter, XlsxExporter, export_rows_to
 
 
 ROWS = [
@@ -44,3 +45,15 @@ def test_exporters_replace_illegal_controls_and_bound_long_cells():
     sheet = load_workbook(BytesIO(XlsxExporter().render(rows)), read_only=True).active
     assert "\x00" not in sheet.cell(2, 2).value
     assert len(sheet.cell(2, 2).value) == 32767
+
+
+def test_streaming_xlsx_large_batch_can_be_read_back():
+    rows = ({**ROWS[0], "medical_record_no": f"P{index:06d}"} for index in range(1205))
+    with tempfile.SpooledTemporaryFile(max_size=1024, mode="w+b") as stream:
+        export_rows_to(stream, rows, "xlsx")
+        stream.seek(0)
+        sheet = load_workbook(stream, read_only=True).active
+        values = list(sheet.iter_rows(values_only=True))
+
+    assert len(values) == 1206
+    assert values[1][0] == "P000000" and values[-1][0] == "P001204"

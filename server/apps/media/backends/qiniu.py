@@ -8,7 +8,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.utils import timezone
-from qiniu import Auth, BucketManager, put_data
+from qiniu import Auth, BucketManager, put_data, put_stream
 
 from apps.media.contracts import ObjectMetadata, PrivateUrl, StorageValidationError, UploadGrant, UploadReceipt, build_object_key, validate_media_request
 
@@ -104,6 +104,27 @@ class QiniuStorageBackend:
             raise StorageValidationError("七牛生成物上传响应无效")
         receipt = self.verify_completion(grant.object_key)
         if receipt.size != len(content) or receipt.mime != mime or receipt.etag != str(result["hash"]):
+            raise StorageValidationError("七牛生成物可信回执不一致")
+        return receipt
+
+    def upload_generated_stream(self, *, grant: UploadGrant, stream, size: int, mime: str) -> UploadReceipt:
+        """以官方分片流接口上传服务端生成物，并用 Kodo stat 校验完成事实。"""
+        try:
+            result, info = put_stream(
+                grant.upload_token,
+                grant.object_key,
+                stream,
+                grant.object_key.rsplit("/", 1)[-1],
+                size,
+                mime_type=mime,
+                bucket_name=self.bucket,
+            )
+        except Exception as exc:
+            raise StorageValidationError("七牛生成物流式上传失败") from exc
+        if getattr(info, "status_code", 0) != 200 or not isinstance(result, dict) or not result.get("hash"):
+            raise StorageValidationError("七牛生成物上传响应无效")
+        receipt = self.verify_completion(grant.object_key)
+        if receipt.size != size or receipt.mime != mime or receipt.etag != str(result["hash"]):
             raise StorageValidationError("七牛生成物可信回执不一致")
         return receipt
 

@@ -21,17 +21,24 @@ from apps.media.services import backend_for_asset, ensure_local_asset_layout
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 
 from .calculations import METRIC_VERSION
+from .assets import ExportAssetError, resolve_export_asset
 from .dto import ExportRequestSerializer, PatientMetricFilters, PatientMetricQuerySerializer
 from .exporters import CsvExporter, XlsxExporter, export_rows
-from .models import ExportJob
+from .models import ExportJob, ExportJobItem
 from .selectors import dashboard_metrics, exportable_row, filtered_patients, patient_metric_rows
-from .tasks import expire_export_job, run_export_job_task
+from .tasks import expire_export_job, request_export_cleanup, run_export_job_task
 
 
 class ExportConflict(APIException):
     status_code = 409
     default_code = "export_idempotency_conflict"
     default_detail = "导出幂等键已用于其他请求"
+
+
+class ExportAssetConflict(APIException):
+    status_code = 409
+    default_code = "export_asset_invalid"
+    default_detail = "导出媒体状态不可信"
 
 
 def _validate_query(request):
@@ -99,7 +106,20 @@ def _content_disposition(extension):
     return f"attachment; filename=\"vocaease-patient-metrics.{extension}\"; filename*=UTF-8''{quote(localized, safe='')}"
 
 
-def _find_or_create_job(*, user, key, fingerprint, filters, selected_ids, rows, export_format):
+def _snapshot_job_items(job, patient_queryset, *, batch_size=500):
+    batch = []
+    for position, patient_id in enumerate(
+        patient_queryset.values_list("id", flat=True).iterator(chunk_size=batch_size)
+    ):
+        batch.append(ExportJobItem(job=job, patient_id=patient_id, position=position))
+        if len(batch) == batch_size:
+            ExportJobItem.objects.bulk_create(batch, batch_size=batch_size)
+            batch.clear()
+    if batch:
+        ExportJobItem.objects.bulk_create(batch, batch_size=batch_size)
+
+
+def _find_or_create_job(*, user, key, fingerprint, filters, selected_ids, patient_queryset, count, export_format):
     try:
         with transaction.atomic():
             existing = ExportJob.objects.select_for_update().filter(creator=user, idempotency_key=key).first()
@@ -111,13 +131,13 @@ def _find_or_create_job(*, user, key, fingerprint, filters, selected_ids, rows, 
                 creator=user,
                 normalized_filters=filters,
                 selected_ids=[str(value) for value in selected_ids],
-                rows_snapshot=rows,
-                snapshot_count=len(rows),
+                snapshot_count=count,
                 format=export_format,
                 expires_at=timezone.now() + timedelta(seconds=settings.ANALYTICS_EXPORT_TTL_SECONDS),
                 idempotency_key=key,
                 request_fingerprint=fingerprint,
             )
+            _snapshot_job_items(job, patient_queryset)
             return job, True
     except IntegrityError:
         existing = ExportJob.objects.get(creator=user, idempotency_key=key)
@@ -135,22 +155,24 @@ class ExportCreateView(APIView):
         values = serializer.validated_data
         filters = PatientMetricFilters.from_validated(values["filters"])
         selected_ids = tuple(dict.fromkeys(values["selected_ids"]))
-        rows = [exportable_row(row) for row in patient_metric_rows(filtered_patients(filters, selected_ids=selected_ids))]
+        patient_queryset = filtered_patients(filters, selected_ids=selected_ids)
+        count = patient_queryset.count()
         export_format = values["format"]
         exporter = CsvExporter() if export_format == "csv" else XlsxExporter()
-        if len(rows) <= settings.ANALYTICS_SYNC_EXPORT_LIMIT:
+        if count <= settings.ANALYTICS_SYNC_EXPORT_LIMIT:
+            rows = [exportable_row(row) for row in patient_metric_rows(patient_queryset)]
             content = export_rows(rows, export_format)
             record(
                 actor=request.user,
                 action="analytics.export_sync",
                 target=None,
-                changes={"metric_version": METRIC_VERSION, "format": export_format, "count": len(rows), "filters": filters.as_json()},
+                changes={"metric_version": METRIC_VERSION, "format": export_format, "count": count, "filters": filters.as_json()},
                 request_id=request.request_id,
             )
             response = HttpResponse(content, content_type=exporter.mime)
             response["Content-Disposition"] = _content_disposition(exporter.extension)
             response["X-Metric-Version"] = METRIC_VERSION
-            response["X-Export-Row-Count"] = str(len(rows))
+            response["X-Export-Row-Count"] = str(count)
             return response
         normalized_filters = filters.as_json()
         fingerprint = _fingerprint(export_format=export_format, filters=normalized_filters, selected_ids=selected_ids)
@@ -160,7 +182,8 @@ class ExportCreateView(APIView):
             fingerprint=fingerprint,
             filters=normalized_filters,
             selected_ids=selected_ids,
-            rows=rows,
+            patient_queryset=patient_queryset,
+            count=count,
             export_format=export_format,
         )
         if created:
@@ -168,7 +191,7 @@ class ExportCreateView(APIView):
                 actor=request.user,
                 action="analytics.export_create",
                 target=job,
-                changes={"metric_version": METRIC_VERSION, "format": export_format, "count": len(rows), "filters": normalized_filters},
+                changes={"metric_version": METRIC_VERSION, "format": export_format, "count": count, "filters": normalized_filters},
                 request_id=request.request_id,
             )
             if settings.ANALYTICS_AUTO_DISPATCH_EXPORTS:
@@ -187,6 +210,13 @@ class ExportDetailView(APIView):
         job = get_object_or_404(ExportJob, pk=job_id)
         if job.expires_at <= timezone.now() and job.status != ExportJob.Status.EXPIRED:
             job = expire_export_job(job.id)
+        elif job.status == ExportJob.Status.READY:
+            try:
+                resolve_export_asset(job)
+            except ExportAssetError as exc:
+                job = request_export_cleanup(
+                    job.id, status=ExportJob.Status.FAILED, failure_reason=exc.message,
+                )
         return api_response(data=_job_data(job), request_id=request.request_id)
 
 
@@ -201,9 +231,11 @@ class ExportPrivateUrlView(APIView):
             raise PermissionDenied("导出文件已过期", code="export_expired")
         if job.status != ExportJob.Status.READY or not job.result_asset_id:
             raise PermissionDenied("导出文件尚不可下载", code="export_not_ready")
-        asset = job.result_asset
-        if asset.owner_type != "export" or asset.owner_id != job.id or asset.media_type != "export" or asset.status != "ready":
-            raise PermissionDenied("导出媒体状态不可信", code="export_asset_invalid")
+        try:
+            asset = resolve_export_asset(job)
+        except ExportAssetError as exc:
+            request_export_cleanup(job.id, status=ExportJob.Status.FAILED, failure_reason=exc.message)
+            raise ExportAssetConflict(exc.message, code=exc.code) from exc
         backend = backend_for_asset(asset)
         ttl = min(settings.MEDIA_PRIVATE_URL_TTL_SECONDS, remaining)
         if isinstance(backend, LocalStorageBackend):

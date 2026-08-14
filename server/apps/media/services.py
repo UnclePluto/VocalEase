@@ -412,15 +412,26 @@ def mark_asset_for_cleanup(*, asset: MediaAsset) -> MediaAsset:
         return locked
 
 
-def publish_generated_asset(*, owner_id: UUID, content: bytes, mime: str) -> MediaAsset:
+def publish_generated_asset(
+    *, owner_id: UUID, mime: str, content: bytes | None = None,
+    stream=None, size: int | None = None, content_sha256: str | None = None,
+) -> MediaAsset:
     """把可信服务端生成物发布到 Task 4 的私有媒体协议，不暴露临时路径。"""
-    content_sha256 = hashlib.sha256(content).hexdigest()
+    if content is not None:
+        if stream is not None:
+            raise MediaConflict("生成物只能提供一种内容来源", code="media_metadata_mismatch")
+        stream = BytesIO(content)
+        size = len(content)
+        content_sha256 = hashlib.sha256(content).hexdigest()
+    if stream is None or not isinstance(size, int) or size <= 0 or not content_sha256:
+        raise MediaConflict("生成物元数据不完整", code="media_metadata_mismatch")
+    stream.seek(0)
     existing = MediaAsset.objects.filter(
         owner_type=MediaAsset.OwnerType.EXPORT,
         owner_id=owner_id,
         media_type="export",
         mime=mime,
-        size=len(content),
+        size=size,
         status=MediaAsset.Status.READY,
         deleted_at__isnull=True,
         metadata__generated_sha256=content_sha256,
@@ -440,7 +451,7 @@ def publish_generated_asset(*, owner_id: UUID, content: bytes, mime: str) -> Med
         owner_id=owner_id,
         media_type="export",
         mime=mime,
-        size=len(content),
+        size=size,
     )
     asset.metadata = {**(asset.metadata or {}), "generated_sha256": content_sha256}
     asset.save(update_fields=["metadata", "updated_at"])
@@ -451,7 +462,7 @@ def publish_generated_asset(*, owner_id: UUID, content: bytes, mime: str) -> Med
             prepared = backend.prepare_authorized_stream(
                 object_key=asset.object_key,
                 token=grant.upload_token,
-                stream=BytesIO(content),
+                stream=stream,
                 mime=mime,
                 asset_id=asset.id,
             )
@@ -463,7 +474,11 @@ def publish_generated_asset(*, owner_id: UUID, content: bytes, mime: str) -> Med
                 completed.save(update_fields=["metadata", "updated_at"])
             return completed
         if isinstance(backend, QiniuStorageBackend):
-            receipt = backend.upload_generated(grant=grant, content=content, mime=mime)
+            if content is not None:
+                receipt = backend.upload_generated(grant=grant, content=content, mime=mime)
+            else:
+                stream.seek(0)
+                receipt = backend.upload_generated_stream(grant=grant, stream=stream, size=size, mime=mime)
             with transaction.atomic():
                 locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
                 if locked.status == MediaAsset.Status.READY:

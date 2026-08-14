@@ -46,7 +46,10 @@ def analytics_song():
     )
 
 
-def _completed_session(patient, song, *, completed_at, score, burp_count, duration=60, generation=0, with_current_result=True):
+def _completed_session(
+    patient, song, *, completed_at, score, burp_count, duration=60, generation=0,
+    with_current_result=True, with_analysis=True, submitted_at=None,
+):
     plan = patient.treatment_plans.get(status="active")
     session = SingingSession.objects.create(
         patient=patient,
@@ -61,9 +64,11 @@ def _completed_session(patient, song, *, completed_at, score, burp_count, durati
         burp_count=burp_count,
         duration_seconds=duration,
         is_mock=True,
-        submitted_at=completed_at - timedelta(minutes=1),
+        submitted_at=submitted_at or completed_at - timedelta(minutes=1),
         completed_at=completed_at,
     )
+    if not with_analysis:
+        return session
     audio = MediaAsset.objects.create(
         patient_owner=patient,
         owner_type="patient",
@@ -106,7 +111,7 @@ def test_dashboard_and_patient_metrics_use_current_completed_generation(patient,
         (60, 4, 60), (60, 3, 60), (60, 2, 60), (80, 2, 60), (80, 1, 60), (80, 1, 60),
     ]):
         _completed_session(patient, analytics_song, completed_at=start + timedelta(days=index), score=score, burp_count=burps, duration=duration)
-    # 状态虽为 completed，但当前代没有成功汇总，必须排除。
+    # 当前代没有成功汇总仍属于已完成演唱与有效得分，只从嗳气口径排除。
     _completed_session(patient, analytics_song, completed_at=start + timedelta(days=7), score=100, burp_count=50, generation=1, with_current_result=False)
     patient.treatment_plans.update(target_session_count=5)
     patient.user.must_change_password = False
@@ -121,24 +126,49 @@ def test_dashboard_and_patient_metrics_use_current_completed_generation(patient,
     assert dashboard.json()["data"] == {
         "metric_version": METRIC_VERSION,
         "active_patient_count": 1,
-        "completed_session_count": 6,
-        "average_score": "70.00",
+        "completed_session_count": 7,
+        "average_score": "74.29",
         "average_burp_count": "2.17",
         "is_mock": True,
     }
     row = listing.json()["data"]["results"][0]
     assert listing.json()["data"]["metric_version"] == METRIC_VERSION
     assert row["treatment_progress"] == "100.00"
-    assert row["completed_count"] == 6
-    assert row["total_duration_seconds"] == 360
-    assert row["average_score"] == "70.00"
+    assert row["completed_count"] == 7
+    assert row["total_duration_seconds"] == 420
+    assert row["average_score"] == "74.29"
     assert row["score_trend"] == {"difference": "20.00", "direction": "up", "has_enough_data": True}
     assert row["burp_improvement"] == "0.5556"
     assert row["is_mock"] is True
 
 
 @pytest.mark.django_db
-def test_patient_metrics_stable_tie_order_uses_completed_submitted_and_id(patient, analytics_song):
+def test_completed_without_analysis_counts_for_progress_duration_score_but_not_burp(patient, analytics_song):
+    occurred = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
+    _completed_session(
+        patient, analytics_song, completed_at=occurred, score=88, burp_count=99,
+        duration=120, with_analysis=False,
+    )
+    patient.treatment_plans.update(target_session_count=2)
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    dashboard = client.get("/api/v1/admin/analytics/dashboard/").json()["data"]
+    row = client.get("/api/v1/admin/analytics/patients/").json()["data"]["results"][0]
+
+    assert dashboard["completed_session_count"] == 1
+    assert dashboard["average_score"] == "88.00"
+    assert dashboard["average_burp_count"] is None
+    assert row["completed_count"] == 1
+    assert row["total_duration_seconds"] == 120
+    assert row["treatment_progress"] == "50.00"
+    assert row["average_score"] == "88.00"
+    assert row["burp_improvement"] is None
+
+
+@pytest.mark.django_db
+def test_patient_metrics_order_uses_singing_occurrence_then_id_not_analysis_completion(patient, analytics_song):
     tied = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
     sessions = [
         _completed_session(patient, analytics_song, completed_at=tied, score=score, burp_count=1)
@@ -158,6 +188,52 @@ def test_patient_metrics_stable_tie_order_uses_completed_submitted_and_id(patien
     row = client.get("/api/v1/admin/analytics/patients/").json()["data"]["results"][0]
 
     assert row["score_trend"]["difference"] == "60.00"
+
+
+@pytest.mark.django_db
+def test_patient_metrics_late_analysis_retry_does_not_reorder_score_trend(patient, analytics_song):
+    occurred = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
+    for index, score in enumerate((10, 20, 30, 70, 80, 90)):
+        # 最早一次演唱的分析最晚完成，趋势仍必须按演唱发生时间排序。
+        session = _completed_session(
+            patient, analytics_song,
+            submitted_at=occurred + timedelta(days=index),
+            completed_at=occurred + timedelta(days=20 - index),
+            score=score, burp_count=1,
+        )
+        AnalysisTask.objects.filter(target_id=session.id).update(
+            completed_at=occurred + timedelta(days=30 - index)
+        )
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    row = client.get("/api/v1/admin/analytics/patients/").json()["data"]["results"][0]
+
+    assert row["score_trend"]["difference"] == "60.00"
+
+
+@pytest.mark.django_db
+def test_treatment_status_filter_uses_same_current_plan_as_display(patient):
+    from apps.patients.models import TreatmentPlan
+
+    TreatmentPlan.objects.create(
+        patient=patient,
+        start_date=datetime(2025, 1, 1).date(),
+        cycle_weeks=4,
+        target_session_count=10,
+        status=TreatmentPlan.Status.COMPLETED,
+    )
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    active = client.get("/api/v1/admin/analytics/patients/?treatment_status=active").json()["data"]
+    completed = client.get("/api/v1/admin/analytics/patients/?treatment_status=completed").json()["data"]
+
+    assert active["count"] == 1
+    assert active["results"][0]["treatment_status"] == "active"
+    assert completed["count"] == 0
 
 
 @pytest.mark.django_db
