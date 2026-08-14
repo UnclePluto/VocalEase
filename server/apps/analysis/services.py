@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 import logging
+from threading import Event, Thread
 from uuid import UUID, uuid4
 
 from django.conf import settings
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
@@ -24,7 +25,8 @@ from .models import AnalysisResult, AnalysisTask
 
 
 logger = logging.getLogger(__name__)
-MAX_TRANSIENT_RETRIES = 3
+MAX_ATTEMPTS = 4
+DISPATCH_LEASE_SECONDS = 60
 
 
 class AnalysisIdempotencyConflict(APIException):
@@ -37,7 +39,81 @@ class AnalysisIdempotencyConflict(APIException):
 class AnalysisClaim:
     task_id: UUID
     claim_token: UUID
-    deferred: bool = False
+
+
+@dataclass(frozen=True)
+class TransientOutcome:
+    task: AnalysisTask
+    should_retry: bool
+
+
+class AnalysisRetryRequested(TransientAnalysisError):
+    def __init__(self, *, should_retry: bool):
+        super().__init__("分析服务暂时不可用")
+        self.should_retry = should_retry
+
+
+class ExecutionContext:
+    """执行器可观察的租约上下文；自动心跳与主动心跳共用同一 CAS。"""
+
+    def __init__(self, task_id: UUID, claim_token: UUID):
+        self.task_id = task_id
+        self.claim_token = claim_token
+        self._lost = Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._lost.is_set()
+
+    def heartbeat(self) -> bool:
+        if self.cancelled:
+            return False
+        alive = heartbeat_analysis_task(self.task_id, self.claim_token)
+        if not alive:
+            self._lost.set()
+        return alive
+
+    def mark_lost(self) -> None:
+        self._lost.set()
+
+
+class LeaseGuard:
+    """执行期间自动续租；退出时可靠停止后台线程。"""
+
+    def __init__(self, context: ExecutionContext, *, interval_seconds: float | None = None):
+        lease_seconds = max(float(settings.ANALYSIS_TASK_LEASE_SECONDS), 0.12)
+        self.context = context
+        requested = interval_seconds if interval_seconds is not None else lease_seconds / 4
+        self.interval_seconds = min(max(0.01, requested), lease_seconds / 4)
+        self._stop = Event()
+        self._thread: Thread | None = None
+
+    def __enter__(self):
+        self._thread = Thread(target=self._run, name=f"analysis-lease-{self.context.task_id}", daemon=True)
+        self._thread.start()
+        return self.context
+
+    def _run(self) -> None:
+        close_old_connections()
+        try:
+            while not self._stop.wait(self.interval_seconds):
+                try:
+                    if not self.context.heartbeat():
+                        return
+                except Exception as exc:
+                    self.context.mark_lost()
+                    logger.error(
+                        "analysis_heartbeat_failed task_id=%s exception=%s",
+                        self.context.task_id, exc.__class__.__name__,
+                    )
+                    return
+        finally:
+            close_old_connections()
+
+    def __exit__(self, exc_type, exc, traceback):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
 
 
 def _snapshot(asset: MediaAsset) -> dict[str, object]:
@@ -51,11 +127,11 @@ def _snapshot(asset: MediaAsset) -> dict[str, object]:
     }
 
 
-def create_song_analysis(
+def _create_song_analysis(
     *, song: Song, source_asset: MediaAsset,
     task_type: str = "vocal_separation", idempotency_key: str | None = None,
     executor: str = "mock_song", protocol_version: str = "1.0",
-) -> AnalysisTask:
+) -> tuple[AnalysisTask, bool]:
     try:
         resolve_executor(task_type, executor, protocol_version)
     except AnalysisProtocolError as exc:
@@ -64,6 +140,7 @@ def create_song_analysis(
         raise SourceAssetInvalid()
     validation_error = None
     task = None
+    created = False
     with transaction.atomic():
         locked_song = Song.objects.select_for_update().get(pk=song.id, deleted_at__isnull=True)
         asset = MediaAsset.objects.select_for_update().get(pk=source_asset.id, deleted_at__isnull=True)
@@ -96,11 +173,38 @@ def create_song_analysis(
     if validation_error is not None:
         raise validation_error
     assert task is not None
+    return task, created
+
+
+def create_song_analysis(**kwargs) -> AnalysisTask:
+    task, _created = _create_song_analysis(**kwargs)
     return task
 
 
 def schedule_analysis_task(task_id: UUID) -> bool:
-    """唯一 broker 出口；发送失败保留 pending，供重扫再次投递。"""
+    """带数据库投递租约的唯一 broker 出口。"""
+    now = timezone.now()
+    song_id = AnalysisTask.objects.only("song_id").filter(pk=task_id).values_list("song_id", flat=True).first()
+    if song_id is None:
+        return False
+    with transaction.atomic():
+        song = Song.objects.select_for_update().get(pk=song_id)
+        task = AnalysisTask.objects.select_for_update().filter(pk=task_id).first()
+        if task is None or task.status in {
+            AnalysisTask.Status.SUCCEEDED, AnalysisTask.Status.FAILED,
+            AnalysisTask.Status.SUPERSEDED,
+        }:
+            return False
+        if task.attempt >= MAX_ATTEMPTS:
+            _fail_exhausted_locked(task, now=now, song=song)
+            return False
+        if task.status == AnalysisTask.Status.PROCESSING and task.lease_expires_at and task.lease_expires_at > now:
+            return False
+        if task.next_dispatch_at and task.next_dispatch_at > now:
+            return False
+        dispatch_until = now + timedelta(seconds=DISPATCH_LEASE_SECONDS)
+        task.next_dispatch_at = dispatch_until
+        task.save(update_fields=["next_dispatch_at", "updated_at"])
     try:
         from .tasks import run_analysis_task
         run_analysis_task.delay(str(task_id))
@@ -109,6 +213,11 @@ def schedule_analysis_task(task_id: UUID) -> bool:
             "analysis_dispatch_failed task_id=%s exception=%s",
             task_id, exc.__class__.__name__,
         )
+        AnalysisTask.objects.filter(
+            pk=task_id,
+            status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING],
+            next_dispatch_at=dispatch_until,
+        ).update(next_dispatch_at=None)
         return False
     return True
 
@@ -118,21 +227,49 @@ def schedule_analysis_on_commit(task_id: UUID) -> None:
 
 
 def request_song_analysis(**kwargs) -> AnalysisTask:
-    task = create_song_analysis(**kwargs)
-    schedule_analysis_on_commit(task.id)
+    task, created = _create_song_analysis(**kwargs)
+    if created:
+        schedule_analysis_on_commit(task.id)
     return task
 
 
-def redispatch_pending_analyses(*, batch_size: int = 100) -> int:
+def recover_analysis_tasks(*, batch_size: int = 100) -> dict[str, int]:
     now = timezone.now()
+    limit = max(1, min(batch_size, 500))
+    exhausted = 0
+    exhausted_ids = list(
+        AnalysisTask.objects.filter(
+            Q(status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING])
+            | Q(status=AnalysisTask.Status.PROCESSING, lease_expires_at__lte=now),
+            attempt__gte=MAX_ATTEMPTS,
+        ).order_by("created_at").values_list("id", flat=True)[:limit]
+    )
+    for task_id in exhausted_ids:
+        song_id = AnalysisTask.objects.only("song_id").get(pk=task_id).song_id
+        with transaction.atomic():
+            song = Song.objects.select_for_update().get(pk=song_id)
+            task = AnalysisTask.objects.select_for_update().get(pk=task_id, song_id=song.id)
+            if task.attempt >= MAX_ATTEMPTS and (
+                task.status in {AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING}
+                or task.status == AnalysisTask.Status.PROCESSING
+                and task.lease_expires_at and task.lease_expires_at <= now
+            ):
+                _fail_exhausted_locked(task, now=now, song=song)
+                exhausted += 1
     ids = list(
         AnalysisTask.objects.filter(
             Q(status__in=[AnalysisTask.Status.PENDING, AnalysisTask.Status.RETRYING])
             | Q(status=AnalysisTask.Status.PROCESSING, lease_expires_at__lte=now)
-        )
-        .order_by("created_at").values_list("id", flat=True)[:max(1, min(batch_size, 500))]
+        ).filter(attempt__lt=MAX_ATTEMPTS).filter(
+            Q(next_dispatch_at__isnull=True) | Q(next_dispatch_at__lte=now)
+        ).order_by("created_at").values_list("id", flat=True)[:limit]
     )
-    return sum(1 for task_id in ids if schedule_analysis_task(task_id))
+    dispatched = sum(1 for task_id in ids if schedule_analysis_task(task_id))
+    return {"dispatched": dispatched, "exhausted": exhausted, "examined": len(ids) + exhausted}
+
+
+def redispatch_pending_analyses(*, batch_size: int = 100) -> int:
+    return recover_analysis_tasks(batch_size=batch_size)["dispatched"]
 
 
 def supersede_stale_song_analyses(*, song: Song) -> int:
@@ -150,11 +287,12 @@ def supersede_stale_song_analyses(*, song: Song) -> int:
             task.claim_token = None
             task.lease_expires_at = None
             task.heartbeat_at = None
+            task.next_dispatch_at = None
             task.error_code = "analysis_source_superseded"
             task.error_summary = "歌曲源媒体已替换，任务不再适用"
             task.completed_at = now
             task.save(update_fields=[
-                "status", "claim_token", "lease_expires_at", "heartbeat_at",
+                "status", "claim_token", "lease_expires_at", "heartbeat_at", "next_dispatch_at",
                 "error_code", "error_summary", "completed_at", "updated_at",
             ])
         return len(stale)
@@ -174,6 +312,25 @@ def _update_current_song_status(song: Song, task: AnalysisTask, status: str) -> 
     return True
 
 
+def _fail_exhausted_locked(task: AnalysisTask, *, now=None, song: Song | None = None) -> AnalysisTask:
+    now = now or timezone.now()
+    AnalysisResult.objects.filter(task=task).delete()
+    task.status = AnalysisTask.Status.FAILED
+    _clear_claim(task)
+    task.next_dispatch_at = None
+    task.error_code = "analysis_retry_exhausted"
+    task.error_summary = "分析服务暂时不可用，已超过重试次数"
+    task.completed_at = now
+    task.save()
+    if song is not None:
+        _update_current_song_status(song, task, Song.AnalysisStatus.FAILED)
+    else:
+        Song.objects.filter(
+            pk=task.song_id, deleted_at__isnull=True, source_asset_id=task.source_asset_id,
+        ).update(analysis_status=Song.AnalysisStatus.FAILED, updated_at=now)
+    return task
+
+
 def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
     now = now or timezone.now()
     song_id = AnalysisTask.objects.only("song_id").get(pk=task_id).song_id
@@ -187,6 +344,7 @@ def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
         if task.source_asset_id != song.source_asset_id or song.deleted_at is not None:
             task.status = AnalysisTask.Status.SUPERSEDED
             _clear_claim(task)
+            task.next_dispatch_at = None
             task.error_code = "analysis_source_superseded"
             task.error_summary = "歌曲源媒体已替换，任务不再适用"
             task.completed_at = now
@@ -194,32 +352,17 @@ def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
             return None
         if task.status == AnalysisTask.Status.PROCESSING and task.lease_expires_at and task.lease_expires_at > now:
             return None
+        if task.attempt >= MAX_ATTEMPTS:
+            _fail_exhausted_locked(task, now=now, song=song)
+            return None
         try:
             resolve_executor(task.task_type, task.executor, task.protocol_version)
         except AnalysisProtocolError:
             task.status = AnalysisTask.Status.FAILED
             _clear_claim(task)
+            task.next_dispatch_at = None
             task.error_code = "analysis_protocol_unsupported"
             task.error_summary = "分析任务协议不受支持"
-            task.completed_at = now
-            task.save()
-            _update_current_song_status(song, task, Song.AnalysisStatus.FAILED)
-            return None
-        try:
-            validate_source_asset(song=song, asset=song.source_asset)
-        except SourceVerificationTemporary as exc:
-            task.status = AnalysisTask.Status.RETRYING
-            _clear_claim(task)
-            task.error_code = "analysis_source_check_deferred"
-            task.error_summary = "源媒体暂时无法复核"
-            task.save()
-            _update_current_song_status(song, task, Song.AnalysisStatus.RETRYING)
-            return AnalysisClaim(task.id, UUID(int=0), deferred=True)
-        except SourceAssetInvalid:
-            task.status = AnalysisTask.Status.FAILED
-            _clear_claim(task)
-            task.error_code = "analysis_source_unavailable"
-            task.error_summary = "分析源媒体已不可用"
             task.completed_at = now
             task.save()
             _update_current_song_status(song, task, Song.AnalysisStatus.FAILED)
@@ -234,6 +377,7 @@ def claim_analysis_task(task_id: UUID, *, now=None) -> AnalysisClaim | None:
         task.error_code = ""
         task.error_summary = ""
         task.completed_at = None
+        task.next_dispatch_at = None
         task.save()
         _update_current_song_status(song, task, Song.AnalysisStatus.PROCESSING)
         return AnalysisClaim(task.id, token)
@@ -270,6 +414,7 @@ def _validate_claim_before_execute(claim: AnalysisClaim) -> AnalysisTask:
         elif song.deleted_at is not None or song.source_asset_id != task.source_asset_id:
             task.status = AnalysisTask.Status.SUPERSEDED
             _clear_claim(task)
+            task.next_dispatch_at = None
             task.error_code = "analysis_source_superseded"
             task.error_summary = "歌曲源媒体已替换，任务不再适用"
             task.completed_at = timezone.now()
@@ -299,6 +444,7 @@ def finalize_analysis_success(task_id: UUID, claim_token: UUID, payload) -> Anal
         if song.deleted_at is not None or song.source_asset_id != task.source_asset_id:
             task.status = AnalysisTask.Status.SUPERSEDED
             _clear_claim(task)
+            task.next_dispatch_at = None
             task.error_code = "analysis_source_superseded"
             task.error_summary = "歌曲源媒体已替换，任务不再适用"
             task.completed_at = timezone.now()
@@ -320,6 +466,7 @@ def finalize_analysis_success(task_id: UUID, claim_token: UUID, payload) -> Anal
         )
         task.status = AnalysisTask.Status.SUCCEEDED
         _clear_claim(task)
+        task.next_dispatch_at = None
         task.error_code = ""
         task.error_summary = ""
         task.completed_at = timezone.now()
@@ -328,20 +475,28 @@ def finalize_analysis_success(task_id: UUID, claim_token: UUID, payload) -> Anal
         return task
 
 
-def finalize_analysis_transient(task_id: UUID, claim_token: UUID) -> AnalysisTask:
+def handle_analysis_transient(task_id: UUID, claim_token: UUID) -> TransientOutcome:
     with transaction.atomic():
         task, song, valid = _locked_claim(task_id, claim_token)
         if not valid:
-            return task
+            return TransientOutcome(task=task, should_retry=False)
         AnalysisResult.objects.filter(task=task).delete()
+        if task.attempt >= MAX_ATTEMPTS:
+            _fail_exhausted_locked(task, song=song)
+            return TransientOutcome(task=task, should_retry=False)
         task.status = AnalysisTask.Status.RETRYING
         _clear_claim(task)
+        task.next_dispatch_at = timezone.now() + timedelta(seconds=DISPATCH_LEASE_SECONDS)
         task.error_code = "analysis_transient_error"
         task.error_summary = "分析服务暂时不可用，稍后将自动重试"
         task.completed_at = None
         task.save()
         _update_current_song_status(song, task, Song.AnalysisStatus.RETRYING)
-        return task
+        return TransientOutcome(task=task, should_retry=True)
+
+
+def finalize_analysis_transient(task_id: UUID, claim_token: UUID) -> AnalysisTask:
+    return handle_analysis_transient(task_id, claim_token).task
 
 
 def finalize_analysis_failure(task_id: UUID, claim_token: UUID, *, code: str, summary: str) -> AnalysisTask:
@@ -355,6 +510,7 @@ def finalize_analysis_failure(task_id: UUID, claim_token: UUID, *, code: str, su
         AnalysisResult.objects.filter(task=task).delete()
         task.status = AnalysisTask.Status.FAILED
         _clear_claim(task)
+        task.next_dispatch_at = None
         task.error_code = code
         task.error_summary = summary[:256]
         task.completed_at = timezone.now()
@@ -363,37 +519,22 @@ def finalize_analysis_failure(task_id: UUID, claim_token: UUID, *, code: str, su
         return task
 
 
-def exhaust_analysis_retries(task_id: UUID) -> AnalysisTask:
-    song_id = AnalysisTask.objects.only("song_id").get(pk=task_id).song_id
-    with transaction.atomic():
-        song = Song.objects.select_for_update().get(pk=song_id)
-        task = AnalysisTask.objects.select_for_update().get(pk=task_id, song_id=song.id)
-        if task.status not in {AnalysisTask.Status.SUCCEEDED, AnalysisTask.Status.SUPERSEDED}:
-            AnalysisResult.objects.filter(task=task).delete()
-            task.status = AnalysisTask.Status.FAILED
-            _clear_claim(task)
-            task.error_code = "analysis_retry_exhausted"
-            task.error_summary = "分析服务暂时不可用，已超过重试次数"
-            task.completed_at = timezone.now()
-            task.save()
-            _update_current_song_status(song, task, Song.AnalysisStatus.FAILED)
-        return task
-
-
 def run_analysis(task_id: UUID) -> AnalysisTask:
     claim = claim_analysis_task(task_id)
     if claim is None:
         return AnalysisTask.objects.get(pk=task_id)
-    if claim.deferred:
-        raise TransientAnalysisError("源媒体暂时无法复核")
+    context = ExecutionContext(claim.task_id, claim.claim_token)
     try:
-        task = _validate_claim_before_execute(claim)
-        registration = resolve_executor(task.task_type, task.executor, task.protocol_version)
-        payload = registration.factory().execute(task)
+        with LeaseGuard(context):
+            task = _validate_claim_before_execute(claim)
+            registration = resolve_executor(task.task_type, task.executor, task.protocol_version)
+            payload = registration.factory().execute(task, context=context)
+        if context.cancelled:
+            return AnalysisTask.objects.get(pk=task_id)
         return finalize_analysis_success(task.id, claim.claim_token, payload)
     except (TransientAnalysisError, SourceVerificationTemporary) as exc:
-        finalize_analysis_transient(claim.task_id, claim.claim_token)
-        raise TransientAnalysisError("分析服务暂时不可用") from exc
+        outcome = handle_analysis_transient(claim.task_id, claim.claim_token)
+        raise AnalysisRetryRequested(should_retry=outcome.should_retry) from exc
     except SourceAssetInvalid:
         return finalize_analysis_failure(claim.task_id, claim.claim_token, code="analysis_source_unavailable", summary="分析源媒体已不可用")
     except AnalysisProtocolError:

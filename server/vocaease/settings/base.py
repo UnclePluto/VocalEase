@@ -128,6 +128,18 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
 CELERY_TASK_EAGER_PROPAGATES = os.getenv("CELERY_TASK_EAGER_PROPAGATES", "false").lower() == "true"
 ANALYSIS_TASK_LEASE_SECONDS = int(os.getenv("ANALYSIS_TASK_LEASE_SECONDS", "300"))
+CELERY_BEAT_SCHEDULE = {
+    "recover-analysis-tasks": {
+        "task": "apps.analysis.tasks.recover_analysis_tasks_task",
+        "schedule": 60.0,
+        "kwargs": {"batch_size": 100},
+    },
+    "refresh-song-availability": {
+        "task": "apps.songs.tasks.start_song_availability_scan_task",
+        "schedule": 60.0,
+        "kwargs": {"batch_size": 100},
+    },
+}
 
 LANGUAGE_CODE = "zh-hans"
 TIME_ZONE = "Asia/Shanghai"

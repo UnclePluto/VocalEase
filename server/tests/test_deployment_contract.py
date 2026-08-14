@@ -21,7 +21,7 @@ def compose_config():
 def test_compose_services_reference_the_existing_server_dockerfile():
     services = compose_config()["services"]
 
-    for service_name in ("server", "celery"):
+    for service_name in ("server", "celery", "celery-beat"):
         build = services[service_name]["build"]
         dockerfile = Path(build["context"]) / build["dockerfile"]
         assert dockerfile == REPOSITORY_ROOT / "deploy/docker/server.Dockerfile"
@@ -38,3 +38,20 @@ def test_runtime_and_infrastructure_versions_match_the_technical_baseline():
     services = compose_config()["services"]
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["redis"]["image"] == "redis:8-alpine"
+
+
+def test_compose_has_dedicated_celery_beat_with_health_dependencies():
+    services = compose_config()["services"]
+    beat = services["celery-beat"]
+    assert "celery" in beat["command"]
+    assert "beat" in beat["command"]
+    assert beat["depends_on"]["postgres"]["condition"] == "service_healthy"
+    assert beat["depends_on"]["redis"]["condition"] == "service_healthy"
+    assert beat["build"] == services["celery"]["build"]
+    assert beat["environment"] == services["celery"]["environment"]
+
+
+def test_base_settings_define_serializable_recovery_beat_schedule(settings):
+    schedule = settings.CELERY_BEAT_SCHEDULE
+    assert schedule["recover-analysis-tasks"]["task"] == "apps.analysis.tasks.recover_analysis_tasks_task"
+    assert schedule["refresh-song-availability"]["task"] == "apps.songs.tasks.start_song_availability_scan_task"

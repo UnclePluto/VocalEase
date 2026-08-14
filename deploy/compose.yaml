@@ -72,5 +72,26 @@ services:
       redis:
         condition: service_healthy
 
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: deploy/docker/server.Dockerfile
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-vocaease}
+      POSTGRES_USER: ${POSTGRES_USER:-vocaease}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vocaease}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    command: uv run celery -A vocaease beat --loglevel=INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:

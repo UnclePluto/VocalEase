@@ -32,6 +32,7 @@ class AnalysisTask(models.Model):
     claim_token = models.UUIDField(null=True, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     heartbeat_at = models.DateTimeField(null=True, blank=True)
+    next_dispatch_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     error_summary = models.CharField(max_length=256, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 from django.conf import settings
@@ -15,7 +16,7 @@ from apps.media.contracts import StorageValidationError
 from apps.media.models import MediaAsset
 from apps.media.services import backend_for_asset, create_upload_grant, ensure_local_asset_layout
 
-from .models import Song, SongUploadIntent
+from .models import Song, SongAvailabilityScanState, SongUploadIntent
 
 
 class SongStateConflict(APIException):
@@ -59,6 +60,13 @@ def _mark_source_availability(*, song: Song | None, asset: MediaAsset, available
         "source_verified_at": timezone.now(),
         "source_verified_asset_id": asset.id if available else None,
         "source_receipt_fingerprint": source_receipt_fingerprint(asset) if available else "",
+        "source_verified_backend": asset.backend if available else "",
+        "source_verified_object_key": asset.object_key if available else "",
+        "source_verified_size": asset.size if available else None,
+        "source_verified_mime": asset.mime if available else "",
+        "source_verified_sha256": asset.sha256 if available else "",
+        "source_verified_etag": asset.etag if available else "",
+        "source_verified_generation": asset.manifest_generation if available else "",
     }
     Song.objects.filter(pk=song.id, source_asset_id=asset.id).update(**values)
     for key, value in values.items():
@@ -158,7 +166,15 @@ def create_song(*, actor, request_id: str, song_id: UUID | None, source_asset: U
             id=song_id, source_asset=asset, source_available=True,
             source_verified_at=timezone.now(),
             source_verified_asset_id=asset.id,
-            source_receipt_fingerprint=source_receipt_fingerprint(asset), **values,
+            source_receipt_fingerprint=source_receipt_fingerprint(asset),
+            source_verified_backend=asset.backend,
+            source_verified_object_key=asset.object_key,
+            source_verified_size=asset.size,
+            source_verified_mime=asset.mime,
+            source_verified_sha256=asset.sha256,
+            source_verified_etag=asset.etag,
+            source_verified_generation=asset.manifest_generation,
+            **values,
         )
         record(actor=actor, action="song.create", target=song, changes={"title": song.title, "artist": song.artist, "genre": song.genre, "language": song.language, "duration_seconds": song.duration_seconds, "source": _source_snapshot(asset)}, request_id=request_id)
         if auto_analyze:
@@ -181,7 +197,22 @@ def update_song(*, actor, request_id: str, song: Song, source_asset: UUID | None
             locked.source_verified_at = None
             locked.source_verified_asset_id = None
             locked.source_receipt_fingerprint = ""
-            editable.update({"source_asset": asset, "analysis_status": locked.analysis_status, "publication_status": locked.publication_status, "source_available": False, "source_verified_at": None, "source_verified_asset_id": None, "source_receipt_fingerprint": ""})
+            locked.source_verified_backend = ""
+            locked.source_verified_object_key = ""
+            locked.source_verified_size = None
+            locked.source_verified_mime = ""
+            locked.source_verified_sha256 = ""
+            locked.source_verified_etag = ""
+            locked.source_verified_generation = ""
+            editable.update({
+                "source_asset": asset, "analysis_status": locked.analysis_status,
+                "publication_status": locked.publication_status, "source_available": False,
+                "source_verified_at": None, "source_verified_asset_id": None,
+                "source_receipt_fingerprint": "", "source_verified_backend": "",
+                "source_verified_object_key": "", "source_verified_size": None,
+                "source_verified_mime": "", "source_verified_sha256": "",
+                "source_verified_etag": "", "source_verified_generation": "",
+            })
         if not editable:
             return locked
         audit_fields = {"title", "artist", "genre", "language", "duration_seconds"}
@@ -279,3 +310,80 @@ def refresh_song_source_availability(*, batch_size: int = 100, after_id: UUID | 
     if len(songs) == batch_size:
         stats["next_after_id"] = str(songs[-1].id)
     return stats
+
+
+SONG_AVAILABILITY_SCAN_LEASE_SECONDS = 600
+
+
+def _dispatch_availability_scan(token: UUID, batch_size: int) -> None:
+    from .tasks import refresh_song_availability_scan_batch_task
+    refresh_song_availability_scan_batch_task.apply_async(args=[str(token), batch_size])
+
+
+def _release_scan_after_dispatch_failure(token: UUID) -> None:
+    SongAvailabilityScanState.objects.filter(pk=1, claim_token=token).update(
+        claim_token=None, lease_expires_at=None,
+    )
+
+
+def start_song_availability_scan(*, batch_size: int = 100, dispatcher=None) -> bool:
+    """取得全库扫描单例租约；过期扫描保留游标并由下一轮续跑。"""
+    dispatcher = dispatcher or _dispatch_availability_scan
+    batch_size = max(1, min(int(batch_size), 100))
+    now = timezone.now()
+    with transaction.atomic():
+        SongAvailabilityScanState.objects.get_or_create(pk=1)
+        state = SongAvailabilityScanState.objects.select_for_update().get(pk=1)
+        if state.claim_token and state.lease_expires_at and state.lease_expires_at > now:
+            return False
+        token = uuid4()
+        state.claim_token = token
+        state.lease_expires_at = now + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
+        if state.cursor is None:
+            state.stats = {"verified": 0, "unavailable": 0, "deferred": 0, "processed": 0}
+        state.save()
+    try:
+        dispatcher(token, batch_size)
+    except Exception as exc:
+        logger.error("song_availability_scan_dispatch_failed exception=%s", exc.__class__.__name__)
+        _release_scan_after_dispatch_failure(token)
+        return False
+    return True
+
+
+def run_song_availability_scan_batch(token: UUID, *, batch_size: int = 100, dispatcher=None) -> dict[str, int | str]:
+    dispatcher = dispatcher or _dispatch_availability_scan
+    now = timezone.now()
+    with transaction.atomic():
+        state = SongAvailabilityScanState.objects.select_for_update().get(pk=1)
+        if state.claim_token != token or not state.lease_expires_at or state.lease_expires_at <= now:
+            return {"status": "lease_lost"}
+        cursor = state.cursor
+        state.lease_expires_at = now + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
+        state.save(update_fields=["lease_expires_at", "updated_at"])
+
+    page = refresh_song_source_availability(batch_size=batch_size, after_id=cursor)
+    next_cursor = UUID(page["next_after_id"]) if page["next_after_id"] else None
+    with transaction.atomic():
+        state = SongAvailabilityScanState.objects.select_for_update().get(pk=1)
+        if state.claim_token != token:
+            return {"status": "lease_lost"}
+        aggregate = dict(state.stats)
+        for key in ("verified", "unavailable", "deferred", "processed"):
+            aggregate[key] = int(aggregate.get(key, 0)) + int(page[key])
+        state.stats = aggregate
+        state.cursor = next_cursor
+        if next_cursor is None:
+            state.claim_token = None
+            state.lease_expires_at = None
+        else:
+            state.lease_expires_at = timezone.now() + timedelta(seconds=SONG_AVAILABILITY_SCAN_LEASE_SECONDS)
+        state.save()
+    if next_cursor is not None:
+        try:
+            dispatcher(token, batch_size)
+        except Exception as exc:
+            logger.error("song_availability_scan_dispatch_failed exception=%s", exc.__class__.__name__)
+            _release_scan_after_dispatch_failure(token)
+            return {**aggregate, "status": "dispatch_failed", "next_after_id": str(next_cursor)}
+    return {**aggregate, "status": "completed" if next_cursor is None else "continued", "next_after_id": str(next_cursor or "")}

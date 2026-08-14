@@ -8,7 +8,7 @@ from .contracts import (AnalysisExecutor, AnalysisPayload,
 class MockSongExecutor(AnalysisExecutor):
     """仅演示状态协议；绝不生成或伪装真实音频产物。"""
 
-    def execute(self, task):
+    def execute(self, task, *, context=None):
         return {"protocol_version": "1.0", "is_mock": True, "artifacts": [], "metrics": {}}
 
 

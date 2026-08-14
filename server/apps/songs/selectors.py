@@ -20,10 +20,28 @@ def songs_for_admin(*, keyword: str = "", genre: str = "", language: str = "", a
 
 def songs_for_patient(*, keyword: str = "", ordering: str = "-created_at"):
     queryset = songs_for_admin(keyword=keyword, publication_status=Song.PublicationStatus.PUBLISHED, ordering=ordering)
-    return queryset.filter(
+    queryset = queryset.filter(
         source_available=True,
         source_verified_asset_id=F("source_asset_id"),
         source_receipt_fingerprint__gt="",
+        source_verified_backend=F("source_asset__backend"),
+        source_verified_object_key=F("source_asset__object_key"),
+        source_verified_size=F("source_asset__size"),
+        source_verified_mime=F("source_asset__mime"),
         source_asset__status="ready",
         source_asset__deleted_at__isnull=True,
+    )
+    return queryset.filter(
+        Q(
+            source_asset__backend="local",
+            source_verified_sha256=F("source_asset__sha256"),
+            source_verified_generation=F("source_asset__manifest_generation"),
+            source_verified_etag="",
+        )
+        | Q(
+            source_asset__backend="qiniu",
+            source_verified_etag=F("source_asset__etag"),
+            source_verified_sha256="",
+            source_verified_generation="",
+        )
     )

@@ -152,7 +152,7 @@ class AdminSongAnalysisStatusView(APIView):
 
     def get(self, request, song_id):
         get_object_or_404(songs_for_admin(), pk=song_id)
-        tasks = AnalysisTask.objects.filter(song_id=song_id).order_by("-created_at")
+        tasks = AnalysisTask.objects.filter(song_id=song_id).select_related("analysis_result").order_by("-created_at")
         data = [{"id": str(task.id), "task_type": task.task_type, "protocol_version": task.protocol_version, "executor": task.executor, "status": task.status, "attempt": task.attempt, "result": task.result if task.status == "succeeded" else {}, "error_code": task.error_code, "error_summary": task.error_summary, "created_at": task.created_at.isoformat(), "completed_at": task.completed_at.isoformat() if task.completed_at else None} for task in tasks]
         return api_response(data={"results": data}, request_id=request.request_id)
 
@@ -172,7 +172,14 @@ class PatientSongDetailView(APIView):
     permission_classes = [PatientCatalogPermission, MustChangePasswordPermission]
 
     def get_object(self, song_id):
-        song = get_object_or_404(songs_for_patient(), pk=song_id)
+        # 详情以实时存储复核为准，并可修复 Beat 尚未回填的可信快照；列表仍只查索引。
+        song = get_object_or_404(
+            songs_for_admin(publication_status=Song.PublicationStatus.PUBLISHED),
+            pk=song_id,
+        )
+        if not song.source_asset_id:
+            from django.http import Http404
+            raise Http404
         try:
             validate_source_asset(song=song, asset=song.source_asset)
         except SourceAssetInvalid:

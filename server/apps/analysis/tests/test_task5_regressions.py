@@ -172,7 +172,7 @@ def test_explicit_celery_retry_runs_initial_plus_three_attempts(tmp_path, settin
     task = services.create_song_analysis(song=song, source_asset=asset)
     calls = []
 
-    def transient_then_success(_self, _task):
+    def transient_then_success(_self, _task, **_kwargs):
         calls.append(_task.id)
         if len(calls) < 4:
             raise TransientAnalysisError("temporary secret must not leak")
@@ -197,7 +197,7 @@ def test_permanent_executor_error_fails_once_without_partial_result(tmp_path, se
     task = services.create_song_analysis(song=song, source_asset=asset)
     calls = []
 
-    def invalid_result(_self, _task):
+    def invalid_result(_self, _task, **_kwargs):
         calls.append(_task.id)
         return {"protocol_version": "1.0", "is_mock": True, "artifacts": [{"fake": True}], "metrics": {}}
 
@@ -267,7 +267,14 @@ def test_protocol_registry_rejects_unknown_combination_and_mock_artifacts(tmp_pa
 def test_temporary_verification_keeps_last_availability_but_mismatch_clears_it(tmp_path, settings, monkeypatch):
     settings.MEDIA_LOCAL_ROOT = str(tmp_path)
     song, asset = song_with_source()
-    Song.objects.filter(pk=song.id).update(source_available=True, source_verified_at=timezone.now(), source_verified_asset_id=asset.id, source_receipt_fingerprint="trusted")
+    Song.objects.filter(pk=song.id).update(
+        source_available=True, source_verified_at=timezone.now(),
+        source_verified_asset_id=asset.id, source_receipt_fingerprint="trusted",
+        source_verified_backend=asset.backend, source_verified_object_key=asset.object_key,
+        source_verified_size=asset.size, source_verified_mime=asset.mime,
+        source_verified_sha256=asset.sha256, source_verified_etag=asset.etag,
+        source_verified_generation=asset.manifest_generation,
+    )
 
     class TemporaryBackend:
         def stat(self, _object_key):
@@ -306,6 +313,13 @@ def test_patient_catalog_paginates_without_storage_stat(tmp_path, settings, monk
             source_verified_at=timezone.now(),
             source_verified_asset_id=_asset.id,
             source_receipt_fingerprint=f"trusted-{index}",
+            source_verified_backend=_asset.backend,
+            source_verified_object_key=_asset.object_key,
+            source_verified_size=_asset.size,
+            source_verified_mime=_asset.mime,
+            source_verified_sha256=_asset.sha256,
+            source_verified_etag=_asset.etag,
+            source_verified_generation=_asset.manifest_generation,
         )
     patient = User.objects.create_user(login_id="catalog-patient", password="888888", role=Role.PATIENT, must_change_password=False)
     monkeypatch.setattr(song_services, "backend_for_asset", lambda _asset: (_ for _ in ()).throw(AssertionError("列表不得 stat")))
