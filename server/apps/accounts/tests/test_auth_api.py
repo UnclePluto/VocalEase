@@ -240,6 +240,10 @@ def test_oversized_request_id_is_bounded_before_api_and_audit_use(api_client, do
     "unsafe_request_id",
     [
         "13800000003",
+        "trace:138_0000_0003",
+        "86:138:0000:0003",
+        "+86_138:0000_0003",
+        "＋８６：１３８＿００００：０００３",
         "+86.138.0000.0003",
         "+86\u200b138/0000/0003",
         "＋８６．１３８．００００．０００３",

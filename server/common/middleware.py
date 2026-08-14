@@ -28,5 +28,7 @@ class RequestIdMiddleware:
 
 class RequestIdLogFilter(logging.Filter):
     def filter(self, record):
-        record.request_id = _request_id.get()
+        request = getattr(record, "request", None)
+        candidate = _request_id.get() or getattr(request, "request_id", "")
+        record.request_id = sanitize_request_id(candidate)
         return True

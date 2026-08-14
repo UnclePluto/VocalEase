@@ -20,7 +20,7 @@ INVALID_REQUEST_ID = "invalid-request-id"
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
 _DIGIT = r"[0-9０-９]"
-_SEPARATOR = r"[\s.．。/／\\·・\-‐‑‒–—―−﹣－\u200b\u200c\u200d\u2060\ufeff]"
+_SEPARATOR = r"[\s.．。/／\\·・_:＿：\-‐‑‒–—―−﹣－\u200b\u200c\u200d\u2060\ufeff]"
 _PHONE_CANDIDATE = re.compile(
     rf"(?<![A-Za-z0-9０-９])"
     rf"(?P<candidate>(?:(?:[+＋]{_SEPARATOR}*)?[8８]{_SEPARATOR}*[6６]{_SEPARATOR}*)?"
