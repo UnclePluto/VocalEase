@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "apps.songs",
     "apps.analysis",
     "apps.singing",
+    "apps.analytics",
 ]
 
 MIDDLEWARE = [
@@ -145,6 +146,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 60.0,
         "kwargs": {"batch_size": 100},
     },
+    "recover-export-jobs": {
+        "task": "apps.analytics.tasks.recover_export_jobs_task",
+        "schedule": 60.0,
+        "kwargs": {"batch_size": 100},
+    },
 }
 
 LANGUAGE_CODE = "zh-hans"
@@ -172,6 +178,11 @@ QINIU_CALLBACK_URL = os.getenv("QINIU_CALLBACK_URL", "")
 QINIU_UPLOAD_URL = os.getenv("QINIU_UPLOAD_URL", "https://up.qiniup.com")
 QINIU_RS_HOST = os.getenv("QINIU_RS_HOST", "https://rs.qiniu.com")
 QINIU_STAT_TIMEOUT_SECONDS = float(os.getenv("QINIU_STAT_TIMEOUT_SECONDS", "5"))
+
+ANALYTICS_SYNC_EXPORT_LIMIT = 1000
+ANALYTICS_EXPORT_TTL_SECONDS = int(os.getenv("ANALYTICS_EXPORT_TTL_SECONDS", "86400"))
+ANALYTICS_EXPORT_LEASE_SECONDS = int(os.getenv("ANALYTICS_EXPORT_LEASE_SECONDS", "300"))
+ANALYTICS_AUTO_DISPATCH_EXPORTS = not CELERY_TASK_ALWAYS_EAGER
 
 if settings_module not in {"vocaease.settings.local", "vocaease.settings.test", "vocaease.settings.postgresql_test"}:
     if MEDIA_BACKEND != "qiniu" or not all((QINIU_ACCESS_KEY, QINIU_SECRET_KEY, QINIU_BUCKET, QINIU_DOMAIN, QINIU_CALLBACK_URL)):

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.utils import timezone
-from qiniu import Auth, BucketManager
+from qiniu import Auth, BucketManager, put_data
 
 from apps.media.contracts import ObjectMetadata, PrivateUrl, StorageValidationError, UploadGrant, UploadReceipt, build_object_key, validate_media_request
 
@@ -87,6 +87,25 @@ class QiniuStorageBackend:
         if payload is not None and (payload.get("key") != object_key or int(payload.get("fsize", -1)) != remote.size or str(payload.get("mime", "")) != remote.mime or str(payload.get("hash", "")) != remote.etag):
             raise StorageValidationError("七牛回调元数据与可信对象不一致")
         return UploadReceipt(**remote.__dict__)
+
+    def upload_generated(self, *, grant: UploadGrant, content: bytes, mime: str) -> UploadReceipt:
+        """服务端生成物仍使用受限 PutPolicy，并以 Kodo stat 作为可信完成事实。"""
+        try:
+            result, info = put_data(
+                grant.upload_token,
+                grant.object_key,
+                content,
+                mime_type=mime,
+                check_crc=True,
+            )
+        except Exception as exc:
+            raise StorageValidationError("七牛生成物上传失败") from exc
+        if getattr(info, "status_code", 0) != 200 or not isinstance(result, dict) or not result.get("hash"):
+            raise StorageValidationError("七牛生成物上传响应无效")
+        receipt = self.verify_completion(grant.object_key)
+        if receipt.size != len(content) or receipt.mime != mime or receipt.etag != str(result["hash"]):
+            raise StorageValidationError("七牛生成物可信回执不一致")
+        return receipt
 
     def verify_callback_signature(self, *, authorization: str, content_type: str, raw_path_query: str | None = None, callback_url: str | None = None, body: bytes) -> bool:
         if content_type.split(";", 1)[0].strip().lower() != self.callback_content_type:

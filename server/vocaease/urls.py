@@ -18,6 +18,7 @@ urlpatterns = [
     path("api/v1/patient/me/", PatientMeView.as_view(), name="patient-me"),
     path("api/v1/patient/singing-sessions/", include((patient_singing_urlpatterns, "patient_singing"), namespace="patient_singing")),
     path("api/v1/admin/singing-sessions/", include((admin_singing_urlpatterns, "admin_singing"), namespace="admin_singing")),
+    path("api/v1/admin/analytics/", include("apps.analytics.urls")),
     path("api/v1/patient/media/", include((patient_urlpatterns, "patient_media"), namespace="patient_media")),
     path("api/v1/admin/media/", include((admin_urlpatterns, "admin_media"), namespace="admin_media")),
     path("api/v1/media/", include((public_urlpatterns, "public_media"), namespace="public_media")),

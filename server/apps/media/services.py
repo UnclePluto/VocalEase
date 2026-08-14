@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from io import BytesIO
+import hashlib
 from typing import Any, Mapping
 from uuid import UUID
 from uuid import uuid4
@@ -408,3 +410,82 @@ def mark_asset_for_cleanup(*, asset: MediaAsset) -> MediaAsset:
         locked.upload_lease_expires_at = None
         locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
         return locked
+
+
+def publish_generated_asset(*, owner_id: UUID, content: bytes, mime: str) -> MediaAsset:
+    """把可信服务端生成物发布到 Task 4 的私有媒体协议，不暴露临时路径。"""
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    existing = MediaAsset.objects.filter(
+        owner_type=MediaAsset.OwnerType.EXPORT,
+        owner_id=owner_id,
+        media_type="export",
+        mime=mime,
+        size=len(content),
+        status=MediaAsset.Status.READY,
+        deleted_at__isnull=True,
+        metadata__generated_sha256=content_sha256,
+    ).order_by("created_at", "id").first()
+    if existing is not None:
+        backend = backend_for_asset(existing)
+        if isinstance(backend, LocalStorageBackend):
+            existing = ensure_local_asset_layout(asset=existing)
+            if existing.status == MediaAsset.Status.READY and existing.sha256 == content_sha256:
+                return existing
+        elif isinstance(backend, QiniuStorageBackend):
+            receipt = backend.verify_completion(existing.object_key)
+            if receipt.size == existing.size and receipt.mime == existing.mime and receipt.etag == existing.etag:
+                return existing
+    asset, grant = create_upload_grant(
+        owner_type=MediaAsset.OwnerType.EXPORT,
+        owner_id=owner_id,
+        media_type="export",
+        mime=mime,
+        size=len(content),
+    )
+    asset.metadata = {**(asset.metadata or {}), "generated_sha256": content_sha256}
+    asset.save(update_fields=["metadata", "updated_at"])
+    backend = backend_for_asset(asset)
+    try:
+        if isinstance(backend, LocalStorageBackend):
+            nonce = claim_local_upload(asset=asset)
+            prepared = backend.prepare_authorized_stream(
+                object_key=asset.object_key,
+                token=grant.upload_token,
+                stream=BytesIO(content),
+                mime=mime,
+                asset_id=asset.id,
+            )
+            publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=prepared, backend=backend)
+            completed = complete_local_asset(asset=asset)
+            with transaction.atomic():
+                completed = MediaAsset.objects.select_for_update().get(pk=completed.pk)
+                completed.metadata = {**(completed.metadata or {}), "generated_sha256": content_sha256}
+                completed.save(update_fields=["metadata", "updated_at"])
+            return completed
+        if isinstance(backend, QiniuStorageBackend):
+            receipt = backend.upload_generated(grant=grant, content=content, mime=mime)
+            with transaction.atomic():
+                locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+                if locked.status == MediaAsset.Status.READY:
+                    if locked.etag != receipt.etag:
+                        raise MediaConflict("生成物回执不一致", code="media_metadata_mismatch")
+                    locked.metadata = {**(locked.metadata or {}), "generated_sha256": content_sha256}
+                    locked.save(update_fields=["metadata", "updated_at"])
+                    return locked
+                if locked.status != MediaAsset.Status.UPLOADING:
+                    raise MediaConflict()
+                _check_receipt(locked, receipt)
+                locked.etag = receipt.etag
+                locked.sha256 = receipt.sha256
+                locked.status = MediaAsset.Status.READY
+                locked.metadata = {**(locked.metadata or {}), "generated_sha256": content_sha256}
+                locked.save(update_fields=["etag", "sha256", "status", "metadata", "updated_at"])
+                return locked
+        raise MediaConflict("生成物存储后端不受支持", code="media_backend_invalid")
+    except Exception:
+        MediaAsset.objects.filter(pk=asset.pk).exclude(status=MediaAsset.Status.READY).update(
+            status=MediaAsset.Status.FAILED,
+            upload_nonce=None,
+            upload_lease_expires_at=None,
+        )
+        raise
