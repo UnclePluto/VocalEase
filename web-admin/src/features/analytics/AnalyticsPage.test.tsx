@@ -254,13 +254,16 @@ describe('数据管理页面', () => {
     release()
   })
 
-  it.each([400, 409])('创建导出收到确定性 %i 后，重试使用新的幂等键', async (status) => {
+  it.each([
+    [400, 'validation_error'],
+    [409, 'export_idempotency_conflict'],
+  ])('创建导出收到确定性 %i %s 后，重试使用新的幂等键', async (status, code) => {
     authenticate(); useAnalyticsHandlers()
     let attempts = 0
     server.use(http.post('/api/v1/admin/analytics/exports/', () => {
       attempts += 1
       return attempts === 1
-        ? HttpResponse.json({ code: 'export_rejected', message: '导出请求无效', data: null, request_id: `export-${status}-request` }, { status })
+        ? HttpResponse.json({ code, message: '导出请求无效', data: null, request_id: `export-${status}-request` }, { status })
         : new HttpResponse('csv', { headers: { 'content-type': 'text/csv' } })
     }))
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:deterministic-retry') })
@@ -277,6 +280,37 @@ describe('数据管理页面', () => {
     await user.click(screen.getByRole('button', { name: '重试创建导出' }))
     await waitFor(() => expect(server.calls('/api/v1/admin/analytics/exports/')).toHaveLength(2))
     expect((server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key).not.toBe(firstKey)
+  })
+
+  it.each([
+    [400, 'unknown_bad_request'],
+    [408, 'request_timeout'],
+    [409, 'unknown_conflict'],
+    [425, 'too_early'],
+    [429, 'throttled'],
+  ])('创建导出收到可重试或未知 %i %s 后，重试保留原幂等键', async (status, code) => {
+    authenticate(); useAnalyticsHandlers()
+    let attempts = 0
+    server.use(http.post('/api/v1/admin/analytics/exports/', () => {
+      attempts += 1
+      return attempts === 1
+        ? HttpResponse.json({ code, message: '导出结果尚不确定', data: null, request_id: `export-${status}-request` }, { status })
+        : new HttpResponse('csv', { headers: { 'content-type': 'text/csv' } })
+    }))
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:retryable-client-error') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    const user = userEvent.setup(); renderApp('/analytics')
+
+    await screen.findByText('患者甲')
+    await user.click(screen.getByRole('button', { name: '导出报告 (0)' }))
+    await user.click(screen.getByRole('menuitem', { name: 'CSV' }))
+    expect(await screen.findByText('导出结果尚不确定')).toBeInTheDocument()
+    const firstKey = (server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key
+
+    await user.click(screen.getByRole('button', { name: '重试创建导出' }))
+    await waitFor(() => expect(server.calls('/api/v1/admin/analytics/exports/')).toHaveLength(2))
+    expect((server.lastJson('/api/v1/admin/analytics/exports/') as { idempotency_key: string }).idempotency_key).toBe(firstKey)
   })
 
   it('创建导出的请求内容变化时使用新的幂等键', async () => {

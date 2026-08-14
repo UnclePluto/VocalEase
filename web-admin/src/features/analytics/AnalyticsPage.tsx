@@ -15,6 +15,7 @@ import type { AnalyticsFilters, AnalyticsQuery, ExportFormat, PatientMetric } fr
 const DEFAULT_FILTERS: AnalyticsFilters = { name: '', medical_record_no: '', treatment_status: '', primary_doctor: '', created_from: '', created_to: '' }
 const DEFAULT_PAGE_SIZE = 20
 const TREATMENT_STATUSES = new Set<AnalyticsFilters['treatment_status']>(['active', 'pending', 'completed', 'cancelled', 'none'])
+const DETERMINISTIC_EXPORT_ERROR_CODES = new Set(['validation_error', 'export_idempotency_conflict'])
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 
 function validDate(value: string | null) {
@@ -54,6 +55,13 @@ function urlState(query: AnalyticsQuery, exportJob?: string) {
 
 function errorDescription(error: unknown) { return error instanceof ApiError && error.requestId ? `请求编号：${error.requestId}` : undefined }
 function errorMessage(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback }
+function isDeterministicExportError(error: unknown) {
+  return error instanceof ApiError
+    && error.status !== undefined
+    && error.status >= 400
+    && error.status < 500
+    && DETERMINISTIC_EXPORT_ERROR_CODES.has(error.code)
+}
 function formatDuration(seconds: number) { return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` }
 function trend(row: PatientMetric) {
   if (!row.score_trend.has_enough_data) return '数据不足'
@@ -133,9 +141,7 @@ function AnalyticsPageContent({ params, setParams }: { params: URLSearchParams; 
       }
     } catch (error) {
       if (!controller.signal.aborted) {
-        if (error instanceof ApiError && error.status !== undefined && error.status >= 400 && error.status < 500) {
-          requestKeyRef.current = null
-        }
+        if (isDeterministicExportError(error)) requestKeyRef.current = null
         setExportError({ error, format })
       }
     } finally { if (controllerRef.current === controller) controllerRef.current = null; setExporting(false) }
