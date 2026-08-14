@@ -162,6 +162,8 @@ def _private_url_response(request, asset):
     backend = backend_for_asset(asset)
     if isinstance(backend, LocalStorageBackend):
         asset = ensure_local_asset_layout(asset=asset)
+        if asset.status != MediaAsset.Status.READY:
+            raise PermissionDenied("媒体尚不可访问", code="media_not_ready")
         backend = backend_for_asset(asset)
         private_url = backend.create_private_url(asset.object_key, ttl_seconds=settings.MEDIA_PRIVATE_URL_TTL_SECONDS, asset_id=asset.id, expected_generation=asset.manifest_generation)
     else:

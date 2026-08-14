@@ -6,7 +6,7 @@ from uuid import uuid4
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
 
@@ -106,7 +106,10 @@ def complete_local_asset(*, asset: MediaAsset) -> MediaAsset:
             locked.sha256, locked.status = receipt.sha256, MediaAsset.Status.READY
             locked.save(update_fields=["sha256", "status", "updated_at"])
             completed = locked
-        backend.finalize_generation(completed.object_key, completed.manifest_generation, asset_id=completed.id)
+        backend.finalize_generation(
+            completed.object_key, completed.manifest_generation, asset_id=completed.id,
+            expected_size=completed.size, expected_mime=completed.mime, expected_sha256=completed.sha256,
+        )
     return completed
 
 
@@ -190,7 +193,12 @@ def recover_local_asset(*, asset_id: UUID, backend: LocalStorageBackend | None =
         backend = backend or backend_for_asset(locked)
         if locked.backend != "local" or not isinstance(backend, LocalStorageBackend):
             raise MediaConflict("媒体恢复后端不合法", code="media_backend_invalid")
-        backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+        backend.recover_pending(
+            locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
+            expected_size=locked.size if locked.status in {MediaAsset.Status.STAGED, MediaAsset.Status.READY} else None,
+            expected_mime=locked.mime if locked.status in {MediaAsset.Status.STAGED, MediaAsset.Status.READY} else None,
+            expected_sha256=locked.sha256 if locked.status in {MediaAsset.Status.STAGED, MediaAsset.Status.READY} else None,
+        )
         return locked
 
 
@@ -200,7 +208,10 @@ def finalize_local_publish(*, asset_id: UUID, generation: str, backend: LocalSto
         backend = backend or backend_for_asset(locked)
         if locked.backend != "local" or locked.manifest_generation != generation or not isinstance(backend, LocalStorageBackend):
             raise MediaConflict("媒体清单完成状态不一致", code="media_manifest_conflict")
-        backend.finalize_generation(locked.object_key, generation, asset_id=locked.id)
+        backend.finalize_generation(
+            locked.object_key, generation, asset_id=locked.id,
+            expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+        )
         return locked
 
 
@@ -210,23 +221,45 @@ def ensure_local_asset_layout(*, asset: MediaAsset) -> MediaAsset:
         backend = backend_for_asset(locked)
         if locked.backend != "local" or not isinstance(backend, LocalStorageBackend):
             return locked
-        backend.migrate_legacy_layout(
-            object_key=locked.object_key, asset_id=locked.id, generation=locked.manifest_generation,
-            expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
-        )
+        try:
+            backend.migrate_legacy_layout(
+                object_key=locked.object_key, asset_id=locked.id, generation=locked.manifest_generation,
+                expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+            )
+        except StorageValidationError:
+            if (locked.metadata or {}).get("migration_pending"):
+                metadata = dict(locked.metadata or {})
+                metadata["migration_pending"] = False
+                metadata["local_migration_reason"] = "legacy_runtime_evidence_missing_or_invalid"
+                locked.status = MediaAsset.Status.FAILED
+                locked.metadata = metadata
+                locked.save(update_fields=["status", "metadata", "updated_at"])
+                return locked
+            raise
+        metadata = dict(locked.metadata or {})
+        if metadata.get("migration_pending"):
+            metadata["migration_pending"] = False
+            metadata["local_layout"] = "immutable_v2"
+            locked.metadata = metadata
+            locked.save(update_fields=["metadata", "updated_at"])
         return locked
 
 
 def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
     now = now or timezone.now()
-    stats = {"receiving_recovered": 0, "staged_finalized": 0, "ready_finalized": 0, "errors": 0, "unknown_markers": 0}
+    stats = {"receiving_recovered": 0, "staged_finalized": 0, "ready_finalized": 0, "legacy_converted": 0, "errors": 0, "unknown_markers": 0, "oversized_markers": 0, "truncated_markers": 0}
     scanner_backend = storage_backend_for("local")
-    marker_claims, invalid_markers = scanner_backend.pending_marker_claims()
-    stats["unknown_markers"] = invalid_markers
+    marker_claims, scan_stats = scanner_backend.pending_marker_claims()
+    stats["unknown_markers"] = scan_stats["unknown"]
+    stats["oversized_markers"] = scan_stats["oversized"]
+    stats["truncated_markers"] = scan_stats["truncated"]
     claims_by_asset: dict[UUID, set[str]] = {}
     for asset_id, object_key in marker_claims:
         claims_by_asset.setdefault(asset_id, set()).add(object_key)
-    candidate_ids = set(MediaAsset.objects.filter(backend="local", status__in=[MediaAsset.Status.RECEIVING, MediaAsset.Status.STAGED]).values_list("id", flat=True))
+    candidate_ids = set(MediaAsset.objects.filter(backend="local").filter(
+        models.Q(status__in=[MediaAsset.Status.RECEIVING, MediaAsset.Status.STAGED])
+        | models.Q(status=MediaAsset.Status.READY, metadata__migration_pending=True)
+    ).values_list("id", flat=True))
     candidate_ids.update(asset_id for asset_id, _ in marker_claims)
     for asset_id in candidate_ids:
         try:
@@ -243,7 +276,38 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                 backend = backend_for_asset(locked)
                 if not isinstance(backend, LocalStorageBackend):
                     raise MediaConflict("媒体恢复后端不合法")
-                if locked.status == MediaAsset.Status.RECEIVING and locked.upload_lease_expires_at and locked.upload_lease_expires_at <= now:
+                if locked.status == MediaAsset.Status.READY and (locked.metadata or {}).get("migration_pending"):
+                    try:
+                        if has_matching_marker:
+                            backend.recover_pending(
+                                locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
+                                expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                            )
+                            backend.finalize_generation(
+                                locked.object_key, locked.manifest_generation, asset_id=locked.id,
+                                expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                            )
+                        else:
+                            backend.migrate_legacy_layout(
+                                object_key=locked.object_key, asset_id=locked.id, generation=locked.manifest_generation,
+                                expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                            )
+                    except StorageValidationError:
+                        metadata = dict(locked.metadata or {})
+                        metadata["migration_pending"] = False
+                        metadata["local_migration_reason"] = "legacy_runtime_evidence_missing_or_invalid"
+                        locked.status = MediaAsset.Status.FAILED
+                        locked.metadata = metadata
+                        locked.save(update_fields=["status", "metadata", "updated_at"])
+                        stats["errors"] += 1
+                        continue
+                    metadata = dict(locked.metadata or {})
+                    metadata["migration_pending"] = False
+                    metadata["local_layout"] = "immutable_v2"
+                    locked.metadata = metadata
+                    locked.save(update_fields=["metadata", "updated_at"])
+                    stats["legacy_converted"] += 1
+                elif locked.status == MediaAsset.Status.RECEIVING and locked.upload_lease_expires_at and locked.upload_lease_expires_at <= now:
                     backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
                     locked.status = MediaAsset.Status.UPLOADING
                     locked.upload_nonce = None
@@ -251,13 +315,25 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                     locked.save(update_fields=["status", "upload_nonce", "upload_lease_expires_at", "updated_at"])
                     stats["receiving_recovered"] += 1
                 elif locked.status == MediaAsset.Status.STAGED and has_matching_marker:
-                    recovered = backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
-                    finalized = backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
+                    recovered = backend.recover_pending(
+                        locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
+                        expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                    )
+                    finalized = backend.finalize_generation(
+                        locked.object_key, locked.manifest_generation, asset_id=locked.id,
+                        expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                    )
                     if recovered or finalized:
                         stats["staged_finalized"] += 1
                 elif locked.status == MediaAsset.Status.READY and has_matching_marker:
-                    recovered = backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
-                    finalized = backend.finalize_generation(locked.object_key, locked.manifest_generation, asset_id=locked.id)
+                    recovered = backend.recover_pending(
+                        locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
+                        expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                    )
+                    finalized = backend.finalize_generation(
+                        locked.object_key, locked.manifest_generation, asset_id=locked.id,
+                        expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                    )
                     if recovered or finalized:
                         stats["ready_finalized"] += 1
                 elif locked.status == MediaAsset.Status.UPLOADING:

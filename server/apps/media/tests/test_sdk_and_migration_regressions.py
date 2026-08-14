@@ -6,6 +6,7 @@ import pytest
 from django.db import IntegrityError, connection
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.recorder import MigrationRecorder
 from django.test import override_settings
 from django.conf import settings
 from qiniu import Auth
@@ -54,6 +55,7 @@ def test_media_migration_upgrades_legacy_qiniu_and_local_ready_assets_at_every_b
     SequenceCounter.objects.bulk_create([SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True)
     doctor = create_doctor(name="迁移医生", gender="male", phone="13600000771", department="康复科", title="医师")
     current_patient = create_patient(name="迁移患者", gender="female", enrollment_age=30, phone="13500000771", doctor=doctor, start_date="2026-01-01", cycle_weeks=1)
+    MigrationRecorder(connection).record_unapplied("media", "0009_irreversible_schema_barrier")
     executor = MigrationExecutor(connection)
     executor.migrate([("media", "0001_initial")])
     old_apps = executor.loader.project_state([("media", "0001_initial")]).apps
@@ -93,8 +95,8 @@ def test_media_migration_upgrades_legacy_qiniu_and_local_ready_assets_at_every_b
     upgraded_local = MediaAsset.objects.get(pk=local_asset.pk)
     assert upgraded_local.status == "ready"
     assert upgraded_local.manifest_generation == local_asset.id.hex
-    assert MediaAsset.objects.get(pk=missing_local.pk).status == "failed"
-    assert MediaAsset.objects.get(pk=escaped_local.pk).status == "failed"
+    assert MediaAsset.objects.get(pk=missing_local.pk).status == "ready"
+    assert MediaAsset.objects.get(pk=escaped_local.pk).status == "ready"
     assert outside_data.read_bytes() == escaped_content
     assert MediaAsset.objects.get(pk=uploading.pk).status == "uploading"
     __import__("apps.media.services", fromlist=["ensure_local_asset_layout"]).ensure_local_asset_layout(asset=upgraded_local)
@@ -102,14 +104,20 @@ def test_media_migration_upgrades_legacy_qiniu_and_local_ready_assets_at_every_b
     local_url = local_backend.create_private_url(local_key, ttl_seconds=600, asset_id=local_asset.id, expected_generation=local_asset.id.hex)
     assert local_backend.read_private(local_url.token) == local_content
     assert not legacy_path.exists()
+    recovery = __import__("apps.media.services", fromlist=["recover_stale_local_uploads"]).recover_stale_local_uploads()
+    assert recovery["errors"] == 2
+    assert MediaAsset.objects.get(pk=missing_local.pk).status == "failed"
+    assert MediaAsset.objects.get(pk=escaped_local.pk).status == "failed"
+    assert outside_data.read_bytes() == escaped_content
 
 
 @pytest.mark.django_db(transaction=True)
-def test_media_migration_upgrades_real_0007_immutable_manifest_without_losing_ready_content(tmp_path, settings):
+def test_media_migration_upgrades_real_0007_immutable_manifest_without_losing_ready_content(tmp_path, settings, monkeypatch):
     settings.MEDIA_LOCAL_ROOT = tmp_path / "media-0007"
     SequenceCounter.objects.bulk_create([SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True)
     doctor = create_doctor(name="七版医生", gender="male", phone="13600000772", department="康复科", title="医师")
     patient_now = create_patient(name="七版患者", gender="female", enrollment_age=30, phone="13500000772", doctor=doctor, start_date="2026-01-01", cycle_weeks=1)
+    MigrationRecorder(connection).record_unapplied("media", "0009_irreversible_schema_barrier")
     executor = MigrationExecutor(connection)
     executor.migrate([("media", "0007_media_type_constraint")])
     old_apps = executor.loader.project_state([("media", "0007_media_type_constraint")]).apps
@@ -129,14 +137,24 @@ def test_media_migration_upgrades_real_0007_immutable_manifest_without_losing_re
     manifest = settings.MEDIA_LOCAL_ROOT / ".manifests" / f"{key}.json"; manifest.parent.mkdir(parents=True)
     manifest.write_text(json.dumps({"version": 1, "generation": generation, "blob": generation, "mime": "audio/mpeg", "size": len(content), "sha256": digest}))
 
-    executor = MigrationExecutor(connection)
-    executor.migrate(executor.loader.graph.leaf_nodes())
+    before_manifest = manifest.read_bytes()
+    before_blob = (blob_root / generation).read_bytes()
+    with monkeypatch.context() as migration_guard:
+        migration_guard.setattr("os.replace", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("migration must not replace files")))
+        migration_guard.setattr("os.unlink", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("migration must not unlink files")))
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
 
     from apps.media.models import MediaAsset
     upgraded = MediaAsset.objects.get(pk=asset.pk)
-    assert upgraded.status == "ready" and upgraded.manifest_generation == generation
+    assert upgraded.status == "ready" and upgraded.manifest_generation == upgraded.id.hex
+    assert upgraded.metadata["local_layout"] == "legacy_pending_v0_or_v1"
+    assert upgraded.metadata["migration_pending"] is True
+    assert manifest.read_bytes() == before_manifest
+    assert (blob_root / generation).read_bytes() == before_blob
     local_backend = __import__("apps.media.backends.local", fromlist=["LocalStorageBackend"]).LocalStorageBackend(root=settings.MEDIA_LOCAL_ROOT, signing_secret=settings.SECRET_KEY, environment="test")
-    private = local_backend.create_private_url(key, ttl_seconds=600, asset_id=asset.pk, expected_generation=generation)
+    __import__("apps.media.services", fromlist=["ensure_local_asset_layout"]).ensure_local_asset_layout(asset=upgraded)
+    private = local_backend.create_private_url(key, ttl_seconds=600, asset_id=asset.pk, expected_generation=upgraded.id.hex)
     assert local_backend.read_private(private.token) == content
     stored = json.loads(manifest.read_text())
     assert stored["object_key"] == key and stored["asset_id"] == str(asset.pk)
@@ -162,3 +180,28 @@ def test_media_data_migration_downgrade_is_declared_irreversible_and_preserves_l
         executor.migrate([("media", "0001_initial")])
     assert {MediaAsset.objects.get(pk=asset.pk).owner_type for asset in assets} == {"song", "system", "export"}
     assert ("media", "0008_atomic_manifest_state") in MigrationExecutor(connection).loader.applied_migrations
+
+
+@pytest.mark.parametrize("contents", ["empty", "patient", "generic"])
+@pytest.mark.django_db(transaction=True)
+def test_latest_media_schema_reverse_barrier_stops_before_any_change(contents):
+    from apps.media.models import MediaAsset
+    if contents == "patient":
+        SequenceCounter.objects.bulk_create([SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True)
+        doctor = create_doctor(name="屏障医生", gender="male", phone="13600000779", department="康复科", title="医师")
+        patient = create_patient(name="屏障患者", gender="female", enrollment_age=30, phone="13500000779", doctor=doctor, start_date="2026-01-01", cycle_weeks=1)
+        MediaAsset.objects.create(patient_owner=patient, owner_type="patient", owner_id=patient.id, media_type="singing_audio", backend="local", object_key=f"test/singing_audio/2026/08/14/{uuid4().hex}", mime="audio/mpeg", size=3, status="uploading", upload_expires_at="2026-08-15T00:00:00Z")
+    elif contents == "generic":
+        MediaAsset.objects.create(patient_owner=None, owner_type="song", owner_id=uuid4(), media_type="song_source", backend="local", object_key=f"test/song_source/2026/08/14/{uuid4().hex}", mime="audio/mpeg", size=3, status="uploading", upload_expires_at="2026-08-15T00:00:00Z")
+    recorder_before = set(MigrationRecorder(connection).applied_migrations())
+    columns_before = [column.name for column in connection.introspection.get_table_description(connection.cursor(), MediaAsset._meta.db_table)]
+    rows_before = list(MediaAsset.objects.order_by("id").values())
+    try:
+        with pytest.raises(IrreversibleError):
+            MigrationExecutor(connection).migrate([("media", "0008_atomic_manifest_state")])
+    finally:
+        # RED 阶段旧实现可能真的回退；保证测试库恢复 latest，不污染后续测试。
+        MigrationExecutor(connection).migrate(MigrationExecutor(connection).loader.graph.leaf_nodes())
+    assert set(MigrationRecorder(connection).applied_migrations()) == recorder_before
+    assert [column.name for column in connection.introspection.get_table_description(connection.cursor(), MediaAsset._meta.db_table)] == columns_before
+    assert list(MediaAsset.objects.order_by("id").values()) == rows_before

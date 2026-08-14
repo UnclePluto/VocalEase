@@ -270,18 +270,30 @@ def test_scanner_completes_prepared_manifest_when_database_already_has_generatio
 
 @pytest.mark.django_db
 @override_settings(MEDIA_BACKEND="local")
-def test_scanner_recovers_legacy_conversion_crash_between_marker_and_manifest_replace(patient, tmp_path, settings, monkeypatch):
+@pytest.mark.parametrize("legacy_layout", ["v0_sidecar", "v1_manifest"])
+def test_scanner_recovers_legacy_conversion_crash_between_marker_and_manifest_replace(patient, tmp_path, settings, monkeypatch, legacy_layout):
     settings.MEDIA_LOCAL_ROOT = tmp_path
     asset, _ = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
     generation = asset.id.hex
     digest = hashlib.sha256(b"old").hexdigest()
-    MediaAsset.objects.filter(pk=asset.pk).update(status=MediaAsset.Status.READY, sha256=digest, manifest_generation=generation)
+    MediaAsset.objects.filter(pk=asset.pk).update(
+        status=MediaAsset.Status.READY, sha256=digest, manifest_generation=generation,
+        metadata={"migration_pending": True, "local_layout": "legacy_pending_v0_or_v1"},
+    )
     asset.refresh_from_db()
-    legacy = tmp_path / asset.object_key; legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(b"old")
-    legacy.with_name(f".{legacy.name}.metadata.json").write_text(json.dumps({"mime": "audio/mpeg", "size": 3, "sha256": digest}))
+    if legacy_layout == "v0_sidecar":
+        legacy = tmp_path / asset.object_key; legacy.parent.mkdir(parents=True)
+        legacy.write_bytes(b"old")
+        legacy.with_name(f".{legacy.name}.metadata.json").write_text(json.dumps({"mime": "audio/mpeg", "size": 3, "sha256": digest}))
+    else:
+        old_blob = uuid4().hex
+        (tmp_path / ".blobs").mkdir(parents=True)
+        (tmp_path / ".blobs" / old_blob).write_bytes(b"old")
+        old_manifest = tmp_path / ".manifests" / f"{asset.object_key}.json"
+        old_manifest.parent.mkdir(parents=True)
+        old_manifest.write_text(json.dumps({"version": 1, "generation": uuid4().hex, "blob": old_blob, "mime": "audio/mpeg", "size": 3, "sha256": digest}))
     backend = media_services.backend_for_asset(asset)
-    original_replace = os.replace
+    original_replace = backend._safe_replace
 
     class HardCrash(BaseException):
         pass
@@ -291,17 +303,19 @@ def test_scanner_recovers_legacy_conversion_crash_between_marker_and_manifest_re
             raise HardCrash
         return original_replace(source, destination)
 
-    monkeypatch.setattr("apps.media.backends.local.os.replace", crash_before_manifest)
+    monkeypatch.setattr(backend, "_safe_replace", crash_before_manifest)
     with pytest.raises(HardCrash):
         backend.migrate_legacy_layout(
             object_key=asset.object_key, asset_id=asset.id, generation=generation,
             expected_size=3, expected_mime="audio/mpeg", expected_sha256=digest,
         )
-    monkeypatch.setattr("apps.media.backends.local.os.replace", original_replace)
+    monkeypatch.setattr(backend, "_safe_replace", original_replace)
 
     stats = media_services.recover_stale_local_uploads(now=timezone.now())
 
-    assert stats["ready_finalized"] == 1
+    assert stats["legacy_converted"] == 1
+    asset.refresh_from_db()
+    assert asset.metadata["migration_pending"] is False
     private = backend.create_private_url(asset.object_key, ttl_seconds=600, asset_id=asset.id, expected_generation=generation)
     assert backend.read_private(private.token) == b"old"
 
@@ -345,12 +359,118 @@ def test_local_backend_rejects_symlinked_internal_directories(tmp_path, special)
 def test_local_backend_rejects_symlinked_storage_root(tmp_path):
     outside = tmp_path / "outside"; outside.mkdir()
     linked = tmp_path / "media"; linked.symlink_to(outside, target_is_directory=True)
-    backend = LocalStorageBackend(root=linked, signing_secret="secret", environment="test")
     with pytest.raises(StorageValidationError):
-        backend.pending_marker_claims()
-    with pytest.raises(StorageValidationError):
-        backend.stat(f"test/singing_audio/2026/08/14/{uuid4().hex}")
+        LocalStorageBackend(root=linked, signing_secret="secret", environment="test")
     assert list(outside.iterdir()) == []
+
+
+def test_local_backend_fails_closed_when_secure_dirfd_capabilities_are_missing(tmp_path, monkeypatch):
+    monkeypatch.delattr("apps.media.backends.local.os.O_NOFOLLOW")
+    with pytest.raises(StorageValidationError, match="安全文件能力"):
+        LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+
+
+def test_safe_open_rejects_file_swapped_to_symlink_between_check_and_open(tmp_path):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    asset_id = uuid4()
+    grant = backend.create_upload_grant(owner_id=asset_id, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend.write_upload(grant=grant, content=b"old", mime="audio/mpeg", asset_id=asset_id)
+    manifest_path = backend._manifest_path(grant.object_key)
+    saved_manifest = manifest_path.with_suffix(".saved")
+    outside = tmp_path.parent / f"outside-{uuid4().hex}"
+    outside.write_text('{"private":"must-not-read"}')
+    invoked = False
+
+    def swap(kind, path):
+        nonlocal invoked
+        if not invoked and kind == "manifest":
+            invoked = True
+            manifest_path.replace(saved_manifest)
+            manifest_path.symlink_to(outside)
+
+    backend._safe_open_hook = swap
+    try:
+        with pytest.raises(StorageValidationError):
+            backend.stat(grant.object_key)
+        assert outside.read_text() == '{"private":"must-not-read"}'
+    finally:
+        manifest_path.unlink(missing_ok=True)
+        if saved_manifest.exists():
+            saved_manifest.replace(manifest_path)
+        outside.unlink(missing_ok=True)
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_scanner_rejects_same_size_marker_whose_content_hash_disagrees_with_locked_db_receipt(patient, tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    asset, grant = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend = media_services.backend_for_asset(asset)
+    nonce = media_services.claim_local_upload(asset=asset)
+    original = backend.prepare_authorized_stream(object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg", asset_id=asset.id)
+    media_services.publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=original, backend=backend)
+    media_services.complete_local_asset(asset=asset)
+    original_generation = original.generation
+    original_manifest = backend._manifest_path(asset.object_key)
+    saved_manifest = original_manifest.with_suffix(".trusted-original")
+    original_manifest.replace(saved_manifest)
+    malicious = backend._prepare_stream(object_key=asset.object_key, stream=io.BytesIO(b"bad"), mime="audio/mpeg", asset_id=asset.id, expected_size=3)
+    trusted_sha = hashlib.sha256(b"old").hexdigest()
+    forged_marker = json.loads(malicious.pending_marker.read_text())
+    forged_marker["new"]["sha256"] = trusted_sha
+    malicious.pending_marker.write_text(json.dumps(forged_marker))
+    forged_temp = json.loads(malicious.manifest_temp.read_text())
+    forged_temp["sha256"] = trusted_sha
+    malicious.manifest_temp.write_text(json.dumps(forged_temp))
+    MediaAsset.objects.filter(pk=asset.pk).update(
+        status=MediaAsset.Status.READY, manifest_generation=malicious.generation,
+        sha256=trusted_sha, upload_nonce=None, upload_lease_expires_at=None,
+    )
+
+    stats = media_services.recover_stale_local_uploads(now=timezone.now())
+
+    assert stats["errors"] == 1
+    assert malicious.pending_marker.exists()
+    assert saved_manifest.exists() and not original_manifest.exists()
+    saved_manifest.replace(original_manifest)
+    assert backend.stat(asset.object_key, expected_generation=original_generation).sha256 == hashlib.sha256(b"old").hexdigest()
+    MediaAsset.objects.filter(pk=asset.pk).update(manifest_generation=original_generation)
+    private = backend.create_private_url(asset.object_key, ttl_seconds=600, asset_id=asset.id, expected_generation=original_generation)
+    assert backend.read_private(private.token) == b"old"
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local", MEDIA_SCANNER_MAX_MARKERS=10, MEDIA_SCANNER_MAX_MARKER_BYTES=1024)
+def test_scanner_bounds_marker_count_and_size_without_reading_oversized_file(patient, tmp_path, settings, monkeypatch):
+    settings.MEDIA_LOCAL_ROOT = tmp_path
+    asset, _ = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
+    backend = media_services.backend_for_asset(asset)
+    prepared = backend._prepare_stream(object_key=asset.object_key, stream=io.BytesIO(b"old"), mime="audio/mpeg", asset_id=asset.id, expected_size=3)
+    oversized = backend.pending_root / f"{uuid4().hex}.json"
+    oversized.write_bytes(b"x" * 2048)
+    (backend.pending_root / f"{uuid4().hex}.json").write_text("{}")
+    (backend.pending_root / f"{uuid4().hex}.json").write_text("{}")
+    (backend.pending_root / f"{uuid4().hex}.json").write_text("{}")
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path, *args, **kwargs):
+        if path == oversized:
+            raise AssertionError("oversized marker must not be read")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setitem(media_services.STORAGE_BACKEND_FACTORIES, "local", lambda: backend)
+
+    stats = media_services.recover_stale_local_uploads(now=timezone.now())
+
+    assert stats["oversized_markers"] == 1
+    assert stats["unknown_markers"] >= 2
+    assert not prepared.pending_marker.exists(), "预算内合法 marker 仍必须被隔离恢复"
+    for _ in range(20):
+        (backend.pending_root / f"{uuid4().hex}.json").write_text("{}")
+    with override_settings(MEDIA_SCANNER_MAX_MARKERS=3):
+        bounded = media_services.recover_stale_local_uploads(now=timezone.now())
+    assert bounded["truncated_markers"] >= 1
 
 
 @pytest.mark.django_db

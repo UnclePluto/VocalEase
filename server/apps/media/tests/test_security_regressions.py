@@ -133,9 +133,8 @@ def test_manifest_publish_failure_keeps_previous_download_and_removes_orphan_blo
     grant = backend.create_upload_grant(owner_id=uuid4(), media_type="singing_audio", mime="audio/mpeg", size=3)
     backend.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"), mime="audio/mpeg")
     original = backend.stat(grant.object_key)
-    import os
-    original_replace = os.replace
-    monkeypatch.setattr("apps.media.backends.local.os.replace", lambda source, target: (_ for _ in ()).throw(OSError("manifest failure")) if ".manifests" in str(target) else original_replace(source, target))
+    original_replace = backend._safe_replace
+    monkeypatch.setattr(backend, "_safe_replace", lambda source, target: (_ for _ in ()).throw(OSError("manifest failure")) if ".manifests" in str(target) else original_replace(source, target))
     with pytest.raises(OSError):
         backend.write_authorized_stream(object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"new"), mime="audio/mpeg")
     assert backend.stat(grant.object_key).sha256 == original.sha256

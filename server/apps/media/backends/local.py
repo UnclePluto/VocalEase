@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, BinaryIO, Mapping
 from urllib.parse import quote, urlencode
 from uuid import UUID, uuid4
@@ -25,6 +24,7 @@ from apps.media.contracts import ObjectMetadata, PrivateUrl, StorageValidationEr
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_FIELDS = {"version", "object_key", "asset_id", "generation", "blob", "mime", "size", "sha256"}
+_LEGACY_MANIFEST_FIELDS = {"version", "generation", "blob", "mime", "size", "sha256"}
 _MARKER_FIELDS = {"version", "phase", "object_key", "asset_id", "new", "previous", "manifest_temp"}
 
 
@@ -52,12 +52,148 @@ class LocalStorageBackend:
 
     signing_salt = "vocaease.media.local"
     chunk_size = 64 * 1024
+    scanner_marker_hard_limit = 1000
+    scanner_marker_bytes_hard_limit = 64 * 1024
 
     def __init__(self, *, root: str | Path, signing_secret: str, environment: str):
+        required_constants = ("O_NOFOLLOW", "O_DIRECTORY")
+        required_dirfd = (os.open, os.stat, os.unlink, os.rename)
+        if any(not isinstance(getattr(os, name, None), int) or not getattr(os, name, 0) for name in required_constants) or any(call not in os.supports_dir_fd for call in required_dirfd):
+            raise StorageValidationError("平台缺少本地媒体安全文件能力")
         # 保留调用方给出的真实路径形态；不能先 resolve，否则会掩盖 root 本身是 symlink。
         self.root = Path(root).absolute()
         self.signer = signing.Signer(key=signing_secret, salt=self.signing_salt)
         self.environment = environment
+        self._safe_open_hook = lambda kind, path: None
+        self._safe_directory(self.root)
+
+    @contextmanager
+    def _parent_fd(self, path: Path, *, create: bool = False):
+        try:
+            relative = path.parent.relative_to(self.root)
+        except ValueError as exc:
+            raise StorageValidationError("媒体文件路径越界") from exc
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptors: list[int] = []
+        try:
+            root_fd = os.open(self.root, flags)
+            descriptors.append(root_fd)
+            current = root_fd
+            for part in relative.parts:
+                if part in {"", ".", ".."}:
+                    raise StorageValidationError("媒体目录路径不合法")
+                if create:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=current)
+                    except FileExistsError:
+                        pass
+                child = os.open(part, flags, dir_fd=current)
+                if not stat.S_ISDIR(os.fstat(child).st_mode):
+                    os.close(child)
+                    raise StorageValidationError("媒体目录路径不合法")
+                descriptors.append(child)
+                current = child
+        except StorageValidationError:
+            raise
+        except OSError as exc:
+            raise StorageValidationError("媒体目录不可安全访问") from exc
+        try:
+            yield current
+        finally:
+            for descriptor in reversed(descriptors):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def _safe_open_file(self, path: Path, *, kind: str, flags: int, mode: int = 0o600, create_parent: bool = False) -> int:
+        with self._parent_fd(path, create=create_parent) as parent_fd:
+            before = None
+            if not (flags & os.O_EXCL):
+                try:
+                    before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    if not stat.S_ISREG(before.st_mode):
+                        raise StorageValidationError("媒体文件类型不合法")
+                except FileNotFoundError:
+                    if not (flags & os.O_CREAT):
+                        raise StorageValidationError("媒体文件不存在")
+            self._safe_open_hook(kind, path)
+            try:
+                descriptor = os.open(path.name, flags | os.O_NOFOLLOW, mode, dir_fd=parent_fd)
+            except OSError as exc:
+                raise StorageValidationError("媒体文件不可安全打开") from exc
+            after = os.fstat(descriptor)
+            if not stat.S_ISREG(after.st_mode) or (before is not None and (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
+                os.close(descriptor)
+                raise StorageValidationError("媒体文件在打开期间发生变化")
+            return descriptor
+
+    def _safe_read_json(self, path: Path, *, kind: str, max_bytes: int | None = None) -> Any:
+        descriptor = self._safe_open_file(path, kind=kind, flags=os.O_RDONLY)
+        try:
+            size = os.fstat(descriptor).st_size
+            if max_bytes is not None and size > max_bytes:
+                raise StorageValidationError("媒体状态文件过大")
+            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+                descriptor = -1
+                return json.load(source)
+        except StorageValidationError:
+            raise
+        except (OSError, ValueError, TypeError) as exc:
+            raise StorageValidationError("媒体状态文件损坏") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def _safe_stat_file(self, path: Path, *, kind: str) -> os.stat_result:
+        descriptor = self._safe_open_file(path, kind=kind, flags=os.O_RDONLY)
+        try:
+            return os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _safe_unlink(self, path: Path, *, missing_ok: bool = True) -> None:
+        try:
+            with self._parent_fd(path) as parent_fd:
+                os.unlink(path.name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise StorageValidationError("媒体文件不存在")
+        except OSError as exc:
+            raise StorageValidationError("媒体文件不可安全删除") from exc
+
+    def _safe_replace(self, source: Path, destination: Path) -> None:
+        source_descriptor = self._safe_open_file(source, kind="replace_source", flags=os.O_RDONLY)
+        source_identity = os.fstat(source_descriptor)
+        try:
+            with self._parent_fd(source) as source_fd, self._parent_fd(destination, create=True) as destination_fd:
+                self._safe_open_hook("replace", destination)
+                try:
+                    os.rename(source.name, destination.name, src_dir_fd=source_fd, dst_dir_fd=destination_fd)
+                except OSError as exc:
+                    raise StorageValidationError("媒体文件不可原子发布") from exc
+            destination_descriptor = self._safe_open_file(destination, kind="replace_destination", flags=os.O_RDONLY)
+            try:
+                destination_identity = os.fstat(destination_descriptor)
+                if (source_identity.st_dev, source_identity.st_ino) != (destination_identity.st_dev, destination_identity.st_ino):
+                    raise StorageValidationError("媒体原子发布源文件发生变化")
+            finally:
+                os.close(destination_descriptor)
+        finally:
+            os.close(source_descriptor)
+
+    def _new_temp_file(self, parent: Path, *, prefix: str, binary: bool):
+        for _ in range(16):
+            name = f"{prefix}{uuid4().hex}"
+            path = parent / name
+            try:
+                descriptor = self._safe_open_file(
+                    path, kind="temp", flags=os.O_CREAT | os.O_EXCL | os.O_RDWR, create_parent=True,
+                )
+                return path, os.fdopen(descriptor, "w+b" if binary else "w+", encoding=None if binary else "utf-8")
+            except StorageValidationError:
+                continue
+        raise StorageValidationError("无法创建安全媒体临时文件")
 
     @property
     def blobs_root(self) -> Path:
@@ -165,9 +301,10 @@ class LocalStorageBackend:
         self._path(object_key)
         locks_root = self._safe_directory(self.locks_root)
         lock_path = locks_root / f"{self._object_digest(object_key)}.lock"
-        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
         try:
-            descriptor = os.open(lock_path, flags, 0o600)
+            with self._parent_fd(lock_path, create=True) as parent_fd:
+                descriptor = os.open(lock_path.name, flags, 0o600, dir_fd=parent_fd)
         except OSError as exc:
             raise StorageValidationError("无法取得对象文件锁") from exc
         with os.fdopen(descriptor, "a+b") as lock_file:
@@ -216,17 +353,56 @@ class LocalStorageBackend:
 
     def _load_manifest(self, object_key: str, *, required: bool = True) -> dict[str, Any] | None:
         path = self._manifest_path(object_key)
-        if not path.is_file():
+        try:
+            stored = self._safe_read_json(path, kind="manifest", max_bytes=self.scanner_marker_bytes_hard_limit)
+        except StorageValidationError as exc:
+            if "不存在" not in str(exc):
+                raise
             if required:
                 raise StorageValidationError("媒体对象不存在")
             return None
         try:
-            with path.open(encoding="utf-8") as source:
-                return self._validate_manifest(json.load(source), object_key)
+            return self._validate_manifest(stored, object_key)
         except StorageValidationError:
             raise
         except (OSError, ValueError, TypeError) as exc:
             raise StorageValidationError("媒体清单损坏") from exc
+
+    def _load_manifest_state(self, object_key: str) -> tuple[str, dict[str, Any] | None]:
+        path = self._manifest_path(object_key)
+        try:
+            stored = self._safe_read_json(path, kind="manifest", max_bytes=self.scanner_marker_bytes_hard_limit)
+        except StorageValidationError as exc:
+            if "不存在" in str(exc):
+                return "missing", None
+            raise
+        try:
+            return "current", self._validate_manifest(stored, object_key)
+        except StorageValidationError:
+            if (
+                isinstance(stored, dict) and set(stored) == _LEGACY_MANIFEST_FIELDS
+                and stored.get("version") == 1 and _HEX32.fullmatch(str(stored.get("generation", "")))
+                and _HEX32.fullmatch(str(stored.get("blob", "")))
+                and type(stored.get("size")) is int and stored["size"] > 0
+                and isinstance(stored.get("mime"), str) and _HEX64.fullmatch(str(stored.get("sha256", "")))
+            ):
+                return "legacy_v1", stored
+            raise
+
+    def _verify_trusted_receipt(self, manifest: Mapping[str, Any], blob_path: Path, *, asset_id: UUID | str,
+                                generation: str, size: int, mime: str, sha256: str) -> None:
+        if (
+            manifest.get("asset_id") != str(UUID(str(asset_id))) or manifest.get("generation") != generation
+            or manifest.get("size") != size or manifest.get("mime") != mime or manifest.get("sha256") != sha256
+        ):
+            raise StorageValidationError("媒体清单与数据库可信回执不一致")
+        digest = hashlib.sha256(); actual_size = 0
+        descriptor = self._safe_open_file(blob_path, kind="blob", flags=os.O_RDONLY)
+        with os.fdopen(descriptor, "rb") as source:
+            while chunk := source.read(self.chunk_size):
+                actual_size += len(chunk); digest.update(chunk)
+        if actual_size != size or digest.hexdigest() != sha256:
+            raise StorageValidationError("媒体 blob 与数据库可信回执不一致")
 
     def _snapshot(self, object_key: str, *, verify_hash: bool) -> tuple[dict[str, Any], Path]:
         self._ensure_internal_roots()
@@ -234,13 +410,14 @@ class LocalStorageBackend:
         assert manifest is not None
         blob_path = self._blob_path(manifest["blob"], object_key)
         try:
-            if not blob_path.is_file() or blob_path.stat().st_size != manifest["size"]:
+            if self._safe_stat_file(blob_path, kind="blob").st_size != manifest["size"]:
                 raise StorageValidationError("媒体清单与 blob 不一致")
         except OSError as exc:
             raise StorageValidationError("媒体 blob 不可访问") from exc
         if verify_hash:
             digest = hashlib.sha256()
-            with blob_path.open("rb") as source:
+            descriptor = self._safe_open_file(blob_path, kind="blob", flags=os.O_RDONLY)
+            with os.fdopen(descriptor, "rb") as source:
                 while chunk := source.read(self.chunk_size):
                     digest.update(chunk)
             if digest.hexdigest() != manifest["sha256"]:
@@ -248,15 +425,7 @@ class LocalStorageBackend:
         return manifest, blob_path
 
     def _write_json_sync(self, path: Path, payload: Mapping[str, Any]) -> None:
-        if path.exists() or path.is_symlink():
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise StorageValidationError("媒体状态文件路径不合法")
-        flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(path, flags, 0o600)
-        except OSError as exc:
-            raise StorageValidationError("媒体状态文件不可写") from exc
+        descriptor = self._safe_open_file(path, kind="state", flags=os.O_CREAT | os.O_WRONLY | os.O_TRUNC, create_parent=True)
         with os.fdopen(descriptor, "w", encoding="utf-8") as target:
             json.dump(payload, target, separators=(",", ":"))
             target.flush(); os.fsync(target.fileno())
@@ -290,28 +459,44 @@ class LocalStorageBackend:
 
     def _load_marker(self, marker_path: Path, *, object_key: str, asset_id: UUID | str) -> dict[str, Any]:
         try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
+            marker = self._safe_read_json(marker_path, kind="marker", max_bytes=self.scanner_marker_bytes_hard_limit)
+        except StorageValidationError as exc:
             raise StorageValidationError("待恢复标记损坏") from exc
         return self._validate_marker(marker, marker_path, object_key=object_key, asset_id=asset_id)
 
-    def pending_marker_claims(self) -> tuple[list[tuple[UUID, str]], int]:
+    def pending_marker_claims(self) -> tuple[list[tuple[UUID, str]], dict[str, int]]:
         self._ensure_internal_roots()
         claims: list[tuple[UUID, str]] = []
-        invalid = 0
-        for marker_path in self.pending_root.glob("*.json"):
-            try:
-                info = marker_path.lstat()
-                if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                    raise StorageValidationError("待恢复标记路径不合法")
-                raw = json.loads(marker_path.read_text(encoding="utf-8"))
-                object_key = raw.get("object_key") if isinstance(raw, dict) else ""
-                asset_id = UUID(str(raw.get("asset_id"))) if isinstance(raw, dict) else None
-                self._validate_marker(raw, marker_path, object_key=object_key, asset_id=asset_id)
-                claims.append((asset_id, object_key))
-            except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
-                invalid += 1
-        return claims, invalid
+        stats = {"unknown": 0, "oversized": 0, "truncated": 0}
+        configured_count = max(1, min(int(getattr(settings, "MEDIA_SCANNER_MAX_MARKERS", self.scanner_marker_hard_limit)), self.scanner_marker_hard_limit))
+        configured_bytes = max(1, min(int(getattr(settings, "MEDIA_SCANNER_MAX_MARKER_BYTES", self.scanner_marker_bytes_hard_limit)), self.scanner_marker_bytes_hard_limit))
+        seen = 0
+        with self._parent_fd(self.pending_root / ".scan") as pending_fd, os.scandir(pending_fd) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(".json") or Path(name).name != name:
+                    continue
+                marker_path = self.pending_root / name
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise StorageValidationError("待恢复标记路径不合法")
+                    if info.st_size > configured_bytes:
+                        stats["oversized"] += 1
+                        stats["unknown"] += 1
+                        continue
+                    if seen >= configured_count:
+                        stats["truncated"] += 1
+                        continue
+                    seen += 1
+                    raw = self._safe_read_json(marker_path, kind="marker", max_bytes=configured_bytes)
+                    object_key = raw.get("object_key") if isinstance(raw, dict) else ""
+                    asset_id = UUID(str(raw.get("asset_id"))) if isinstance(raw, dict) else None
+                    self._validate_marker(raw, marker_path, object_key=object_key, asset_id=asset_id)
+                    claims.append((asset_id, object_key))
+                except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
+                    stats["unknown"] += 1
+        return claims, stats
 
     def create_upload_grant(self, *, owner_id: UUID, media_type: str, mime: str, size: int) -> UploadGrant:
         validate_media_request(media_type=media_type, mime=mime, size=size)
@@ -323,32 +508,42 @@ class LocalStorageBackend:
         return UploadGrant(object_key=key, expires_at=expires_at, upload_token=token)
 
     def migrate_legacy_layout(self, *, object_key: str, asset_id: UUID | str, generation: str, expected_size: int, expected_mime: str, expected_sha256: str) -> bool:
-        """在调用方持有 DB 行锁时，将旧 data+sidecar 复制为不可变 blob+manifest。"""
+        """在调用方持有 DB 行锁时，用普通 marker 协议转换 v0 sidecar 或 v1 manifest。"""
         self._ensure_internal_roots()
         normalized_asset_id = str(UUID(str(asset_id)))
+        legacy_paths: list[Path] = []
         with self.object_lock(object_key):
-            current = self._load_manifest(object_key, required=False)
-            if current:
+            layout, stored = self._load_manifest_state(object_key)
+            if layout == "current":
+                current = stored
+                assert current is not None
                 if current["asset_id"] != normalized_asset_id or current["generation"] != generation:
                     raise StorageValidationError("旧媒体清单与数据库不一致")
-                self._path(object_key).unlink(missing_ok=True)
-                self._legacy_metadata_path(object_key).unlink(missing_ok=True)
+                self._verify_trusted_receipt(
+                    current, self._blob_path(current["blob"], object_key), asset_id=asset_id,
+                    generation=generation, size=expected_size, mime=expected_mime, sha256=expected_sha256,
+                )
                 return False
             if not _HEX32.fullmatch(generation):
                 raise StorageValidationError("旧媒体 generation 不合法")
-            legacy_path = self._path(object_key)
-            sidecar_path = self._legacy_metadata_path(object_key)
-            if not legacy_path.is_file() or not sidecar_path.is_file():
-                raise StorageValidationError("旧媒体文件不存在")
-            try:
-                with sidecar_path.open(encoding="utf-8") as source:
-                    sidecar = json.load(source)
-            except (OSError, ValueError, TypeError) as exc:
-                raise StorageValidationError("旧媒体元数据损坏") from exc
-            if set(sidecar) != {"mime", "size", "sha256"} or sidecar != {"mime": expected_mime, "size": expected_size, "sha256": expected_sha256}:
-                raise StorageValidationError("旧媒体元数据与数据库不一致")
+            if layout == "legacy_v1":
+                legacy = stored
+                assert legacy is not None
+                if legacy["size"] != expected_size or legacy["mime"] != expected_mime or legacy["sha256"] != expected_sha256:
+                    raise StorageValidationError("旧媒体清单与数据库不一致")
+                old_blob = self.blobs_root / legacy["blob"]
+                source_fd = self._safe_open_file(old_blob, kind="legacy_blob", flags=os.O_RDONLY)
+                legacy_paths.append(old_blob)
+            else:
+                legacy_path = self._path(object_key)
+                sidecar_path = self._legacy_metadata_path(object_key)
+                sidecar = self._safe_read_json(sidecar_path, kind="legacy_sidecar", max_bytes=self.scanner_marker_bytes_hard_limit)
+                if set(sidecar) != {"mime", "size", "sha256"} or sidecar != {"mime": expected_mime, "size": expected_size, "sha256": expected_sha256}:
+                    raise StorageValidationError("旧媒体元数据与数据库不一致")
+                source_fd = self._safe_open_file(legacy_path, kind="legacy_blob", flags=os.O_RDONLY)
+                legacy_paths.extend([legacy_path, sidecar_path])
         # 复制/哈希在文件锁外完成；DB 行锁仍由服务层持有。发布与普通上传走同一 marker/CAS 协议。
-        with legacy_path.open("rb") as source:
+        with os.fdopen(source_fd, "rb") as source:
             prepared = self._prepare_stream(
                 object_key=object_key, stream=source, mime=expected_mime, asset_id=normalized_asset_id,
                 expected_size=expected_size, expected_sha256=expected_sha256, generation=generation,
@@ -360,8 +555,8 @@ class LocalStorageBackend:
             raise
         self.finalize_publish(published)
         with self.object_lock(object_key):
-            legacy_path.unlink(missing_ok=True)
-            sidecar_path.unlink(missing_ok=True)
+            for legacy_path in legacy_paths:
+                self._safe_unlink(legacy_path)
         return True
 
     def _prepare_stream(self, *, object_key: str, stream: BinaryIO, mime: str, asset_id: UUID | str,
@@ -377,8 +572,7 @@ class LocalStorageBackend:
         blob = f"{digest_name[:16]}-{generation}"
         blob_path = self._blob_path(blob, object_key)
         marker_path = self._marker_path(object_key, generation)
-        temporary = NamedTemporaryFile(dir=self.blobs_root, prefix=f".upload-{digest_name[:16]}-", delete=False)
-        temporary_path = Path(temporary.name)
+        temporary_path, temporary = self._new_temp_file(self.blobs_root, prefix=f".upload-{digest_name[:16]}-", binary=True)
         manifest_temp_path: Path | None = None
         digest = hashlib.sha256(); size = 0
         try:
@@ -394,20 +588,19 @@ class LocalStorageBackend:
             sha256 = digest.hexdigest()
             if expected_sha256 is not None and sha256 != expected_sha256:
                 raise StorageValidationError("媒体文件与可信回执不一致")
-            os.replace(temporary_path, blob_path)
+            self._safe_replace(temporary_path, blob_path)
             manifest = {"version": 1, "object_key": object_key, "asset_id": normalized_asset_id, "generation": generation, "blob": blob, "mime": mime, "size": size, "sha256": sha256}
             prefix = f".manifest-{digest_name}-{UUID(normalized_asset_id).hex}-{generation}-"
-            manifest_temp = NamedTemporaryFile(dir=manifest_parent, prefix=prefix, delete=False, mode="w", encoding="utf-8")
-            manifest_temp_path = Path(manifest_temp.name)
+            manifest_temp_path, manifest_temp = self._new_temp_file(manifest_parent, prefix=prefix, binary=False)
             with manifest_temp:
                 json.dump(manifest, manifest_temp, separators=(",", ":")); manifest_temp.flush(); os.fsync(manifest_temp.fileno())
             self._write_json_sync(marker_path, {"version": 1, "phase": "prepared", "object_key": object_key, "asset_id": normalized_asset_id, "new": manifest, "previous": None, "manifest_temp": manifest_temp_path.name})
             return PreparedLocalUpload(object_key, normalized_asset_id, generation, blob, mime, size, sha256, manifest_temp_path, marker_path)
         except Exception:
-            temporary_path.unlink(missing_ok=True)
+            self._safe_unlink(temporary_path)
             if manifest_temp_path:
-                manifest_temp_path.unlink(missing_ok=True)
-            blob_path.unlink(missing_ok=True); marker_path.unlink(missing_ok=True)
+                self._safe_unlink(manifest_temp_path)
+            self._safe_unlink(blob_path); self._safe_unlink(marker_path)
             raise
 
     def prepare_authorized_stream(self, *, object_key: str, token: str, stream: BinaryIO, mime: str, asset_id: UUID | str | None = None) -> PreparedLocalUpload:
@@ -423,7 +616,8 @@ class LocalStorageBackend:
     def publish_manifest(self, prepared: PreparedLocalUpload, *, expected_generation: str) -> PublishedLocalUpload:
         with self.object_lock(prepared.object_key):
             prepared_marker = self._load_marker(prepared.pending_marker, object_key=prepared.object_key, asset_id=prepared.asset_id)
-            previous = self._load_manifest(prepared.object_key, required=False)
+            layout, stored = self._load_manifest_state(prepared.object_key)
+            previous = stored if layout == "current" else None
             actual = previous["generation"] if previous else ""
             if actual != expected_generation:
                 raise StorageValidationError("媒体清单版本冲突")
@@ -431,20 +625,25 @@ class LocalStorageBackend:
                 raise StorageValidationError("媒体清单资产冲突")
             marker = {**prepared_marker, "phase": "published", "previous": previous}
             self._write_json_sync(prepared.pending_marker, marker)
-            os.replace(prepared.manifest_temp, self._manifest_path(prepared.object_key))
+            self._safe_replace(prepared.manifest_temp, self._manifest_path(prepared.object_key))
             return PublishedLocalUpload(prepared=prepared, previous_manifest=previous)
 
     def discard_prepared(self, prepared: PreparedLocalUpload) -> None:
         with self.object_lock(prepared.object_key):
-            current = self._load_manifest(prepared.object_key, required=False)
+            layout, stored = self._load_manifest_state(prepared.object_key)
+            current = stored if layout == "current" else None
             if current and current["generation"] == prepared.generation:
                 raise StorageValidationError("不可丢弃已发布清单")
-            prepared.manifest_temp.unlink(missing_ok=True)
-            prepared.pending_marker.unlink(missing_ok=True)
-            self._blob_path(prepared.blob, prepared.object_key).unlink(missing_ok=True)
+            self._safe_unlink(prepared.manifest_temp)
+            self._safe_unlink(prepared.pending_marker)
+            self._safe_unlink(self._blob_path(prepared.blob, prepared.object_key))
 
     def finalize_publish(self, published: PublishedLocalUpload) -> None:
-        self.finalize_generation(published.prepared.object_key, published.prepared.generation, asset_id=published.prepared.asset_id)
+        prepared = published.prepared
+        self.finalize_generation(
+            prepared.object_key, prepared.generation, asset_id=prepared.asset_id,
+            expected_size=prepared.size, expected_mime=prepared.mime, expected_sha256=prepared.sha256,
+        )
 
     def _blob_is_referenced(self, blob: str, *, exclude_marker: Path | None = None) -> bool:
         manifests_root = self.root / ".manifests"
@@ -452,10 +651,9 @@ class LocalStorageBackend:
             return False
         for manifest_path in manifests_root.rglob("*.json"):
             try:
-                with manifest_path.open(encoding="utf-8") as source:
-                    if json.load(source).get("blob") == blob:
-                        return True
-            except (OSError, ValueError, TypeError, AttributeError):
+                if self._safe_read_json(manifest_path, kind="manifest", max_bytes=self.scanner_marker_bytes_hard_limit).get("blob") == blob:
+                    return True
+            except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
                 # 未知或损坏 manifest 一律保守保留 blob。
                 return True
         if self.pending_root.is_dir() and not self.pending_root.is_symlink():
@@ -463,17 +661,19 @@ class LocalStorageBackend:
                 if exclude_marker is not None and marker_path == exclude_marker:
                     continue
                 try:
-                    raw = json.loads(marker_path.read_text(encoding="utf-8"))
+                    raw = self._safe_read_json(marker_path, kind="marker", max_bytes=self.scanner_marker_bytes_hard_limit)
                     referenced = [raw.get("new")]
                     if raw.get("previous") is not None:
                         referenced.append(raw.get("previous"))
                     if any(isinstance(item, dict) and item.get("blob") == blob for item in referenced):
                         return True
-                except (OSError, ValueError, TypeError, AttributeError):
+                except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
                     return True
         return False
 
-    def recover_pending(self, object_key: str, *, asset_id: UUID | str, expected_generation: str) -> bool:
+    def recover_pending(self, object_key: str, *, asset_id: UUID | str, expected_generation: str,
+                        expected_size: int | None = None, expected_mime: str | None = None,
+                        expected_sha256: str | None = None) -> bool:
         """依据数据库 generation 恢复进程中断留下的 prepared/published marker。"""
         self._path(object_key)
         self._ensure_internal_roots()
@@ -485,7 +685,8 @@ class LocalStorageBackend:
                 new = marker["new"]
                 temp_name = marker["manifest_temp"]
                 manifest_temp = self._manifest_path(object_key).parent / temp_name
-                current = self._load_manifest(object_key, required=False)
+                layout, stored = self._load_manifest_state(object_key)
+                current = stored if layout == "current" else None
                 actual_generation = current["generation"] if current else ""
                 if expected_generation == new["generation"] and actual_generation != new["generation"]:
                     # DB 已记录新 generation，但进程在原子 replace 前退出：只接受绑定的
@@ -493,17 +694,20 @@ class LocalStorageBackend:
                     if actual_generation:
                         raise StorageValidationError("待恢复清单与数据库版本不一致")
                     try:
-                        with manifest_temp.open(encoding="utf-8") as source:
-                            temp_manifest = self._validate_manifest(json.load(source), object_key)
-                    except (OSError, ValueError, TypeError) as exc:
+                        temp_manifest = self._validate_manifest(self._safe_read_json(manifest_temp, kind="manifest_temp", max_bytes=self.scanner_marker_bytes_hard_limit), object_key)
+                    except StorageValidationError as exc:
                         raise StorageValidationError("待恢复清单临时文件损坏") from exc
                     if temp_manifest != new:
                         raise StorageValidationError("待恢复清单临时文件不匹配")
                     blob_path = self._blob_path(new["blob"], object_key)
-                    if not blob_path.is_file() or blob_path.stat().st_size != new["size"]:
-                        raise StorageValidationError("待恢复 blob 不一致")
+                    if expected_size is None or expected_mime is None or expected_sha256 is None:
+                        raise StorageValidationError("待恢复操作缺少数据库可信回执")
+                    self._verify_trusted_receipt(
+                        new, blob_path, asset_id=asset_id, generation=expected_generation,
+                        size=expected_size, mime=expected_mime, sha256=expected_sha256,
+                    )
                     self._write_json_sync(marker_path, {**marker, "phase": "published"})
-                    os.replace(manifest_temp, self._manifest_path(object_key))
+                    self._safe_replace(manifest_temp, self._manifest_path(object_key))
                     actual_generation = new["generation"]
                     recovered = True
                 if actual_generation == new["generation"] and expected_generation != new["generation"]:
@@ -513,22 +717,23 @@ class LocalStorageBackend:
                         raise StorageValidationError("待恢复清单与数据库版本不一致")
                     path = self._manifest_path(object_key)
                     if previous is None:
-                        path.unlink(missing_ok=True)
+                        self._safe_unlink(path)
                     else:
-                        restore = NamedTemporaryFile(dir=path.parent, prefix=".manifest-recover-", delete=False, mode="w", encoding="utf-8")
+                        restore_path, restore = self._new_temp_file(path.parent, prefix=".manifest-recover-", binary=False)
                         with restore:
                             json.dump(previous, restore, separators=(",", ":")); restore.flush(); os.fsync(restore.fileno())
-                        os.replace(restore.name, path)
+                        self._safe_replace(restore_path, path)
                     actual_generation = expected_generation
                 if actual_generation == expected_generation and expected_generation != new["generation"]:
                     if not self._blob_is_referenced(new["blob"], exclude_marker=marker_path):
-                        self._blob_path(new["blob"], object_key).unlink(missing_ok=True)
-                    manifest_temp.unlink(missing_ok=True)
-                    marker_path.unlink(missing_ok=True)
+                        self._safe_unlink(self._blob_path(new["blob"], object_key))
+                    self._safe_unlink(manifest_temp)
+                    self._safe_unlink(marker_path)
                     recovered = True
         return recovered
 
-    def finalize_generation(self, object_key: str, generation: str, *, asset_id: UUID | str) -> bool:
+    def finalize_generation(self, object_key: str, generation: str, *, asset_id: UUID | str,
+                            expected_size: int, expected_mime: str, expected_sha256: str) -> bool:
         self._ensure_internal_roots()
         finalized = False
         with self.object_lock(object_key):
@@ -540,12 +745,18 @@ class LocalStorageBackend:
                 current = self._load_manifest(object_key)
                 if current["generation"] != generation or current["asset_id"] != str(UUID(str(asset_id))):
                     raise StorageValidationError("媒体清单版本冲突")
+                if marker["new"] != current:
+                    raise StorageValidationError("待完成 marker 与当前清单不一致")
+                self._verify_trusted_receipt(
+                    current, self._blob_path(current["blob"], object_key), asset_id=asset_id,
+                    generation=generation, size=expected_size, mime=expected_mime, sha256=expected_sha256,
+                )
                 previous = marker["previous"]
                 if previous:
                     if previous["blob"] != current["blob"] and not self._blob_is_referenced(previous["blob"], exclude_marker=marker_path):
-                        self._blob_path(previous["blob"], object_key).unlink(missing_ok=True)
-                (self._manifest_path(object_key).parent / marker["manifest_temp"]).unlink(missing_ok=True)
-                marker_path.unlink(missing_ok=True)
+                        self._safe_unlink(self._blob_path(previous["blob"], object_key))
+                self._safe_unlink(self._manifest_path(object_key).parent / marker["manifest_temp"])
+                self._safe_unlink(marker_path)
                 finalized = True
         return finalized
 
@@ -626,8 +837,8 @@ class LocalStorageBackend:
         with self.object_lock(object_key):
             path = self.authorize_private(token, object_key, asset_id=asset_id, expected_generation=expected_generation)
             try:
-                return path.open("rb")
-            except OSError as exc:
+                return os.fdopen(self._safe_open_file(path, kind="blob", flags=os.O_RDONLY), "rb")
+            except (OSError, StorageValidationError) as exc:
                 raise StorageValidationError("媒体 blob 不可打开") from exc
 
     open_authorized_private = verify_and_open_private
