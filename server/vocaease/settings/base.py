@@ -30,6 +30,8 @@ INSTALLED_APPS = [
     "apps.doctors",
     "apps.patients",
     "apps.media",
+    "apps.songs",
+    "apps.analysis",
 ]
 
 MIDDLEWARE = [
@@ -123,6 +125,8 @@ CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", os.getenv("REDIS_URL"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
+CELERY_TASK_EAGER_PROPAGATES = True
 
 LANGUAGE_CODE = "zh-hans"
 TIME_ZONE = "Asia/Shanghai"

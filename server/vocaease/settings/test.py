@@ -8,3 +8,4 @@ PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 MEDIA_BACKEND = "local"
 MEDIA_ENVIRONMENT = "test"
 MEDIA_LOCAL_ROOT = str(BASE_DIR / ".test-private-media")
+CELERY_TASK_ALWAYS_EAGER = True
