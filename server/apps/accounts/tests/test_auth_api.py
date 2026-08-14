@@ -502,6 +502,33 @@ def test_web_logout_revokes_cookie_so_refresh_cannot_restore_session(api_client,
 
 
 @pytest.mark.django_db
+def test_web_logout_without_refresh_cookie_still_rejects_untrusted_origin(api_client):
+    response = api_client.post(
+        "/api/v1/auth/logout/",
+        {"client_kind": "web"},
+        format="json",
+        HTTP_ORIGIN="https://attacker.example.test",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "origin_not_allowed"
+
+
+@pytest.mark.django_db
+def test_web_logout_without_refresh_cookie_is_idempotent_for_trusted_origin(api_client):
+    response = api_client.post(
+        "/api/v1/auth/logout/",
+        {"client_kind": "web"},
+        format="json",
+        HTTP_ORIGIN="https://app.vocaease.test",
+    )
+
+    assert response.status_code == 200
+    assert response.cookies["refresh_token"].value == ""
+    assert response.cookies["refresh_csrf_token"].value == ""
+
+
+@pytest.mark.django_db
 def test_android_logout_still_requires_authenticated_access(api_client, doctor_user):
     login_response = api_client.post(
         "/api/v1/auth/login/",

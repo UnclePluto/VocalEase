@@ -1,11 +1,16 @@
-import { apiRequest, csrfRequestHeaders, refreshSession } from '../api/client'
+import {
+  apiRequest,
+  csrfRequestHeaders,
+  enqueueWebAuthMutation,
+  refreshSession,
+} from '../api/client'
 import type { AuthPayload } from '../api/types'
 
 export function loginAccount(input: { login_id: string; password: string; remember_me: boolean }) {
-  return apiRequest<AuthPayload>('/v1/auth/login/', {
+  return enqueueWebAuthMutation(() => apiRequest<AuthPayload>('/v1/auth/login/', {
     method: 'POST',
     body: JSON.stringify({ ...input, client_kind: 'web' }),
-  })
+  }))
 }
 
 export function recoverAccount(expectedEpoch: number) {
@@ -13,11 +18,11 @@ export function recoverAccount(expectedEpoch: number) {
 }
 
 export function logoutAccount() {
-  return apiRequest<Record<string, never>>('/v1/auth/logout/', {
+  return enqueueWebAuthMutation(() => apiRequest<Record<string, never>>('/v1/auth/logout/', {
     method: 'POST',
     headers: csrfRequestHeaders(),
     body: JSON.stringify({ client_kind: 'web' }),
-  })
+  }))
 }
 
 export function changeAccountPassword(input: { old_password: string; new_password: string }) {

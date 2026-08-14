@@ -24,6 +24,8 @@ let bridge: SessionBridge = {
   rejectServerSession: () => undefined,
 }
 let refreshFlight: RefreshFlight | null = null
+let authMutationTail: Promise<void> = Promise.resolve()
+let authMutationGeneration = 0
 
 export function configureSessionBridge(nextBridge: SessionBridge) {
   bridge = nextBridge
@@ -35,10 +37,24 @@ export function invalidateAuthOperations() {
 
 export function resetApiClientForTests() {
   invalidateAuthOperations()
+  authMutationGeneration += 1
+  authMutationTail = Promise.resolve()
 }
 
 function sessionChanged(): ApiError {
   return new ApiError('session_changed', '登录状态已变更')
+}
+
+export function enqueueWebAuthMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const generation = authMutationGeneration
+  const result = authMutationTail
+    .catch(() => undefined)
+    .then(() => {
+      if (generation !== authMutationGeneration) throw sessionChanged()
+      return operation()
+    })
+  authMutationTail = result.then(() => undefined, () => undefined)
+  return result
 }
 
 function readCookie(name: string): string {
@@ -95,7 +111,12 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return payload.data
 }
 
-async function fetchApi<T>(path: string, init: RequestInit, accessToken: string | null): Promise<T> {
+async function fetchApi<T>(
+  path: string,
+  init: RequestInit,
+  accessToken: string | null,
+  sessionFence?: () => void,
+): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${API_PREFIX}${path}`, {
@@ -109,7 +130,10 @@ async function fetchApi<T>(path: string, init: RequestInit, accessToken: string 
     }
     throw new ApiError('network_error', '网络连接失败，请稍后重试')
   }
-  return parseResponse<T>(response)
+  sessionFence?.()
+  const data = await parseResponse<T>(response)
+  sessionFence?.()
+  return data
 }
 
 async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
@@ -119,7 +143,7 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
 
   const flight = {} as RefreshFlight
   flight.epoch = expectedEpoch
-  flight.promise = fetchApi<AuthPayload>(
+  flight.promise = enqueueWebAuthMutation(() => fetchApi<AuthPayload>(
     `${AUTH_PREFIX}refresh/`,
     {
       method: 'POST',
@@ -127,7 +151,7 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
       body: JSON.stringify({ client_kind: 'web' }),
     },
     null,
-  )
+  ))
     .then((payload) => {
       try {
         if (!bridge.acceptAuth(payload, expectedEpoch)) throw sessionChanged()
@@ -154,9 +178,14 @@ async function refreshOnce(expectedEpoch: number): Promise<AuthPayload> {
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const started = bridge.getSession()
+  const requiresSessionFence = !path.startsWith(AUTH_PREFIX)
+  const assertSessionIsCurrent = () => {
+    if (requiresSessionFence && bridge.getSession().epoch !== started.epoch) throw sessionChanged()
+  }
   try {
-    return await fetchApi<T>(path, init, started.accessToken)
+    return await fetchApi<T>(path, init, started.accessToken, assertSessionIsCurrent)
   } catch (error) {
+    assertSessionIsCurrent()
     const canRefresh =
       error instanceof ApiError &&
       error.status === 401 &&
@@ -169,7 +198,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     if (refreshed.epoch !== started.epoch) throw sessionChanged()
 
     try {
-      return await fetchApi<T>(path, init, refreshed.accessToken)
+      return await fetchApi<T>(path, init, refreshed.accessToken, assertSessionIsCurrent)
     } catch (replayError) {
       if (replayError instanceof ApiError && replayError.status === 401) {
         bridge.clearSession(started.epoch)

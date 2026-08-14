@@ -89,13 +89,21 @@ def _request_origin(request) -> str:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
 
 
-def validate_web_refresh_request(request) -> None:
+def validate_web_origin(request) -> None:
     if _request_origin(request) not in settings.AUTH_WEB_ALLOWED_ORIGINS:
         raise PermissionDenied("请求来源不受信任", code="origin_not_allowed")
+
+
+def validate_web_csrf(request) -> None:
     cookie_token = request.COOKIES.get(settings.AUTH_REFRESH_CSRF_COOKIE_NAME, "")
     header_token = request.headers.get("X-CSRFToken", "")
     if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
         raise PermissionDenied("CSRF 校验失败", code="csrf_failed")
+
+
+def validate_web_refresh_request(request) -> None:
+    validate_web_origin(request)
+    validate_web_csrf(request)
 
 
 class LogoutJWTAuthentication(ActiveUserJWTAuthentication):
@@ -214,11 +222,12 @@ class LogoutView(APIView):
         client_kind = serializer.validated_data["client_kind"]
         raw_refresh = get_refresh(request, serializer)
         if client_kind == "web":
+            validate_web_origin(request)
             if not raw_refresh:
                 response = api_response(data={}, request_id=request.request_id)
                 clear_refresh_cookies(response)
                 return response
-            validate_web_refresh_request(request)
+            validate_web_csrf(request)
             actor = None
         else:
             if not request.user or not request.user.is_authenticated:

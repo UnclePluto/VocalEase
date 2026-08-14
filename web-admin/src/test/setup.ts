@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 
 import { resetApiClientForTests } from '../api/client'
 import { useAuthStore } from '../auth/store'
+import { clearVisibleTestCookies } from './cookies'
 import { server } from './server'
 
 function memoryStorage(): Storage {
@@ -46,12 +47,10 @@ afterEach(() => {
   server.reset()
   window.localStorage.clear()
   window.sessionStorage.clear()
-  for (const cookie of document.cookie.split(';')) {
-    const name = cookie.split('=')[0]?.trim()
-    if (name) document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`
-  }
+  clearVisibleTestCookies()
   vi.clearAllTimers()
   vi.useRealTimers()
   window.innerWidth = 1024
+  window.history.replaceState(null, '', '/')
 })
 afterAll(() => server.close())
