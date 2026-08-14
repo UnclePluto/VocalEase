@@ -40,6 +40,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const resumeAt = useRef(0)
   const activeAssetIds = useRef(new Set<string>())
   const refreshed = useRef(new Set<string>())
+  const refreshGenerations = useRef(new Map<string, number>())
   const [playing, setPlaying] = useState(false)
   const [activeTrack, setActiveTrack] = useState<TrackKey>('mixed')
   const [videoFailed, setVideoFailed] = useState(false)
@@ -97,15 +98,20 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
       return false
     }
     refreshed.current.add(asset.assetId)
+    const generation = (refreshGenerations.current.get(asset.assetId) ?? 0) + 1
+    refreshGenerations.current.set(asset.assetId, generation)
     setFailure(null)
     try {
       const url = await onRefreshMedia(asset.assetId)
       if (!activeAssetIds.current.has(asset.assetId)) return false
+      if (refreshGenerations.current.get(asset.assetId) !== generation) return true
       setOverrides((current) => ({ ...current, [asset.assetId]: url }))
       if (asset.assetId === media.video?.assetId) setVideoFailed(false)
       return true
     } catch (error) {
-      if (activeAssetIds.current.has(asset.assetId)) setFailure(failureOf(asset, error))
+      if (!activeAssetIds.current.has(asset.assetId)) return false
+      if (refreshGenerations.current.get(asset.assetId) !== generation) return true
+      setFailure(failureOf(asset, error))
       return false
     }
   }

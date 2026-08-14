@@ -27,14 +27,21 @@ describe('VisualizerAdapter', () => {
     expect(cancelFrame).toHaveBeenCalledWith(9); expect(disconnectSource).toHaveBeenCalledOnce(); expect(disconnectAnalyser).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce()
   })
 
-  it('Waviz 吞掉媒体源异常而未初始化时通过健康探针启动 fallback', async () => {
+  it('Waviz 已占用媒体源但健康探针失败时只清理并停用可视化，不二次绑定同一媒体', async () => {
     const context = { state: 'running', destination: {}, createMediaElementSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })), createAnalyser: vi.fn(() => ({ frequencyBinCount: 32, getByteFrequencyData: vi.fn(), connect: vi.fn(), disconnect: vi.fn() })), resume: vi.fn(), close: vi.fn() }
-    const cleanup = vi.fn()
-    const adapter = createVisualizerAdapter({ loadWaviz: vi.fn().mockResolvedValue({ Waviz: class { cleanup = cleanup; getFrequencyData = () => null; simpleBars = vi.fn() } }), createContext: () => context as unknown as AudioContext, requestFrame: vi.fn().mockReturnValue(1) })
+    const cleanup = vi.fn(); const requestFrame = vi.fn().mockReturnValue(1)
+    const Waviz = vi.fn(class { cleanup = cleanup; getFrequencyData = () => null; simpleBars = vi.fn() })
+    const adapter = createVisualizerAdapter({ loadWaviz: vi.fn().mockResolvedValue({ Waviz }), createContext: () => context as unknown as AudioContext, requestFrame })
     const canvas = document.createElement('canvas'); vi.spyOn(canvas, 'getContext').mockReturnValue({ clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '' } as unknown as CanvasRenderingContext2D)
-    await adapter.start(document.createElement('audio'), canvas)
+    const media = document.createElement('audio')
+    await expect(adapter.start(media, canvas)).resolves.toBeUndefined()
+    await expect(adapter.start(media, canvas)).resolves.toBeUndefined()
     expect(cleanup).toHaveBeenCalledOnce()
-    expect(context.createMediaElementSource).toHaveBeenCalledOnce()
+    expect(Waviz).toHaveBeenCalledOnce()
+    expect(context.createMediaElementSource).not.toHaveBeenCalled()
+    expect(requestFrame).not.toHaveBeenCalled()
+    adapter.destroy()
+    expect(cleanup).toHaveBeenCalledOnce()
   })
 
   it('Waviz 已连接后预设失败时复用其频谱数据绘制，绝不对同一媒体创建第二个 source', async () => {

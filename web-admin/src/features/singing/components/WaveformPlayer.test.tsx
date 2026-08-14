@@ -112,6 +112,49 @@ describe('WaveformPlayer', () => {
     expect(screen.queryByText('授权自动刷新次数已用尽，请手动重试。')).not.toBeInTheDocument()
   })
 
+  it('同一资产连续手动重试时只有最新一代响应可以更新 URL', async () => {
+    let resolveFirstManual!: (url: string) => void
+    let resolveSecondManual!: (url: string) => void
+    const refresh = vi.fn()
+      .mockRejectedValueOnce(new Error('初次授权失败'))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveFirstManual = resolve }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveSecondManual = resolve }))
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/old.mp3' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    fireEvent.error(view.container.querySelector('audio')!)
+    const retry = await screen.findByRole('button', { name: '重试媒体授权' })
+
+    act(() => {
+      retry.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      retry.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(refresh).toHaveBeenCalledTimes(3)
+    await act(async () => { resolveSecondManual('/newest.mp3'); await Promise.resolve() })
+    await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/newest.mp3'))
+    await act(async () => { resolveFirstManual('/stale.mp3'); await Promise.resolve() })
+
+    expect(view.container.querySelector('audio')).toHaveAttribute('src', '/newest.mp3')
+    expect(screen.queryByText('初次授权失败')).not.toBeInTheDocument()
+  })
+
+  it('自动刷新与手动重试交错时忽略较晚返回的旧自动响应', async () => {
+    let resolveAuto!: (url: string) => void
+    let resolveManual!: (url: string) => void
+    const refresh = vi.fn()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveAuto = resolve }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveManual = resolve }))
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/old.mp3' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    const audio = view.container.querySelector('audio')!
+    fireEvent.error(audio)
+    fireEvent.error(audio)
+    fireEvent.click(await screen.findByRole('button', { name: '重试媒体授权' }))
+
+    await act(async () => { resolveManual('/manual.mp3'); await Promise.resolve() })
+    await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/manual.mp3'))
+    await act(async () => { resolveAuto('/auto-stale.mp3'); await Promise.resolve() })
+
+    expect(view.container.querySelector('audio')).toHaveAttribute('src', '/manual.mp3')
+  })
+
   it('录像自动刷新成功后再次失败同样提示配额用尽，手动刷新恢复录像', async () => {
     const refresh = vi.fn().mockResolvedValueOnce('/video-fresh.mp4').mockResolvedValueOnce('/video-manual.mp4')
     const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' }, video: { assetId: 'video', url: '/video-old.mp4' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)

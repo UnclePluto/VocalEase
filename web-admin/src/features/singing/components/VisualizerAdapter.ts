@@ -20,6 +20,7 @@ export function createVisualizerAdapter(dependencies: VisualizerDependencies = {
   let analyser: AnalyserNode | null = null
   let raf = 0
   let destroyed = false
+  let unavailable = false
 
   const stopFallback = () => {
     if (raf) cancelFrame(raf)
@@ -60,7 +61,7 @@ export function createVisualizerAdapter(dependencies: VisualizerDependencies = {
 
   return {
     async start(media, canvas) {
-      if (destroyed || waviz || raf) return
+      if (destroyed || unavailable || waviz || raf) return
       let Waviz: WavizConstructor
       try {
         Waviz = (await loadWaviz()).Waviz
@@ -77,7 +78,8 @@ export function createVisualizerAdapter(dependencies: VisualizerDependencies = {
       if (waviz.getFrequencyData?.() === null) {
         waviz.cleanup?.()
         waviz = null
-        if (!destroyed) await startWebAudioFallback(media, canvas)
+        unavailable = true
+        canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
         return
       }
       try { await waviz.simpleBars?.() }
