@@ -104,3 +104,121 @@ def test_record_redacts_phone_and_notes_variants_and_phone_text_without_corrupti
     assert audit.changes["employee_no"] == "D0001"
     assert audit.changes["request_id"] == "audit-request-3"
     assert audit.changes["ordinary_number"] == "12345678901"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "patient_notes",
+        "notes_v2",
+        "before-notes-after",
+        "customMedicalNoteValue",
+        "pre_clinical_notes_archive",
+        "condition-note-v3",
+        "legacyIllnessNotesCopy",
+    ],
+)
+def test_record_redacts_note_markers_with_arbitrary_prefixes_and_suffixes(field_name):
+    actor = User.objects.create_user(
+        login_id=f"note-{field_name}"[:32], password="888888", role=Role.DOCTOR
+    )
+
+    audit = record(
+        actor=actor,
+        action="patient.update",
+        target=actor,
+        changes={field_name: {"content": "完整病情内容", "phone": "13800000003"}},
+        request_id="audit-note-variants",
+    )
+
+    assert audit.changes[field_name].startswith("[MEDICAL_CONTENT_REDACTED sha256:")
+    assert "完整病情内容" not in str(audit.changes)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "private_text",
+    [
+        "13800000003",
+        "+86.138.0000.0003",
+        "86/138/0000/0003",
+        "+86\u200b138\u200b0000\u200b0003",
+        "＋８６．１３８．００００．０００３",
+        "中文紧邻13800000003仍需隐藏",
+        "中文紧邻１３８／００００／０００３仍需隐藏",
+    ],
+)
+def test_record_redacts_obfuscated_chinese_mobile_numbers_in_arbitrary_text(private_text):
+    actor = User.objects.create_user(
+        login_id="phone-obfuscation", password="888888", role=Role.DOCTOR
+    )
+
+    audit = record(
+        actor=actor,
+        action="patient.update",
+        target=actor,
+        changes={"unknown": private_text},
+        request_id="audit-phone-obfuscation",
+    )
+
+    assert audit.changes["unknown"].count("[PHONE_REDACTED]") == 1
+    assert private_text not in str(audit.changes)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "ordinary_text",
+    [
+        "D13800000003",
+        "case13800000003x",
+        "10000000-0000-0000-0000-000000000001",
+        "2026-08-15",
+        "D0001",
+        "audit-request-4",
+        "12345678901",
+    ],
+)
+def test_record_does_not_redact_identifiers_dates_or_non_mobile_numbers(ordinary_text):
+    actor = User.objects.create_user(
+        login_id="phone-false-positive", password="888888", role=Role.DOCTOR
+    )
+
+    audit = record(
+        actor=actor,
+        action="patient.update",
+        target=actor,
+        changes={"unknown": ordinary_text},
+        request_id="audit-phone-false-positive",
+    )
+
+    assert audit.changes["unknown"] == ordinary_text
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("supplied", "expected"),
+    [
+        ("", ""),
+        ("cleanup:123e4567-e89b-12d3-a456-426614174000", "cleanup:123e4567-e89b-12d3-a456-426614174000"),
+        ("13800000003", "invalid-request-id"),
+        ("＋８６．１３８．００００．０００３", "invalid-request-id"),
+        ("bad\nrequest", "invalid-request-id"),
+        ("含有Unicode", "invalid-request-id"),
+        ("x" * 65, "invalid-request-id"),
+    ],
+)
+def test_record_defensively_sanitizes_direct_request_id(supplied, expected):
+    actor = User.objects.create_user(
+        login_id="request-id-defense", password="888888", role=Role.DOCTOR
+    )
+
+    audit = record(
+        actor=actor,
+        action="security.test",
+        target=actor,
+        changes={},
+        request_id=supplied,
+    )
+
+    assert audit.request_id == expected

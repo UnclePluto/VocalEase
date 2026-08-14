@@ -236,6 +236,62 @@ def test_oversized_request_id_is_bounded_before_api_and_audit_use(api_client, do
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "unsafe_request_id",
+    [
+        "13800000003",
+        "+86.138.0000.0003",
+        "+86\u200b138/0000/0003",
+        "＋８６．１３８．００００．０００３",
+        "bad\nrequest-id",
+        "不接受Unicode请求号",
+    ],
+)
+def test_sensitive_or_invalid_request_id_is_replaced_consistently_across_api_and_audit(
+    api_client, doctor_user, unsafe_request_id
+):
+    response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": doctor_user.login_id, "password": "888888", "client_kind": "android"},
+        format="json",
+        HTTP_X_REQUEST_ID=unsafe_request_id,
+    )
+
+    assert response.status_code == 200
+    safe_request_id = response.json()["request_id"]
+    assert len(safe_request_id) == 32
+    assert all(character in "0123456789abcdef" for character in safe_request_id)
+    assert safe_request_id != unsafe_request_id
+    assert response["X-Request-ID"] == safe_request_id
+    assert AuditLog.objects.get(action="auth.login").request_id == safe_request_id
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "safe_request_id",
+    [
+        "login-request-1",
+        "media-grant-1",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "0123456789abcdef0123456789abcdef",
+        "cleanup:123e4567-e89b-12d3-a456-426614174000",
+    ],
+)
+def test_controlled_ascii_request_id_syntax_is_preserved(api_client, doctor_user, safe_request_id):
+    response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": doctor_user.login_id, "password": "888888", "client_kind": "android"},
+        format="json",
+        HTTP_X_REQUEST_ID=safe_request_id,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == safe_request_id
+    assert response["X-Request-ID"] == safe_request_id
+    assert AuditLog.objects.get(action="auth.login").request_id == safe_request_id
+
+
+@pytest.mark.django_db
 def test_web_refresh_requires_allowed_origin_and_double_submit_csrf(api_client, doctor_user):
     login_response = api_client.post(
         "/api/v1/auth/login/",

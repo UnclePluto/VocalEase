@@ -2,6 +2,8 @@ import logging
 import uuid
 from contextvars import ContextVar
 
+from .privacy import sanitize_request_id
+
 _request_id = ContextVar("request_id", default="")
 
 
@@ -13,11 +15,8 @@ class RequestIdMiddleware:
 
     def __call__(self, request):
         supplied_request_id = request.META.get(self.header_name, "")
-        request.request_id = (
-            supplied_request_id
-            if supplied_request_id and len(supplied_request_id) <= 64
-            else uuid.uuid4().hex
-        )
+        safe_request_id = sanitize_request_id(supplied_request_id, invalid_value="")
+        request.request_id = safe_request_id or uuid.uuid4().hex
         token = _request_id.set(request.request_id)
         try:
             response = self.get_response(request)

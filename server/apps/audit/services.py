@@ -6,6 +6,8 @@ from typing import Any
 
 from django.db import models
 
+from common.privacy import redact_phone_numbers, sanitize_request_id
+
 from .models import AuditLog
 
 
@@ -53,11 +55,14 @@ PHONE_FIELDS = {
     "telephone",
     "tel",
 }
-MEDICAL_NOTE_SUFFIXES = tuple(MEDICAL_NOTE_FIELDS - {"notes"})
-PHONE_SUFFIXES = tuple(PHONE_FIELDS - {"tel"})
-PHONE_IN_TEXT = re.compile(
-    r"(?<!\d)(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}(?!\d)"
+MEDICAL_NOTE_MARKERS = (
+    "notes",
+    "medicalnote",
+    "clinicalnote",
+    "conditionnote",
+    "illnessnote",
 )
+PHONE_SUFFIXES = tuple(PHONE_FIELDS - {"tel"})
 
 
 def normalize_field_name(key: Any) -> str:
@@ -89,7 +94,9 @@ def redact_value(value: Any) -> Any:
                 or "authorization" in normalized
             ):
                 result[key] = "[REDACTED]"
-            elif normalized in MEDICAL_NOTE_FIELDS or normalized.endswith(MEDICAL_NOTE_SUFFIXES):
+            elif normalized in MEDICAL_NOTE_FIELDS or any(
+                marker in normalized for marker in MEDICAL_NOTE_MARKERS
+            ):
                 result[key] = medical_content_placeholder(nested_value)
             elif normalized in PHONE_FIELDS or normalized.endswith(PHONE_SUFFIXES):
                 result[key] = "[PHONE_REDACTED]"
@@ -99,7 +106,7 @@ def redact_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact_value(item) for item in value]
     if isinstance(value, str):
-        return PHONE_IN_TEXT.sub("[PHONE_REDACTED]", value)
+        return redact_phone_numbers(value)
     return value
 
 
@@ -114,5 +121,5 @@ def record(*, actor, action: str, target: models.Model | None, changes: Mapping[
         target_type=target._meta.label if target else "",
         target_id=getattr(target, "pk", None),
         changes=redact(changes),
-        request_id=request_id,
+        request_id=sanitize_request_id(request_id),
     )
