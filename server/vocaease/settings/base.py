@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     "apps.media",
     "apps.songs",
     "apps.analysis",
+    "apps.singing",
 ]
 
 MIDDLEWARE = [

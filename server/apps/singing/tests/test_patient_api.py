@@ -1,0 +1,237 @@
+import io
+import uuid
+
+import pytest
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from apps.accounts.models import Role, User
+from apps.doctors.services import create_doctor
+from apps.media.models import MediaAsset
+from apps.media.services import claim_local_upload, complete_local_asset, create_upload_grant, get_storage_backend, publish_local_upload
+from apps.patients.services import create_patient, transition_treatment_plan_status
+from apps.singing.models import SingingSession
+from apps.songs.models import Song
+
+
+@pytest.fixture
+def doctor(db):
+    return create_doctor(
+        name="演唱医生", gender="female", phone="13600000101",
+        department="康复科", title="医师",
+    )
+
+
+@pytest.fixture
+def patient(doctor):
+    profile = create_patient(
+        name="患者甲", gender="male", enrollment_age=36, phone="13500000101",
+        doctor=doctor, start_date="2026-08-01", cycle_weeks=4,
+    )
+    profile.user.must_change_password = False
+    profile.user.save(update_fields=["must_change_password"])
+    plan = profile.treatment_plans.get()
+    transition_treatment_plan_status(
+        actor=doctor.user, plan=plan, status="active", request_id="activate-patient-a",
+    )
+    return profile
+
+
+@pytest.fixture
+def other_patient(doctor):
+    profile = create_patient(
+        name="患者乙", gender="female", enrollment_age=41, phone="13500000102",
+        doctor=doctor, start_date="2026-08-01", cycle_weeks=4,
+    )
+    profile.user.must_change_password = False
+    profile.user.save(update_fields=["must_change_password"])
+    plan = profile.treatment_plans.get()
+    transition_treatment_plan_status(
+        actor=doctor.user, plan=plan, status="active", request_id="activate-patient-b",
+    )
+    return profile
+
+
+def ready_song(tmp_path, settings, *, title="治疗歌曲"):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    song_id = uuid.uuid4()
+    asset, grant = create_upload_grant(
+        owner_type="song", owner_id=song_id, media_type="song_source", mime="audio/mpeg", size=6,
+    )
+    backend = get_storage_backend()
+    nonce = claim_local_upload(asset=asset)
+    prepared = backend.prepare_authorized_stream(
+        object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"source"),
+        mime="audio/mpeg", asset_id=asset.id,
+    )
+    publish_local_upload(asset_id=asset.id, nonce=nonce, prepared=prepared, backend=backend)
+    asset = complete_local_asset(asset=asset)
+    song = Song.objects.create(
+        id=song_id, title=title, artist="歌手", genre="流行", language="中文",
+        duration_seconds=90, source_asset=asset, publication_status="published",
+    )
+    from apps.songs.services import validate_source_asset
+    validate_source_asset(song=song, asset=asset)
+    return song
+
+
+@pytest.mark.django_db
+def test_patient_reads_profile_active_plan_and_only_own_sessions(patient, other_patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings)
+    own = SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    other = SingingSession.objects.create_from_snapshots(patient=other_patient, song=song)
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    me = client.get("/api/v1/patient/me/")
+    sessions = client.get("/api/v1/patient/singing-sessions/")
+
+    assert me.status_code == 200
+    assert me.json()["data"]["id"] == str(patient.id)
+    assert me.json()["data"]["active_treatment_plan"]["status"] == "active"
+    assert sessions.status_code == 200
+    assert [row["id"] for row in sessions.json()["data"]["results"]] == [str(own.id)]
+    assert client.get(f"/api/v1/patient/singing-sessions/{other.id}/").status_code == 404
+
+
+@pytest.mark.django_db
+def test_create_session_requires_current_available_song_and_keeps_snapshots(patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings, title="初始歌名")
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    response = client.post(
+        "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+    )
+
+    assert response.status_code == 201
+    session = SingingSession.objects.get(pk=response.json()["data"]["id"])
+    assert session.status == "created"
+    assert session.song_snapshot["title"] == "初始歌名"
+    assert session.patient_snapshot["medical_record_no"] == patient.medical_record_no
+    assert session.treatment_plan_snapshot["id"] == str(patient.treatment_plans.get().id)
+    Song.objects.filter(pk=song.id).update(title="新歌名", deleted_at=timezone.now())
+    detail = client.get(f"/api/v1/patient/singing-sessions/{session.id}/")
+    assert detail.json()["data"]["song"]["title"] == "初始歌名"
+    assert client.post(
+        "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+    ).status_code == 400
+
+
+@pytest.mark.django_db
+def test_session_upload_grant_is_bound_to_session_and_cross_patient_is_404(patient, other_patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings)
+    session = SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    grant = client.post(
+        f"/api/v1/patient/singing-sessions/{session.id}/upload-grants/",
+        {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}, format="json",
+    )
+
+    assert grant.status_code == 201
+    assert grant.json()["data"]["session_id"] == str(session.id)
+    asset = MediaAsset.objects.get(pk=grant.json()["data"]["asset_id"])
+    assert asset.patient_owner_id == patient.id
+    session.refresh_from_db()
+    assert session.status == "awaiting_upload"
+    client.force_authenticate(other_patient.user)
+    assert client.post(
+        f"/api/v1/patient/singing-sessions/{session.id}/upload-grants/",
+        {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}, format="json",
+    ).status_code == 404
+
+
+@pytest.mark.django_db
+def test_doctor_and_admin_read_all_singing_records_but_patient_cannot_use_admin_namespace(
+    doctor, patient, other_patient, tmp_path, settings,
+):
+    song = ready_song(tmp_path, settings)
+    SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    SingingSession.objects.create_from_snapshots(patient=other_patient, song=song)
+    admin = User.objects.create_user(
+        login_id="singing-admin", password="888888", role=Role.SYSTEM_ADMIN,
+        must_change_password=False,
+    )
+    client = APIClient()
+    for user in (doctor.user, admin):
+        user.must_change_password = False
+        user.save(update_fields=["must_change_password"])
+        client.force_authenticate(user)
+        assert client.get("/api/v1/admin/singing-sessions/").json()["data"]["count"] == 2
+    client.force_authenticate(patient.user)
+    assert client.get("/api/v1/admin/singing-sessions/").status_code == 403
+
+
+@pytest.mark.django_db
+def test_history_filters_dates_and_detail_exposes_versioned_result_series(patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings)
+    session = SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    from apps.media.models import MediaAsset
+    from apps.singing.models import SessionMedia
+    audio = MediaAsset.objects.create(
+        patient_owner=patient, owner_type="patient", owner_id=patient.id,
+        media_type="singing_audio", backend="qiniu", object_key=f"test/singing_audio/{uuid.uuid4().hex}",
+        mime="audio/mpeg", size=1024, etag="history-audio", status="ready", upload_expires_at=timezone.now(),
+    )
+    SessionMedia.objects.create(
+        session=session, asset=audio, media_type="singing_audio", confirmed_at=timezone.now(),
+    )
+    session.status = "uploaded"
+    session.save(update_fields=["status", "updated_at"])
+    from apps.analysis.services import run_analysis
+    from apps.singing.services import submit_session
+    task_id = submit_session(
+        session_id=session.id, patient_id=patient.id, idempotency_key="history-result",
+    ).task_ids[0]
+    run_analysis(task_id)
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    included = client.get("/api/v1/patient/singing-sessions/?created_from=2026-01-01&created_to=2026-12-31")
+    excluded = client.get("/api/v1/patient/singing-sessions/?created_from=2027-01-01")
+    detail = client.get(f"/api/v1/patient/singing-sessions/{session.id}/")
+
+    assert included.status_code == 200 and included.json()["data"]["count"] == 1
+    assert excluded.status_code == 200 and excluded.json()["data"]["count"] == 0
+    result = detail.json()["data"]["analysis_results"][0]
+    assert result["task_type"] == "singing_audio_metrics"
+    assert result["protocol_version"] == "1.0" and result["is_mock"] is True
+    assert set(result["time_series"]) == {"volume", "pitch_hz", "snr_db"}
+    assert result["payload"]["score"] == detail.json()["data"]["score"]
+
+
+@pytest.mark.django_db
+def test_create_session_preserves_temporary_storage_error_for_mobile_retry(patient, tmp_path, settings, monkeypatch):
+    song = ready_song(tmp_path, settings)
+    from apps.singing import services
+    from apps.songs.services import SourceVerificationTemporary
+    monkeypatch.setattr(
+        services,
+        "validate_source_asset",
+        lambda **kwargs: (_ for _ in ()).throw(SourceVerificationTemporary()),
+    )
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    response = client.post(
+        "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "song_source_verification_deferred"
+    assert SingingSession.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_singing_history_rejects_unknown_query_parameters(patient):
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    response = client.get("/api/v1/patient/singing-sessions/?unknown=value")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    assert "unknown" in response.json()["data"]

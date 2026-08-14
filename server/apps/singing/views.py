@@ -1,0 +1,205 @@
+from django.shortcuts import get_object_or_404
+from rest_framework import status
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import BasePermission
+from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
+
+from apps.accounts.models import Role
+from apps.accounts.views import api_response
+from apps.audit.services import record
+from apps.patients.models import PatientProfile, TreatmentPlan
+from apps.patients.serializers import TreatmentPlanReadSerializer
+from common.api.pagination import paginated_data, validated_query
+from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
+
+from .selectors import sessions_for_admin, sessions_for_patient
+from .serializers import (
+    AdminSessionListQuerySerializer, ConfirmSessionMediaSerializer, CreateSessionSerializer,
+    SessionListQuerySerializer, SessionUploadGrantSerializer, SingingSessionReadSerializer,
+)
+from .services import cancel_session, confirm_session_media, create_session, issue_session_upload_grant, retry_session, submit_session
+
+
+def _validated_session_query(request, serializer_class):
+    supported = set(serializer_class().fields)
+    unexpected = set(request.query_params) - supported
+    if unexpected:
+        raise ValidationError({key: "不支持的查询参数" for key in sorted(unexpected)})
+    return validated_query(request, serializer_class)
+
+
+class IsPatientUser(BasePermission):
+    message = "仅患者可访问患者服务"
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user and user.is_authenticated and user.role == Role.PATIENT and user.is_active
+            and user.deleted_at is None and not user.must_change_password
+        )
+
+
+def patient_for_request(request):
+    return get_object_or_404(
+        PatientProfile.objects.select_related("primary_doctor", "user"),
+        user=request.user, deleted_at__isnull=True,
+    )
+
+
+class PatientMeView(APIView):
+    permission_classes = [IsPatientUser, MustChangePasswordPermission]
+
+    def get(self, request):
+        patient = patient_for_request(request)
+        plan = TreatmentPlan.objects.filter(
+            patient=patient, status=TreatmentPlan.Status.ACTIVE, deleted_at__isnull=True,
+        ).first()
+        data = {
+            "id": str(patient.id), "medical_record_no": patient.medical_record_no,
+            "name": patient.name, "gender": patient.gender, "enrollment_age": patient.enrollment_age,
+            "phone": patient.phone, "notes": patient.notes,
+            "primary_doctor": {"id": str(patient.primary_doctor_id), "name": patient.primary_doctor.name},
+            "active_treatment_plan": TreatmentPlanReadSerializer(plan).data if plan else None,
+        }
+        return api_response(data=data, request_id=request.request_id)
+
+
+class PatientSessionListView(APIView):
+    permission_classes = [IsPatientUser, MustChangePasswordPermission]
+
+    def get(self, request):
+        patient = patient_for_request(request)
+        query = _validated_session_query(request, SessionListQuerySerializer)
+        queryset = sessions_for_patient(
+            patient_id=patient.id, created_from=query["created_from"], created_to=query["created_to"],
+        )
+        if query["status"]:
+            queryset = queryset.filter(status=query["status"])
+        data = paginated_data(queryset, page=query["page"], page_size=query["page_size"])
+        data["results"] = SingingSessionReadSerializer(data["results"], many=True).data
+        return api_response(data=data, request_id=request.request_id)
+
+    def post(self, request):
+        patient = patient_for_request(request)
+        serializer = CreateSessionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        session = create_session(patient_id=patient.id, **serializer.validated_data)
+        return api_response(data=SingingSessionReadSerializer(session).data, request_id=request.request_id, status_code=status.HTTP_201_CREATED)
+
+
+class PatientSessionMixin:
+    permission_classes = [IsPatientUser, MustChangePasswordPermission]
+
+    def get_session(self, request, session_id):
+        patient = patient_for_request(request)
+        return get_object_or_404(sessions_for_patient(patient_id=patient.id), pk=session_id)
+
+
+class PatientSessionDetailView(PatientSessionMixin, APIView):
+    def get(self, request, session_id):
+        return api_response(data=SingingSessionReadSerializer(self.get_session(request, session_id)).data, request_id=request.request_id)
+
+
+class PatientSessionUploadGrantView(PatientSessionMixin, APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "credential_upload"
+
+    def post(self, request, session_id):
+        session = self.get_session(request, session_id)
+        serializer = SessionUploadGrantSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = issue_session_upload_grant(
+            session_id=session.id, patient_id=session.patient_id,
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+            **serializer.validated_data,
+        )
+        session, asset, grant = result.session, result.asset, result.grant
+        data = {
+            "session_id": str(session.id), "asset_id": str(asset.id), "object_key": grant.object_key,
+            "expires_at": grant.expires_at.isoformat(), "upload_url": grant.upload_url,
+            "upload_token": grant.upload_token, "fields": grant.fields or {},
+        }
+        if asset.backend == "local":
+            data.update(upload_url=f"/api/v1/media/local-upload/{asset.id}/?signature={grant.upload_token}", upload_token="")
+        record(
+            actor=request.user, action="singing.media_upload_grant", target=asset,
+            changes={"session_id": str(session.id), "media_type": asset.media_type, "reissued": not result.created},
+            request_id=request.request_id,
+        )
+        return api_response(
+            data=data, request_id=request.request_id,
+            status_code=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK,
+        )
+
+
+class PatientSessionConfirmUploadView(PatientSessionMixin, APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "credential_upload"
+
+    def post(self, request, session_id):
+        session = self.get_session(request, session_id)
+        serializer = ConfirmSessionMediaSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        session, _binding = confirm_session_media(
+            session_id=session.id, patient_id=session.patient_id, **serializer.validated_data,
+        )
+        return api_response(data=SingingSessionReadSerializer(session).data, request_id=request.request_id)
+
+
+class PatientSessionSubmitView(PatientSessionMixin, APIView):
+    def post(self, request, session_id):
+        session = self.get_session(request, session_id)
+        result = submit_session(
+            session_id=session.id, patient_id=session.patient_id,
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+        )
+        return api_response(
+            data={"session_id": str(result.session.id), "status": result.session.status, "analysis_task_ids": [str(value) for value in result.task_ids]},
+            request_id=request.request_id,
+            status_code=status.HTTP_202_ACCEPTED if result.created else status.HTTP_200_OK,
+        )
+
+
+class PatientSessionCancelView(PatientSessionMixin, APIView):
+    def post(self, request, session_id):
+        session = self.get_session(request, session_id)
+        session = cancel_session(session_id=session.id, patient_id=session.patient_id)
+        return api_response(data=SingingSessionReadSerializer(session).data, request_id=request.request_id)
+
+
+class PatientSessionRetryView(PatientSessionMixin, APIView):
+    def post(self, request, session_id):
+        session = self.get_session(request, session_id)
+        result = retry_session(
+            session_id=session.id, patient_id=session.patient_id,
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+        )
+        return api_response(
+            data={"session_id": str(result.session.id), "status": result.session.status, "analysis_task_ids": [str(value) for value in result.task_ids]},
+            request_id=request.request_id,
+            status_code=status.HTTP_202_ACCEPTED if result.created else status.HTTP_200_OK,
+        )
+
+
+class AdminSessionListView(APIView):
+    permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
+
+    def get(self, request):
+        query = _validated_session_query(request, AdminSessionListQuerySerializer)
+        queryset = sessions_for_admin(
+            patient_id=query["patient_id"], status=query["status"],
+            created_from=query["created_from"], created_to=query["created_to"],
+        )
+        data = paginated_data(queryset, page=query["page"], page_size=query["page_size"])
+        data["results"] = SingingSessionReadSerializer(data["results"], many=True).data
+        return api_response(data=data, request_id=request.request_id)
+
+
+class AdminSessionDetailView(APIView):
+    permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
+
+    def get(self, request, session_id):
+        session = get_object_or_404(sessions_for_admin(), pk=session_id)
+        return api_response(data=SingingSessionReadSerializer(session).data, request_id=request.request_id)

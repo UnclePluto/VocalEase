@@ -73,6 +73,19 @@ def create_upload_grant(*, owner: PatientProfile | None = None, owner_type: str 
     return MediaAsset.objects.create(patient_owner=patient_owner, owner_type=owner_type, owner_id=actual_owner_id, media_type=media_type, backend=next(name for name in BACKENDS if backend.__class__.__name__.lower().startswith(name)), object_key=grant.object_key, mime=mime, size=size, status=MediaAsset.Status.UPLOADING, upload_expires_at=grant.expires_at), grant
 
 
+def reissue_upload_grant(*, asset: MediaAsset) -> UploadGrant:
+    if asset.deleted_at is not None or asset.upload_expires_at <= timezone.now():
+        raise MediaConflict("上传凭证已过期或不可用", code="media_grant_expired")
+    backend = backend_for_asset(asset)
+    try:
+        return backend.reissue_upload_grant(
+            object_key=asset.object_key, owner_id=asset.owner_id, media_type=asset.media_type,
+            mime=asset.mime, size=asset.size, expires_at=asset.upload_expires_at,
+        )
+    except StorageValidationError as exc:
+        raise MediaConflict(str(exc), code="media_grant_expired") from exc
+
+
 def _check_receipt(asset: MediaAsset, receipt: UploadReceipt) -> None:
     if receipt.object_key != asset.object_key or receipt.size != asset.size or receipt.mime != asset.mime:
         raise MediaConflict("上传对象元数据与凭证不一致", code="media_metadata_mismatch")

@@ -176,13 +176,15 @@ def _create_song_analysis(
             task, created = AnalysisTask.objects.get_or_create(
                 idempotency_key=key,
                 defaults={
+                    "target_type": AnalysisTask.TargetType.SONG, "target_id": locked_song.id,
                     "song": locked_song, "source_asset": asset, "task_type": task_type,
                     "protocol_version": protocol_version, "executor": executor,
                     "input_snapshot": _snapshot(asset),
                 },
             )
             if not created and (
-                task.song_id != locked_song.id or task.source_asset_id != asset.id
+                task.target_type != AnalysisTask.TargetType.SONG or task.target_id != locked_song.id
+                or task.song_id != locked_song.id or task.source_asset_id != asset.id
                 or task.task_type != task_type or task.executor != executor
                 or task.protocol_version != protocol_version
             ):
@@ -249,7 +251,11 @@ def _release_failed_dispatch(selection: DispatchSelection) -> bool:
 def schedule_analysis_task(task_id: UUID) -> bool:
     """带数据库投递租约的唯一 broker 出口。"""
     now = timezone.now()
-    song_id = AnalysisTask.objects.only("song_id").filter(pk=task_id).values_list("song_id", flat=True).first()
+    target = AnalysisTask.objects.filter(pk=task_id).values_list("target_type", "song_id").first()
+    if target and target[0] == AnalysisTask.TargetType.SINGING_SESSION:
+        from apps.singing.services import schedule_singing_analysis_task
+        return schedule_singing_analysis_task(task_id)
+    song_id = target[1] if target else None
     if song_id is None:
         return False
     with transaction.atomic():
@@ -318,7 +324,11 @@ def recover_analysis_tasks(*, batch_size: int = 100) -> dict[str, int]:
         ).order_by("created_at").values_list("id", flat=True)[:limit]
     )
     for task_id in exhausted_ids:
-        song_id = AnalysisTask.objects.only("song_id").get(pk=task_id).song_id
+        target_type, song_id = AnalysisTask.objects.filter(pk=task_id).values_list("target_type", "song_id").get()
+        if target_type == AnalysisTask.TargetType.SINGING_SESSION:
+            from apps.singing.services import fail_exhausted_singing_task
+            exhausted += int(fail_exhausted_singing_task(task_id))
+            continue
         with transaction.atomic():
             song = Song.objects.select_for_update().get(pk=song_id)
             task = AnalysisTask.objects.select_for_update().get(pk=task_id, song_id=song.id)
@@ -590,6 +600,10 @@ def finalize_analysis_failure(task_id: UUID, claim_token: UUID, *, code: str, su
 
 
 def run_analysis(task_id: UUID) -> AnalysisTask:
+    target_type = AnalysisTask.objects.only("target_type").get(pk=task_id).target_type
+    if target_type == AnalysisTask.TargetType.SINGING_SESSION:
+        from apps.singing.services import run_singing_analysis
+        return run_singing_analysis(task_id)
     claim = claim_analysis_task(task_id)
     if claim is None:
         return AnalysisTask.objects.get(pk=task_id)

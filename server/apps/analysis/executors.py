@@ -24,6 +24,20 @@ EXECUTOR_REGISTRY = {
 }
 
 
+def _register_singing_executors():
+    from apps.singing.executors import (
+        FaceLandmarksPayload, MockFaceLandmarksExecutor, MockSingingAudioExecutor,
+        SingingAudioPayload,
+    )
+    EXECUTOR_REGISTRY.update({
+        ("singing_audio_metrics", "mock_singing", "1.0"): ExecutorRegistration(MockSingingAudioExecutor, SingingAudioPayload.parse),
+        ("face_landmarks", "mock_singing", "1.0"): ExecutorRegistration(MockFaceLandmarksExecutor, FaceLandmarksPayload.parse),
+    })
+
+
+_register_singing_executors()
+
+
 def resolve_executor(task_type: str, executor: str, protocol_version: str) -> ExecutorRegistration:
     try:
         return EXECUTOR_REGISTRY[(task_type, executor, protocol_version)]
