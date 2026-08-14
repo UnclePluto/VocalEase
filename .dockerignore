@@ -1,5 +1,7 @@
 server/.venv
 server/.pytest_cache
+web-admin/node_modules
+web-admin/dist
 **/__pycache__
 **/*.pyc
 .git

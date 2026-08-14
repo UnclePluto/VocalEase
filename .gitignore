@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 .worktrees/
 .superpowers/
+web-admin/node_modules/
+web-admin/dist/

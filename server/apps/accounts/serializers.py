@@ -1,5 +1,14 @@
 from rest_framework import serializers
 
+from .models import User
+
+
+class AccountSnapshotSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ("login_id", "role", "must_change_password")
+        read_only_fields = fields
+
 
 class LoginSerializer(serializers.Serializer):
     login_id = serializers.CharField(max_length=32)

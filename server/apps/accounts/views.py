@@ -14,7 +14,13 @@ from rest_framework.views import APIView
 from apps.audit.services import record
 from common.api.permissions import MustChangePasswordPermission, SystemAdminPermission
 
-from .serializers import ChangePasswordSerializer, LoginSerializer, LogoutSerializer, RefreshSerializer
+from .serializers import (
+    AccountSnapshotSerializer,
+    ChangePasswordSerializer,
+    LoginSerializer,
+    LogoutSerializer,
+    RefreshSerializer,
+)
 from .models import User
 from .services import change_password, login, reset_password
 from .tokens import revoke_refresh_token, rotate_refresh_token
@@ -98,7 +104,11 @@ class LoginView(APIView):
                 },
                 request_id=request.request_id,
             )
-        data = {"access": pair.access, "refresh_expires_at": pair.refresh_expires_at.isoformat()}
+        data = {
+            "access": pair.access,
+            "refresh_expires_at": pair.refresh_expires_at.isoformat(),
+            "user": AccountSnapshotSerializer(user).data,
+        }
         response = api_response(data=data, request_id=request.request_id)
         if serializer.validated_data["client_kind"] == "web":
             set_refresh_cookie(response, pair.refresh)
@@ -132,7 +142,11 @@ class RefreshView(APIView):
 
         user, pair = rotate_refresh_token(raw_refresh, on_success=record_refresh)
         response = api_response(
-            data={"access": pair.access, "refresh_expires_at": pair.refresh_expires_at.isoformat()},
+            data={
+                "access": pair.access,
+                "refresh_expires_at": pair.refresh_expires_at.isoformat(),
+                "user": AccountSnapshotSerializer(user).data,
+            },
             request_id=request.request_id,
         )
         if client_kind == "web":

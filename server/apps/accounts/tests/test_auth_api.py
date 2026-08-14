@@ -115,6 +115,57 @@ def test_web_login_sets_http_only_refresh_cookie_and_records_request_audit(api_c
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("role", "login_id"),
+    [
+        (Role.SYSTEM_ADMIN, "snapshot-admin"),
+        (Role.DOCTOR, "snapshot-doctor"),
+        (Role.PATIENT, "snapshot-patient"),
+    ],
+)
+def test_login_returns_a_minimal_fresh_account_snapshot(api_client, role, login_id):
+    user = User.objects.create_user(login_id=login_id, password="888888", role=role)
+
+    response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": login_id, "password": "888888", "client_kind": "web"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["user"] == {
+        "login_id": login_id,
+        "role": role,
+        "must_change_password": True,
+    }
+
+
+@pytest.mark.django_db
+def test_refresh_returns_current_account_snapshot(api_client, doctor_user):
+    login_response = api_client.post(
+        "/api/v1/auth/login/",
+        {"login_id": doctor_user.login_id, "password": "888888", "client_kind": "android"},
+        format="json",
+    )
+    refresh = login_response.json()["data"]["refresh"]
+    doctor_user.must_change_password = False
+    doctor_user.save(update_fields=["must_change_password"])
+
+    response = api_client.post(
+        "/api/v1/auth/refresh/",
+        {"client_kind": "android", "refresh": refresh},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["user"] == {
+        "login_id": doctor_user.login_id,
+        "role": Role.DOCTOR,
+        "must_change_password": False,
+    }
+
+
+@pytest.mark.django_db
 def test_oversized_request_id_is_bounded_before_api_and_audit_use(api_client, doctor_user):
     response = api_client.post(
         "/api/v1/auth/login/",
