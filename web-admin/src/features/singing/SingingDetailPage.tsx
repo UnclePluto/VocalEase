@@ -17,13 +17,13 @@ function audioResult(session: SingingSession) { return session.analysis_results.
 function descriptionFor(error: unknown) { return error instanceof ApiError && error.requestId ? `请求编号：${error.requestId}` : undefined }
 function messageFor(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback }
 
-function usePrivateMedia(session: SingingSession) {
+function usePrivateMedia(session: SingingSession, requested: boolean) {
   const authEpoch = useAuthStore((state) => state.sessionEpoch)
   const audioBinding = session.media.find((item) => item.media_type === 'singing_audio')
   const videoBinding = session.media.find((item) => item.media_type === 'singing_video')
   const audio = useQuery({
     queryKey: ['singing-private-url', authEpoch, session.id, 'audio', audioBinding?.asset_id ?? 'none'],
-    enabled: Boolean(audioBinding),
+    enabled: requested && Boolean(audioBinding),
     retry: false,
     staleTime: 0,
     gcTime: 0,
@@ -31,7 +31,7 @@ function usePrivateMedia(session: SingingSession) {
   })
   const video = useQuery({
     queryKey: ['singing-private-url', authEpoch, session.id, 'video', videoBinding?.asset_id ?? 'none'],
-    enabled: Boolean(videoBinding),
+    enabled: requested && Boolean(videoBinding),
     retry: false,
     staleTime: 0,
     gcTime: 0,
@@ -42,11 +42,13 @@ function usePrivateMedia(session: SingingSession) {
 
 export function SingingDetailContent({ session }: { session: SingingSession }) {
   const [seconds, setSeconds] = useState(0)
+  const [mediaRequested, setMediaRequested] = useState(false)
   const sessionFence = useRef(session.id)
   useEffect(() => { sessionFence.current = session.id }, [session.id])
   const source = audioResult(session)
   const events = source?.payload?.burp_events ?? []
-  const urls = usePrivateMedia(session)
+  const urls = usePrivateMedia(session, mediaRequested)
+  const hasMediaBindings = Boolean(urls.audioBinding || urls.videoBinding)
   const currentMedia: PlayerMedia = {
     mixed: urls.audioBinding && urls.audio.data ? { assetId: urls.audioBinding.asset_id, url: urls.audio.data.url } : undefined,
     video: urls.videoBinding && urls.video.data ? { assetId: urls.videoBinding.asset_id, url: urls.video.data.url } : undefined,
@@ -71,11 +73,12 @@ export function SingingDetailContent({ session }: { session: SingingSession }) {
         { key: 'burp', label: '嗳气次数', children: session.burp_count ?? '—' },
       ]} />
       {analysisFailed ? <Alert type="warning" showIcon message="模拟分析任务失败，以下指标可能没有结果。" description={analysisFailed.error_summary || analysisFailed.error_code || '请稍后重试分析任务。'} /> : null}
-      {urls.audioBinding && urls.audio.isPending ? <Spin aria-label="正在获取媒体授权" /> : null}
-      {urls.audio.isError ? <Alert className="media-playback-error" type="error" showIcon title={messageFor(urls.audio.error, '媒体授权失败，请重试')} description={descriptionFor(urls.audio.error)} action={<Button aria-label="重试媒体授权" onClick={() => void urls.audio.refetch()}>重试</Button>} /> : null}
-      {urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
-      {urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
-      {!urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending) ? <WaveformPlayer key={`${session.id}:${currentMedia.mixed?.assetId ?? 'none'}`} media={currentMedia} events={events} onRefreshMedia={refreshMedia} onTime={setSeconds} /> : null}
+      {hasMediaBindings && !mediaRequested ? <div className="media-prepare"><Button type="primary" aria-label="准备回放" onClick={() => setMediaRequested(true)}>准备回放</Button><span>点击后获取短期媒体授权。</span></div> : null}
+      {mediaRequested && urls.audioBinding && urls.audio.isPending ? <Spin aria-label="正在获取媒体授权" /> : null}
+      {mediaRequested && urls.audio.isError ? <Alert className="media-playback-error" type="error" showIcon title={messageFor(urls.audio.error, '媒体授权失败，请重试')} description={descriptionFor(urls.audio.error)} action={<Button aria-label="重试媒体授权" onClick={() => void urls.audio.refetch()}>重试</Button>} /> : null}
+      {mediaRequested && urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
+      {mediaRequested && urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
+      {(!hasMediaBindings || (mediaRequested && !urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending))) ? <WaveformPlayer key={`${session.id}:${currentMedia.mixed?.assetId ?? 'none'}`} media={currentMedia} events={events} onRefreshMedia={refreshMedia} onTime={setSeconds} /> : null}
       <MetricPanel seconds={seconds} result={source} />
     </div>
   </section>

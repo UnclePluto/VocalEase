@@ -156,6 +156,7 @@ textarea, select { font: inherit; }
 .patient-date-filter { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; max-width: 440px; }
 .patient-history-table, .waveform-scroll { max-width: 100%; overflow-x: auto; }
 .waveform-player { min-width: 0; }
+.media-prepare { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0; color: #475467; }
 .waveform-player audio, .waveform-player video, .waveform-player canvas { display: block; max-width: 100%; margin: 14px 0; }
 .waveform { min-width: 520px; }
 .metric-panel { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px 16px; margin: 20px 0; }

@@ -38,7 +38,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const clock = useRef<PlaybackClock | null>(null)
   const handle = useRef<WaveHandle | null>(null)
   const resumeAt = useRef(0)
-  const instanceVersion = useRef(0)
+  const activeAssetIds = useRef(new Set<string>())
   const refreshed = useRef(new Set<string>())
   const [playing, setPlaying] = useState(false)
   const [activeTrack, setActiveTrack] = useState<TrackKey>('mixed')
@@ -46,6 +46,10 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const [overrides, setOverrides] = useState<Record<string, string>>({})
   const [failure, setFailure] = useState<MediaFailure | null>(null)
   const mixed = media.mixed
+  const mixedAssetId = media.mixed?.assetId
+  const videoAssetId = media.video?.assetId
+  const vocalAssetId = media.vocal?.assetId
+  const accompanimentAssetId = media.accompaniment?.assetId
   const selectedTrack = media[activeTrack] ?? mixed
   const selectedAssetId = selectedTrack?.assetId
   const videoTrack = videoFailed ? undefined : media.video
@@ -53,8 +57,12 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const videoUrl = videoTrack ? overrides[videoTrack.assetId] ?? videoTrack.url : ''
 
   useEffect(() => {
+    activeAssetIds.current = new Set([mixedAssetId, videoAssetId, vocalAssetId, accompanimentAssetId].filter((assetId): assetId is string => Boolean(assetId)))
+    return () => { activeAssetIds.current = new Set() }
+  }, [accompanimentAssetId, mixedAssetId, videoAssetId, vocalAssetId])
+
+  useEffect(() => {
     if (!container.current || !selectedAssetId || !audio.current) return
-    const version = ++instanceVersion.current
     if (resumeAt.current > 0) audio.current.currentTime = resumeAt.current
     const factory = waveFactory ?? ((element: HTMLElement) => {
       const regions = RegionsPlugin.create()
@@ -73,7 +81,6 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     clock.current = createPlaybackClock(audio.current, video.current)
     const unsubscribe = clock.current.subscribe(onTime ?? (() => undefined))
     return () => {
-      instanceVersion.current = Math.max(instanceVersion.current, version + 1)
       unsubscribeWaveError?.()
       unsubscribe(); visualizer.current?.destroy(); visualizer.current = null
       clock.current?.destroy(); clock.current = null
@@ -84,18 +91,21 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   if (!mixed) return <p className="inline-error">缺少可播放的真实演唱录音。</p>
 
   const refresh = async (asset: Track, force = false): Promise<boolean> => {
-    if (!onRefreshMedia || (!force && refreshed.current.has(asset.assetId))) return false
+    if (!onRefreshMedia) return false
+    if (!force && refreshed.current.has(asset.assetId)) {
+      setFailure({ asset, message: '授权自动刷新次数已用尽，请手动重试。' })
+      return false
+    }
     refreshed.current.add(asset.assetId)
-    const version = instanceVersion.current
     setFailure(null)
     try {
       const url = await onRefreshMedia(asset.assetId)
-      if (version !== instanceVersion.current) return false
+      if (!activeAssetIds.current.has(asset.assetId)) return false
       setOverrides((current) => ({ ...current, [asset.assetId]: url }))
       if (asset.assetId === media.video?.assetId) setVideoFailed(false)
       return true
     } catch (error) {
-      if (version === instanceVersion.current) setFailure(failureOf(asset, error))
+      if (activeAssetIds.current.has(asset.assetId)) setFailure(failureOf(asset, error))
       return false
     }
   }

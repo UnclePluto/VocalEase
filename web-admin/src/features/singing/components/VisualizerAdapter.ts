@@ -25,13 +25,18 @@ export function createVisualizerAdapter(dependencies: VisualizerDependencies = {
     if (raf) cancelFrame(raf)
     raf = 0
   }
-  const drawFallback = (canvas: HTMLCanvasElement) => {
+  const drawFallback = (canvas: HTMLCanvasElement, sampleProvider?: () => Uint8Array | null) => {
     const drawing = canvas.getContext('2d')
-    const samples = analyser ? new Uint8Array(analyser.frequencyBinCount) : null
+    const analyserSamples = analyser ? new Uint8Array(analyser.frequencyBinCount) : null
     if (!drawing) return
     const frame = () => {
       if (destroyed) return
-      if (samples && analyser) analyser.getByteFrequencyData(samples)
+      if (analyserSamples && analyser) analyser.getByteFrequencyData(analyserSamples)
+      let samples: Uint8Array | null = analyserSamples
+      if (sampleProvider) {
+        try { samples = sampleProvider() }
+        catch { samples = null }
+      }
       drawing.clearRect(0, 0, canvas.width, canvas.height)
       drawing.fillStyle = '#3478f6'
       const stride = Math.max(1, Math.floor((samples?.length ?? 32) / 32))
@@ -44,28 +49,42 @@ export function createVisualizerAdapter(dependencies: VisualizerDependencies = {
     }
     frame()
   }
+  const startWebAudioFallback = async (media: HTMLMediaElement, canvas: HTMLCanvasElement) => {
+    context = dependencies.createContext?.() ?? new AudioContext()
+    source = context.createMediaElementSource(media)
+    analyser = context.createAnalyser()
+    source.connect(analyser); analyser.connect(context.destination)
+    await context.resume?.()
+    drawFallback(canvas)
+  }
 
   return {
     async start(media, canvas) {
       if (destroyed || waviz || raf) return
+      let Waviz: WavizConstructor
       try {
-        const { Waviz } = await loadWaviz()
-        if (destroyed) return
-        waviz = new Waviz(canvas, media)
-        if (waviz.getFrequencyData?.() === null) {
-          waviz.cleanup?.()
-          waviz = null
-          throw new Error('Waviz 未能连接媒体元素')
-        }
-        await waviz.simpleBars?.()
+        Waviz = (await loadWaviz()).Waviz
       } catch {
-        if (destroyed || raf) return
-        context = dependencies.createContext?.() ?? new AudioContext()
-        source = context.createMediaElementSource(media)
-        analyser = context.createAnalyser()
-        source.connect(analyser); analyser.connect(context.destination)
-        await context.resume?.()
-        drawFallback(canvas)
+        if (!destroyed) await startWebAudioFallback(media, canvas)
+        return
+      }
+      if (destroyed) return
+      try { waviz = new Waviz(canvas, media) }
+      catch {
+        if (!destroyed) await startWebAudioFallback(media, canvas)
+        return
+      }
+      if (waviz.getFrequencyData?.() === null) {
+        waviz.cleanup?.()
+        waviz = null
+        if (!destroyed) await startWebAudioFallback(media, canvas)
+        return
+      }
+      try { await waviz.simpleBars?.() }
+      catch {
+        if (destroyed) return
+        waviz.stop?.()
+        drawFallback(canvas, () => waviz?.getFrequencyData?.() ?? null)
       }
     },
     stop() { waviz?.stop?.(); stopFallback() },

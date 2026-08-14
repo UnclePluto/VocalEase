@@ -36,4 +36,38 @@ describe('VisualizerAdapter', () => {
     expect(cleanup).toHaveBeenCalledOnce()
     expect(context.createMediaElementSource).toHaveBeenCalledOnce()
   })
+
+  it('Waviz 已连接后预设失败时复用其频谱数据绘制，绝不对同一媒体创建第二个 source', async () => {
+    const stop = vi.fn(); const cleanup = vi.fn(); const cancelFrame = vi.fn()
+    const samples = new Uint8Array(32).fill(128)
+    const analyser = { frequencyBinCount: 32, getByteFrequencyData: vi.fn(), connect: vi.fn(), disconnect: vi.fn() }
+    const createContext = vi.fn(() => ({
+      state: 'running', destination: {},
+      createMediaElementSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })),
+      createAnalyser: vi.fn(() => analyser), resume: vi.fn(), close: vi.fn(),
+    }) as unknown as AudioContext)
+    const adapter = createVisualizerAdapter({
+      loadWaviz: vi.fn().mockResolvedValue({ Waviz: class {
+        stop = stop
+        cleanup = cleanup
+        getFrequencyData = () => samples
+        simpleBars = vi.fn().mockRejectedValue(new Error('preset failed'))
+      } }),
+      createContext,
+      requestFrame: vi.fn().mockReturnValue(7),
+      cancelFrame,
+    })
+    const canvas = document.createElement('canvas')
+    const fillRect = vi.fn()
+    vi.spyOn(canvas, 'getContext').mockReturnValue({ clearRect: vi.fn(), fillRect, fillStyle: '' } as unknown as CanvasRenderingContext2D)
+
+    await adapter.start(document.createElement('audio'), canvas)
+
+    expect(createContext).not.toHaveBeenCalled()
+    expect(fillRect).toHaveBeenCalled()
+    expect(stop).toHaveBeenCalledOnce()
+    adapter.destroy()
+    expect(cancelFrame).toHaveBeenCalledWith(7)
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
 })

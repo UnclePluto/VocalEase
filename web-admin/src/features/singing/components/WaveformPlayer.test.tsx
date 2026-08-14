@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { WaveformPlayer } from './WaveformPlayer'
@@ -82,7 +82,7 @@ describe('WaveformPlayer', () => {
     let waveError!: () => void
     const unsubscribe = vi.fn(); const refresh = vi.fn().mockResolvedValue('/fresh.mp3')
     const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn(), onError: (listener) => { waveError = listener; return unsubscribe } })} />)
-    waveError(); waveError()
+    await act(async () => { waveError(); waveError(); await Promise.resolve() })
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
     view.unmount()
     expect(unsubscribe).toHaveBeenCalledTimes(2)
@@ -95,6 +95,36 @@ describe('WaveformPlayer', () => {
     fireEvent.error(oldAudio)
     await waitFor(() => expect(view.container.querySelector('audio')).not.toBe(oldAudio))
     expect(view.container.querySelector('audio')).toHaveAttribute('src', '/fresh.mp3')
+  })
+
+  it('音频自动刷新成功后再次失败会提示配额用尽，并允许手动刷新清错', async () => {
+    const refresh = vi.fn().mockResolvedValueOnce('/fresh.mp3').mockResolvedValueOnce('/manual.mp3')
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/old.mp3' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    fireEvent.error(view.container.querySelector('audio')!)
+    await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/fresh.mp3'))
+
+    fireEvent.error(view.container.querySelector('audio')!)
+
+    expect(await screen.findByText('授权自动刷新次数已用尽，请手动重试。')).toBeInTheDocument()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: '重试媒体授权' }))
+    await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/manual.mp3'))
+    expect(screen.queryByText('授权自动刷新次数已用尽，请手动重试。')).not.toBeInTheDocument()
+  })
+
+  it('录像自动刷新成功后再次失败同样提示配额用尽，手动刷新恢复录像', async () => {
+    const refresh = vi.fn().mockResolvedValueOnce('/video-fresh.mp4').mockResolvedValueOnce('/video-manual.mp4')
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' }, video: { assetId: 'video', url: '/video-old.mp4' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+    fireEvent.error(view.container.querySelector('video')!)
+    await waitFor(() => expect(view.container.querySelector('video')).toHaveAttribute('src', '/video-fresh.mp4'))
+
+    fireEvent.error(view.container.querySelector('video')!)
+
+    expect(await screen.findByText('授权自动刷新次数已用尽，请手动重试。')).toBeInTheDocument()
+    expect(screen.getByText('录像加载失败，已降级为音频回放。')).toBeInTheDocument()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: '重试媒体授权' }))
+    await waitFor(() => expect(view.container.querySelector('video')).toHaveAttribute('src', '/video-manual.mp4'))
   })
 
   it('录像失败后手动重试成功会恢复录像元素', async () => {
