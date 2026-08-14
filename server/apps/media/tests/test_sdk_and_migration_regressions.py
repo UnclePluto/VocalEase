@@ -182,9 +182,30 @@ def test_media_data_migration_downgrade_is_declared_irreversible_and_preserves_l
     assert ("media", "0008_atomic_manifest_state") in MigrationExecutor(connection).loader.applied_migrations
 
 
+def _fresh_media_database_snapshot():
+    from apps.media.models import MediaAsset
+    # 独立 DatabaseWrapper/底层连接；沿用 default alias 仅为允许 introspection 内部
+    # features 查询通过 Django 的连接路由，不复用 executor 的现有连接。
+    probe = connection.copy(alias="default")
+    try:
+        probe.ensure_connection()
+        with probe.cursor() as cursor:
+            columns = [column.name for column in probe.introspection.get_table_description(cursor, MediaAsset._meta.db_table)]
+            cursor.execute(f'SELECT * FROM "{MediaAsset._meta.db_table}" ORDER BY "id"')
+            rows = cursor.fetchall()
+        return {
+            "applied": set(MigrationRecorder(probe).applied_migrations()),
+            "columns": columns,
+            "rows": rows,
+        }
+    finally:
+        probe.close()
+
+
+@pytest.mark.parametrize("target", ["0008_atomic_manifest_state", "0001_initial"])
 @pytest.mark.parametrize("contents", ["empty", "patient", "generic"])
-@pytest.mark.django_db(transaction=True)
-def test_latest_media_schema_reverse_barrier_stops_before_any_change(contents):
+@pytest.mark.django_db(transaction=True, databases="__all__")
+def test_latest_media_schema_reverse_barrier_stops_before_any_change(contents, target):
     from apps.media.models import MediaAsset
     if contents == "patient":
         SequenceCounter.objects.bulk_create([SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True)
@@ -193,15 +214,12 @@ def test_latest_media_schema_reverse_barrier_stops_before_any_change(contents):
         MediaAsset.objects.create(patient_owner=patient, owner_type="patient", owner_id=patient.id, media_type="singing_audio", backend="local", object_key=f"test/singing_audio/2026/08/14/{uuid4().hex}", mime="audio/mpeg", size=3, status="uploading", upload_expires_at="2026-08-15T00:00:00Z")
     elif contents == "generic":
         MediaAsset.objects.create(patient_owner=None, owner_type="song", owner_id=uuid4(), media_type="song_source", backend="local", object_key=f"test/song_source/2026/08/14/{uuid4().hex}", mime="audio/mpeg", size=3, status="uploading", upload_expires_at="2026-08-15T00:00:00Z")
-    recorder_before = set(MigrationRecorder(connection).applied_migrations())
-    columns_before = [column.name for column in connection.introspection.get_table_description(connection.cursor(), MediaAsset._meta.db_table)]
-    rows_before = list(MediaAsset.objects.order_by("id").values())
+    before = _fresh_media_database_snapshot()
     try:
         with pytest.raises(IrreversibleError):
-            MigrationExecutor(connection).migrate([("media", "0008_atomic_manifest_state")])
+            MigrationExecutor(connection).migrate([("media", target)])
+        # 必须在任何恢复 latest 之前，从独立连接立即确认 schema/记录/数据完全未动。
+        assert _fresh_media_database_snapshot() == before
     finally:
-        # RED 阶段旧实现可能真的回退；保证测试库恢复 latest，不污染后续测试。
+        # 仅负责隔离测试环境，断言绝不依赖这里的恢复结果。
         MigrationExecutor(connection).migrate(MigrationExecutor(connection).loader.graph.leaf_nodes())
-    assert set(MigrationRecorder(connection).applied_migrations()) == recorder_before
-    assert [column.name for column in connection.introspection.get_table_description(connection.cursor(), MediaAsset._meta.db_table)] == columns_before
-    assert list(MediaAsset.objects.order_by("id").values()) == rows_before

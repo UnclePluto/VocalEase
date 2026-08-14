@@ -128,6 +128,7 @@ def test_patient_required_to_change_password_cannot_request_media_upload_grant(a
 @override_settings(MEDIA_BACKEND="local")
 def test_local_upload_complete_and_private_download_are_authorized_and_do_not_expose_media_root(api_client, patient_pair, tmp_path, settings):
     settings.MEDIA_LOCAL_ROOT = str(tmp_path / "not-public")
+    Path(settings.MEDIA_LOCAL_ROOT).mkdir()
     patient, other_patient = patient_pair
     content = b"private audio"
     sha256 = hashlib.sha256(content).hexdigest()
@@ -181,6 +182,7 @@ def test_local_upload_complete_and_private_download_are_authorized_and_do_not_ex
 @override_settings(MEDIA_BACKEND="local", MEDIA_UPLOAD_GRANT_TTL_SECONDS=1)
 def test_local_upload_grant_expiry_and_object_key_traversal_are_rejected(api_client, patient_pair, tmp_path, settings, monkeypatch):
     settings.MEDIA_LOCAL_ROOT = str(tmp_path / "private")
+    Path(settings.MEDIA_LOCAL_ROOT).mkdir()
     patient, _ = patient_pair
     api_client.force_authenticate(patient.user)
     response = api_client.post(
@@ -201,6 +203,7 @@ def test_local_upload_grant_expiry_and_object_key_traversal_are_rejected(api_cli
 @override_settings(MEDIA_BACKEND="local")
 def test_completion_rejects_an_expired_upload_grant_even_if_the_file_was_written(api_client, patient_pair, tmp_path, settings):
     settings.MEDIA_LOCAL_ROOT = str(tmp_path / "private")
+    Path(settings.MEDIA_LOCAL_ROOT).mkdir()
     patient, _ = patient_pair
     api_client.force_authenticate(patient.user)
     content = b"late"

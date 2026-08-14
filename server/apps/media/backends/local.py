@@ -6,7 +6,7 @@ import json
 import os
 import re
 import stat
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -47,6 +47,17 @@ class PublishedLocalUpload:
     previous_manifest: dict[str, Any] | None
 
 
+@dataclass(frozen=True)
+class PendingMarkerIndex:
+    claims: tuple[tuple[UUID, str], ...]
+    paths: Mapping[tuple[str, str], tuple[Path, ...]]
+    candidate_paths: Mapping[str, tuple[Path, ...]]
+    referenced_blobs: frozenset[str]
+    references_by_path: Mapping[Path, frozenset[str]]
+    conservative_references: bool
+    stats: Mapping[str, int]
+
+
 class LocalStorageBackend:
     """不暴露根目录，以不可变 blob + 单清单 CAS 提供本地私有对象。"""
 
@@ -65,46 +76,55 @@ class LocalStorageBackend:
         self.signer = signing.Signer(key=signing_secret, salt=self.signing_salt)
         self.environment = environment
         self._safe_open_hook = lambda kind, path: None
+        self._safe_read_hook = lambda kind, path, descriptor, limit: None
+        try:
+            configured_count = int(getattr(settings, "MEDIA_SCANNER_MAX_MARKERS", self.scanner_marker_hard_limit))
+            configured_bytes = int(getattr(settings, "MEDIA_SCANNER_MAX_MARKER_BYTES", self.scanner_marker_bytes_hard_limit))
+        except (TypeError, ValueError) as exc:
+            raise StorageValidationError("媒体扫描配置不合法") from exc
+        if configured_count <= 0 or configured_bytes <= 0:
+            raise StorageValidationError("媒体扫描配置必须为正数")
+        self.scanner_max_markers = min(configured_count, self.scanner_marker_hard_limit)
+        self.scanner_max_marker_bytes = min(configured_bytes, self.scanner_marker_bytes_hard_limit)
         self._safe_directory(self.root)
 
     @contextmanager
-    def _parent_fd(self, path: Path, *, create: bool = False):
+    def _directory_fd(self, path: Path, *, create: bool = False):
         try:
-            relative = path.parent.relative_to(self.root)
+            relative = path.relative_to(self.root)
         except ValueError as exc:
             raise StorageValidationError("媒体文件路径越界") from exc
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        descriptors: list[int] = []
-        try:
-            root_fd = os.open(self.root, flags)
-            descriptors.append(root_fd)
-            current = root_fd
-            for part in relative.parts:
-                if part in {"", ".", ".."}:
-                    raise StorageValidationError("媒体目录路径不合法")
-                if create:
-                    try:
-                        os.mkdir(part, 0o700, dir_fd=current)
-                    except FileExistsError:
-                        pass
-                child = os.open(part, flags, dir_fd=current)
-                if not stat.S_ISDIR(os.fstat(child).st_mode):
-                    os.close(child)
-                    raise StorageValidationError("媒体目录路径不合法")
-                descriptors.append(child)
-                current = child
-        except StorageValidationError:
-            raise
-        except OSError as exc:
-            raise StorageValidationError("媒体目录不可安全访问") from exc
-        try:
+        with ExitStack() as stack:
+            try:
+                # root 必须由部署预先创建；绝不沿一个尚未验证的绝对路径递归 mkdir。
+                current = os.open(self.root, flags)
+                stack.callback(os.close, current)
+                if not stat.S_ISDIR(os.fstat(current).st_mode):
+                    raise StorageValidationError("媒体存储根目录不合法")
+                for part in relative.parts:
+                    if part in {"", ".", ".."}:
+                        raise StorageValidationError("媒体目录路径不合法")
+                    if create:
+                        try:
+                            os.mkdir(part, 0o700, dir_fd=current)
+                        except FileExistsError:
+                            pass
+                    child = os.open(part, flags, dir_fd=current)
+                    stack.callback(os.close, child)
+                    if not stat.S_ISDIR(os.fstat(child).st_mode):
+                        raise StorageValidationError("媒体目录路径不合法")
+                    current = child
+            except StorageValidationError:
+                raise
+            except OSError as exc:
+                raise StorageValidationError("媒体目录不可安全访问") from exc
             yield current
-        finally:
-            for descriptor in reversed(descriptors):
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+
+    @contextmanager
+    def _parent_fd(self, path: Path, *, create: bool = False):
+        with self._directory_fd(path.parent, create=create) as parent_fd:
+            yield parent_fd
 
     def _safe_open_file(self, path: Path, *, kind: str, flags: int, mode: int = 0o600, create_parent: bool = False) -> int:
         with self._parent_fd(path, create=create_parent) as parent_fd:
@@ -131,12 +151,24 @@ class LocalStorageBackend:
     def _safe_read_json(self, path: Path, *, kind: str, max_bytes: int | None = None) -> Any:
         descriptor = self._safe_open_file(path, kind=kind, flags=os.O_RDONLY)
         try:
+            limit = self.scanner_marker_bytes_hard_limit if max_bytes is None else max_bytes
             size = os.fstat(descriptor).st_size
-            if max_bytes is not None and size > max_bytes:
+            if size > limit:
                 raise StorageValidationError("媒体状态文件过大")
-            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
-                descriptor = -1
-                return json.load(source)
+            # fstat 之后文件仍可能增长；只读 limit+1，不能把攻击者 append 的内容无界载入内存。
+            self._safe_read_hook(kind, path, descriptor, limit)
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while remaining:
+                chunk = os.read(descriptor, min(self.chunk_size, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) > limit:
+                raise StorageValidationError("媒体状态文件过大")
+            return json.loads(raw.decode("utf-8"))
         except StorageValidationError:
             raise
         except (OSError, ValueError, TypeError) as exc:
@@ -151,6 +183,15 @@ class LocalStorageBackend:
             return os.fstat(descriptor)
         finally:
             os.close(descriptor)
+
+    def _safe_entry_stat(self, path: Path) -> os.stat_result | None:
+        try:
+            with self._parent_fd(path) as parent_fd:
+                return os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageValidationError("媒体目录项不可安全检查") from exc
 
     def _safe_unlink(self, path: Path, *, missing_ok: bool = True) -> None:
         try:
@@ -167,8 +208,16 @@ class LocalStorageBackend:
         source_identity = os.fstat(source_descriptor)
         try:
             with self._parent_fd(source) as source_fd, self._parent_fd(destination, create=True) as destination_fd:
+                try:
+                    destination_before = os.stat(destination.name, dir_fd=destination_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    destination_before = None
+                if destination_before is not None and not stat.S_ISREG(destination_before.st_mode):
+                    raise StorageValidationError("媒体原子发布目标类型不合法")
                 self._safe_open_hook("replace", destination)
                 try:
+                    # POSIX rename 只替换目录项，不跟随目标 symlink。对象 CAS 由固定顺序的
+                    # DB select_for_update + object flock 提供；这里不宣称文件系统 CAS。
                     os.rename(source.name, destination.name, src_dir_fd=source_fd, dst_dir_fd=destination_fd)
                 except OSError as exc:
                     raise StorageValidationError("媒体文件不可原子发布") from exc
@@ -208,21 +257,8 @@ class LocalStorageBackend:
         return self.root / ".locks"
 
     def _safe_directory(self, path: Path, *, create: bool = True) -> Path:
-        try:
-            if create:
-                path.mkdir(parents=True, exist_ok=True)
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise StorageValidationError("媒体存储目录不合法")
-            resolved_root = self.root.resolve(strict=True)
-            resolved = path.resolve(strict=True)
-            if path != self.root and resolved.parent != resolved_root and resolved_root not in resolved.parents:
-                raise StorageValidationError("媒体存储目录越界")
+        with self._directory_fd(path, create=create):
             return path
-        except StorageValidationError:
-            raise
-        except OSError as exc:
-            raise StorageValidationError("媒体存储目录不可访问") from exc
 
     def _ensure_internal_roots(self) -> None:
         self._safe_directory(self.root)
@@ -254,13 +290,9 @@ class LocalStorageBackend:
         self._safe_directory(self.root)
         parent = self._safe_nested_parent(self.root, segments[:-1])
         path = parent / segments[-1]
-        if path.exists() or path.is_symlink():
-            try:
-                info = path.lstat()
-            except OSError as exc:
-                raise StorageValidationError("对象路径不可访问") from exc
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise StorageValidationError("对象路径不合法")
+        info = self._safe_entry_stat(path)
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise StorageValidationError("对象路径不合法")
         return path
 
     def _manifest_path(self, object_key: str) -> Path:
@@ -269,10 +301,9 @@ class LocalStorageBackend:
         segments = object_key.split("/")
         parent = self._safe_nested_parent(manifests_root, segments[:-1])
         path = parent / f"{segments[-1]}.json"
-        if path.exists() or path.is_symlink():
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise StorageValidationError("媒体清单路径不合法")
+        info = self._safe_entry_stat(path)
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise StorageValidationError("媒体清单路径不合法")
         return path
 
     def _legacy_metadata_path(self, object_key: str) -> Path:
@@ -285,10 +316,9 @@ class LocalStorageBackend:
             raise StorageValidationError("媒体清单 blob 标识不合法")
         root = self._safe_directory(self.blobs_root)
         path = root / blob
-        if path.exists() or path.is_symlink():
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise StorageValidationError("媒体清单 blob 路径不合法")
+        info = self._safe_entry_stat(path)
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise StorageValidationError("媒体清单 blob 路径不合法")
         return path
 
     def _marker_path(self, object_key: str, generation: str) -> Path:
@@ -305,6 +335,11 @@ class LocalStorageBackend:
         try:
             with self._parent_fd(lock_path, create=True) as parent_fd:
                 descriptor = os.open(lock_path.name, flags, 0o600, dir_fd=parent_fd)
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    os.close(descriptor)
+                    raise StorageValidationError("对象文件锁类型不合法")
+        except StorageValidationError:
+            raise
         except OSError as exc:
             raise StorageValidationError("无法取得对象文件锁") from exc
         with os.fdopen(descriptor, "a+b") as lock_file:
@@ -430,6 +465,12 @@ class LocalStorageBackend:
             json.dump(payload, target, separators=(",", ":"))
             target.flush(); os.fsync(target.fileno())
 
+    def _write_marker_sync(self, path: Path, payload: Mapping[str, Any]) -> None:
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > self.scanner_max_marker_bytes:
+            raise StorageValidationError("待恢复标记超过扫描配置上限")
+        self._write_json_sync(path, payload)
+
     def _validate_marker(self, marker: Any, marker_path: Path, *, object_key: str, asset_id: UUID | str) -> dict[str, Any]:
         normalized_asset_id = str(UUID(str(asset_id)))
         if not isinstance(marker, dict) or set(marker) != _MARKER_FIELDS or marker.get("version") != 1:
@@ -451,52 +492,101 @@ class LocalStorageBackend:
         if not isinstance(temp_name, str) or not temp_name.startswith(expected_prefix) or Path(temp_name).name != temp_name:
             raise StorageValidationError("待恢复标记临时文件不合法")
         temp_path = self._manifest_path(object_key).parent / temp_name
-        if temp_path.exists() or temp_path.is_symlink():
-            info = temp_path.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise StorageValidationError("待恢复标记临时文件路径不合法")
+        info = self._safe_entry_stat(temp_path)
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise StorageValidationError("待恢复标记临时文件路径不合法")
         return {**marker, "new": new, "previous": previous}
 
     def _load_marker(self, marker_path: Path, *, object_key: str, asset_id: UUID | str) -> dict[str, Any]:
         try:
-            marker = self._safe_read_json(marker_path, kind="marker", max_bytes=self.scanner_marker_bytes_hard_limit)
+            marker = self._safe_read_marker_json(marker_path)
         except StorageValidationError as exc:
             raise StorageValidationError("待恢复标记损坏") from exc
         return self._validate_marker(marker, marker_path, object_key=object_key, asset_id=asset_id)
 
-    def pending_marker_claims(self) -> tuple[list[tuple[UUID, str]], dict[str, int]]:
+    def _safe_read_marker_json(self, marker_path: Path) -> Any:
+        return self._safe_read_json(
+            marker_path, kind="marker", max_bytes=self.scanner_max_marker_bytes,
+        )
+
+    def scan_pending_markers(self) -> PendingMarkerIndex:
+        """单次、有界建立 marker claim/reference 索引；后续恢复不得再次扫描目录。"""
         self._ensure_internal_roots()
         claims: list[tuple[UUID, str]] = []
         stats = {"unknown": 0, "oversized": 0, "truncated": 0}
-        configured_count = max(1, min(int(getattr(settings, "MEDIA_SCANNER_MAX_MARKERS", self.scanner_marker_hard_limit)), self.scanner_marker_hard_limit))
-        configured_bytes = max(1, min(int(getattr(settings, "MEDIA_SCANNER_MAX_MARKER_BYTES", self.scanner_marker_bytes_hard_limit)), self.scanner_marker_bytes_hard_limit))
-        seen = 0
-        with self._parent_fd(self.pending_root / ".scan") as pending_fd, os.scandir(pending_fd) as entries:
-            for entry in entries:
-                name = entry.name
-                if not name.endswith(".json") or Path(name).name != name:
-                    continue
-                marker_path = self.pending_root / name
-                try:
-                    info = entry.stat(follow_symlinks=False)
-                    if not stat.S_ISREG(info.st_mode):
-                        raise StorageValidationError("待恢复标记路径不合法")
-                    if info.st_size > configured_bytes:
-                        stats["oversized"] += 1
+        paths: dict[tuple[str, str], list[Path]] = {}
+        candidate_paths: dict[str, list[Path]] = {}
+        referenced_blobs: set[str] = set()
+        references_by_path: dict[Path, frozenset[str]] = {}
+        conservative = False
+        try:
+            with self._parent_fd(self.pending_root / ".scan") as pending_fd, os.scandir(pending_fd) as entries:
+                inspected = 0
+                while inspected < self.scanner_max_markers:
+                    try:
+                        entry = next(entries)
+                    except StopIteration:
+                        break
+                    inspected += 1
+                    name = entry.name
+                    marker_path = self.pending_root / name
+                    try:
+                        if not name.endswith(".json") or Path(name).name != name:
+                            raise StorageValidationError("待恢复目录含未知文件")
+                        marker_name = re.fullmatch(r"([0-9a-f]{64})-[0-9a-f]{32}\.json", name)
+                        if marker_name:
+                            candidate_paths.setdefault(marker_name.group(1), []).append(marker_path)
+                        info = entry.stat(follow_symlinks=False)
+                        if not stat.S_ISREG(info.st_mode):
+                            raise StorageValidationError("待恢复标记路径不合法")
+                        if info.st_size > self.scanner_max_marker_bytes:
+                            stats["oversized"] += 1
+                            raise StorageValidationError("待恢复标记过大")
+                        raw = self._safe_read_marker_json(marker_path)
+                        object_key = raw.get("object_key") if isinstance(raw, dict) else ""
+                        asset_id = UUID(str(raw.get("asset_id"))) if isinstance(raw, dict) else None
+                        marker = self._validate_marker(
+                            raw, marker_path, object_key=object_key, asset_id=asset_id,
+                        )
+                        assert asset_id is not None
+                        claims.append((asset_id, object_key))
+                        paths.setdefault((str(asset_id), object_key), []).append(marker_path)
+                        marker_references = {marker["new"]["blob"]}
+                        if marker["previous"] is not None:
+                            marker_references.add(marker["previous"]["blob"])
+                        referenced_blobs.update(marker_references)
+                        references_by_path[marker_path] = frozenset(marker_references)
+                    except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
                         stats["unknown"] += 1
-                        continue
-                    if seen >= configured_count:
-                        stats["truncated"] += 1
-                        continue
-                    seen += 1
-                    raw = self._safe_read_json(marker_path, kind="marker", max_bytes=configured_bytes)
-                    object_key = raw.get("object_key") if isinstance(raw, dict) else ""
-                    asset_id = UUID(str(raw.get("asset_id"))) if isinstance(raw, dict) else None
-                    self._validate_marker(raw, marker_path, object_key=object_key, asset_id=asset_id)
-                    claims.append((asset_id, object_key))
-                except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
-                    stats["unknown"] += 1
-        return claims, stats
+                        conservative = True
+                if inspected == self.scanner_max_markers:
+                    # 不为确认“还有几个”额外拉取任何 entry；预算耗尽本身即是截断信号。
+                    stats["truncated"] = 1
+                    conservative = True
+        except (OSError, StorageValidationError):
+            stats["unknown"] += 1
+            conservative = True
+        return PendingMarkerIndex(
+            claims=tuple(claims),
+            paths={key: tuple(value) for key, value in paths.items()},
+            candidate_paths={key: tuple(value) for key, value in candidate_paths.items()},
+            referenced_blobs=frozenset(referenced_blobs),
+            references_by_path=references_by_path,
+            conservative_references=conservative,
+            stats=stats,
+        )
+
+    def pending_marker_claims(self) -> tuple[list[tuple[UUID, str]], dict[str, int]]:
+        index = self.scan_pending_markers()
+        return list(index.claims), dict(index.stats)
+
+    def _marker_paths_for(
+        self, *, object_key: str, asset_id: UUID | str, marker_index: PendingMarkerIndex | None,
+    ) -> tuple[tuple[Path, ...], PendingMarkerIndex]:
+        index = marker_index or self.scan_pending_markers()
+        valid = index.paths.get((str(UUID(str(asset_id))), object_key), ())
+        candidates = index.candidate_paths.get(self._object_digest(object_key), ())
+        return tuple(dict.fromkeys((*valid, *candidates))), index
 
     def create_upload_grant(self, *, owner_id: UUID, media_type: str, mime: str, size: int) -> UploadGrant:
         validate_media_request(media_type=media_type, mime=mime, size=size)
@@ -594,7 +684,7 @@ class LocalStorageBackend:
             manifest_temp_path, manifest_temp = self._new_temp_file(manifest_parent, prefix=prefix, binary=False)
             with manifest_temp:
                 json.dump(manifest, manifest_temp, separators=(",", ":")); manifest_temp.flush(); os.fsync(manifest_temp.fileno())
-            self._write_json_sync(marker_path, {"version": 1, "phase": "prepared", "object_key": object_key, "asset_id": normalized_asset_id, "new": manifest, "previous": None, "manifest_temp": manifest_temp_path.name})
+            self._write_marker_sync(marker_path, {"version": 1, "phase": "prepared", "object_key": object_key, "asset_id": normalized_asset_id, "new": manifest, "previous": None, "manifest_temp": manifest_temp_path.name})
             return PreparedLocalUpload(object_key, normalized_asset_id, generation, blob, mime, size, sha256, manifest_temp_path, marker_path)
         except Exception:
             self._safe_unlink(temporary_path)
@@ -624,7 +714,7 @@ class LocalStorageBackend:
             if previous and previous["asset_id"] != prepared.asset_id:
                 raise StorageValidationError("媒体清单资产冲突")
             marker = {**prepared_marker, "phase": "published", "previous": previous}
-            self._write_json_sync(prepared.pending_marker, marker)
+            self._write_marker_sync(prepared.pending_marker, marker)
             self._safe_replace(prepared.manifest_temp, self._manifest_path(prepared.object_key))
             return PublishedLocalUpload(prepared=prepared, previous_manifest=previous)
 
@@ -645,42 +735,46 @@ class LocalStorageBackend:
             expected_size=prepared.size, expected_mime=prepared.mime, expected_sha256=prepared.sha256,
         )
 
-    def _blob_is_referenced(self, blob: str, *, exclude_marker: Path | None = None) -> bool:
-        manifests_root = self.root / ".manifests"
-        if not manifests_root.is_dir() or manifests_root.is_symlink():
-            return False
-        for manifest_path in manifests_root.rglob("*.json"):
-            try:
-                if self._safe_read_json(manifest_path, kind="manifest", max_bytes=self.scanner_marker_bytes_hard_limit).get("blob") == blob:
-                    return True
-            except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
-                # 未知或损坏 manifest 一律保守保留 blob。
+    def _blob_is_referenced(
+        self, blob: str, *, object_key: str, exclude_marker: Path | None = None,
+        marker_index: PendingMarkerIndex | None = None,
+    ) -> bool:
+        """只查同 object 清单和单次有界 marker 索引；异常/预算耗尽一律保守保留。"""
+        try:
+            current = self._load_manifest(object_key, required=False)
+            if current and current.get("blob") == blob:
                 return True
-        if self.pending_root.is_dir() and not self.pending_root.is_symlink():
-            for marker_path in self.pending_root.glob("*.json"):
-                if exclude_marker is not None and marker_path == exclude_marker:
-                    continue
-                try:
-                    raw = self._safe_read_json(marker_path, kind="marker", max_bytes=self.scanner_marker_bytes_hard_limit)
-                    referenced = [raw.get("new")]
-                    if raw.get("previous") is not None:
-                        referenced.append(raw.get("previous"))
-                    if any(isinstance(item, dict) and item.get("blob") == blob for item in referenced):
-                        return True
-                except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
-                    return True
+        except (OSError, ValueError, TypeError, AttributeError, StorageValidationError):
+            return True
+        try:
+            index = marker_index or self.scan_pending_markers()
+        except (OSError, StorageValidationError):
+            return True
+        if index.conservative_references:
+            return True
+        if blob not in index.referenced_blobs:
+            return False
+        if exclude_marker is None:
+            return True
+        # 从已经解析且有界的索引排除当前 marker；绝不重新遍历目录。
+        for marker_path, references in index.references_by_path.items():
+            if marker_path != exclude_marker and blob in references:
+                return True
         return False
 
     def recover_pending(self, object_key: str, *, asset_id: UUID | str, expected_generation: str,
                         expected_size: int | None = None, expected_mime: str | None = None,
-                        expected_sha256: str | None = None) -> bool:
+                        expected_sha256: str | None = None,
+                        marker_index: PendingMarkerIndex | None = None) -> bool:
         """依据数据库 generation 恢复进程中断留下的 prepared/published marker。"""
         self._path(object_key)
         self._ensure_internal_roots()
         recovered = False
+        marker_paths, marker_index = self._marker_paths_for(
+            object_key=object_key, asset_id=asset_id, marker_index=marker_index,
+        )
         with self.object_lock(object_key):
-            marker_pattern = f"{self._object_digest(object_key)}-*.json"
-            for marker_path in self.pending_root.glob(marker_pattern):
+            for marker_path in marker_paths:
                 marker = self._load_marker(marker_path, object_key=object_key, asset_id=asset_id)
                 new = marker["new"]
                 temp_name = marker["manifest_temp"]
@@ -706,7 +800,7 @@ class LocalStorageBackend:
                         new, blob_path, asset_id=asset_id, generation=expected_generation,
                         size=expected_size, mime=expected_mime, sha256=expected_sha256,
                     )
-                    self._write_json_sync(marker_path, {**marker, "phase": "published"})
+                    self._write_marker_sync(marker_path, {**marker, "phase": "published"})
                     self._safe_replace(manifest_temp, self._manifest_path(object_key))
                     actual_generation = new["generation"]
                     recovered = True
@@ -725,7 +819,10 @@ class LocalStorageBackend:
                         self._safe_replace(restore_path, path)
                     actual_generation = expected_generation
                 if actual_generation == expected_generation and expected_generation != new["generation"]:
-                    if not self._blob_is_referenced(new["blob"], exclude_marker=marker_path):
+                    if not self._blob_is_referenced(
+                        new["blob"], object_key=object_key, exclude_marker=marker_path,
+                        marker_index=marker_index,
+                    ):
                         self._safe_unlink(self._blob_path(new["blob"], object_key))
                     self._safe_unlink(manifest_temp)
                     self._safe_unlink(marker_path)
@@ -733,12 +830,15 @@ class LocalStorageBackend:
         return recovered
 
     def finalize_generation(self, object_key: str, generation: str, *, asset_id: UUID | str,
-                            expected_size: int, expected_mime: str, expected_sha256: str) -> bool:
+                            expected_size: int, expected_mime: str, expected_sha256: str,
+                            marker_index: PendingMarkerIndex | None = None) -> bool:
         self._ensure_internal_roots()
         finalized = False
+        marker_paths, marker_index = self._marker_paths_for(
+            object_key=object_key, asset_id=asset_id, marker_index=marker_index,
+        )
         with self.object_lock(object_key):
-            marker_pattern = f"{self._object_digest(object_key)}-*.json"
-            for marker_path in self.pending_root.glob(marker_pattern):
+            for marker_path in marker_paths:
                 marker = self._load_marker(marker_path, object_key=object_key, asset_id=asset_id)
                 if marker["new"]["generation"] != generation:
                     continue
@@ -753,7 +853,10 @@ class LocalStorageBackend:
                 )
                 previous = marker["previous"]
                 if previous:
-                    if previous["blob"] != current["blob"] and not self._blob_is_referenced(previous["blob"], exclude_marker=marker_path):
+                    if previous["blob"] != current["blob"] and not self._blob_is_referenced(
+                        previous["blob"], object_key=object_key, exclude_marker=marker_path,
+                        marker_index=marker_index,
+                    ):
                         self._safe_unlink(self._blob_path(previous["blob"], object_key))
                 self._safe_unlink(self._manifest_path(object_key).parent / marker["manifest_temp"])
                 self._safe_unlink(marker_path)

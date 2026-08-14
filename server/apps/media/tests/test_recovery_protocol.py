@@ -441,10 +441,11 @@ def test_scanner_rejects_same_size_marker_whose_content_hash_disagrees_with_lock
 
 @pytest.mark.django_db
 @override_settings(MEDIA_BACKEND="local", MEDIA_SCANNER_MAX_MARKERS=10, MEDIA_SCANNER_MAX_MARKER_BYTES=1024)
-def test_scanner_bounds_marker_count_and_size_without_reading_oversized_file(patient, tmp_path, settings, monkeypatch):
-    settings.MEDIA_LOCAL_ROOT = tmp_path
-    asset, _ = media_services.create_upload_grant(owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3)
-    backend = media_services.backend_for_asset(asset)
+def test_scanner_bounds_marker_count_and_size_without_reading_oversized_file(patient, tmp_path, monkeypatch):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    asset, _ = media_services.create_upload_grant(
+        owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3, backend=backend,
+    )
     prepared = backend._prepare_stream(object_key=asset.object_key, stream=io.BytesIO(b"old"), mime="audio/mpeg", asset_id=asset.id, expected_size=3)
     oversized = backend.pending_root / f"{uuid4().hex}.json"
     oversized.write_bytes(b"x" * 2048)
@@ -471,6 +472,278 @@ def test_scanner_bounds_marker_count_and_size_without_reading_oversized_file(pat
     with override_settings(MEDIA_SCANNER_MAX_MARKERS=3):
         bounded = media_services.recover_stale_local_uploads(now=timezone.now())
     assert bounded["truncated_markers"] >= 1
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local", MEDIA_SCANNER_MAX_MARKERS=1000, MEDIA_SCANNER_MAX_MARKER_BYTES=1024)
+def test_scanner_has_one_total_directory_entry_budget_and_does_not_rescan(patient, tmp_path, monkeypatch):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    asset, grant = media_services.create_upload_grant(
+        owner=patient, media_type="singing_audio", mime="audio/mpeg", size=3, backend=backend,
+    )
+    media_services.claim_local_upload(asset=asset)
+    # 所有目录项都消耗同一个预算：未知后缀、坏 JSON、超大文件和 symlink 不能免费跳过。
+    backend._safe_directory(backend.pending_root)
+    (backend.pending_root / "00-unknown.bin").write_bytes(b"x")
+    (backend.pending_root / "01-bad.json").write_text("{")
+    (backend.pending_root / "02-big.json").write_bytes(b"x" * 2048)
+    outside = tmp_path / "outside-marker"; outside.write_text("{}")
+    (backend.pending_root / "03-link.json").symlink_to(outside)
+    for index in range(1002):
+        (backend.pending_root / f"10-malicious-{index:02d}.json").write_text("{}")
+    # 最后创建的合法 marker 必须位于本轮预算之后。
+    prepared = backend.prepare_authorized_stream(
+        object_key=asset.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"),
+        mime="audio/mpeg", asset_id=asset.id,
+    )
+    MediaAsset.objects.filter(pk=asset.pk).update(
+        upload_lease_expires_at=timezone.now() - timedelta(seconds=1),
+    )
+
+    real_scandir = os.scandir
+    pending_identity = os.stat(backend.pending_root)
+    pending_entries = list(real_scandir(backend.pending_root))
+    pending_entries.sort(key=lambda entry: entry.name == prepared.pending_marker.name)
+    inspected = 0
+    marker_opens = 0
+    original_safe_open = backend._safe_open_file
+
+    def counted_safe_open(path, *, kind, **kwargs):
+        nonlocal marker_opens
+        if kind == "marker":
+            marker_opens += 1
+        return original_safe_open(path, kind=kind, **kwargs)
+
+    class CountingScandir:
+        def __init__(self, iterator, counted):
+            self.iterator, self.counted = iterator, counted
+
+        def __enter__(self):
+            enter = getattr(self.iterator, "__enter__", None)
+            if enter:
+                enter()
+            return self
+
+        def __exit__(self, *args):
+            exit_method = getattr(self.iterator, "__exit__", None)
+            return exit_method(*args) if exit_method else None
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal inspected
+            entry = next(self.iterator)
+            if self.counted:
+                inspected += 1
+            return entry
+
+    def counted_scandir(path):
+        counted = False
+        if isinstance(path, int):
+            info = os.fstat(path)
+            counted = (info.st_dev, info.st_ino) == (pending_identity.st_dev, pending_identity.st_ino)
+        iterator = iter(pending_entries) if counted else real_scandir(path)
+        return CountingScandir(iterator, counted)
+
+    monkeypatch.setattr("apps.media.backends.local.os.scandir", counted_scandir)
+    monkeypatch.setattr(backend, "_safe_open_file", counted_safe_open)
+    monkeypatch.setitem(media_services.STORAGE_BACKEND_FACTORIES, "local", lambda: backend)
+
+    stats = media_services.recover_stale_local_uploads(now=timezone.now())
+
+    assert inspected <= 1000
+    assert marker_opens <= 1000
+    assert stats["truncated_markers"] == 1
+    assert prepared.pending_marker.exists(), "预算后的合法项必须留给后续扫描，不能越界读取"
+
+
+@override_settings(MEDIA_SCANNER_MAX_MARKERS=10, MEDIA_SCANNER_MAX_MARKER_BYTES=1024)
+def test_marker_read_uses_tightened_limit_even_if_file_grows_after_fstat(tmp_path, monkeypatch):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    marker = backend.pending_root / "grow.json"
+    backend._safe_directory(backend.pending_root)
+    marker.write_text("{}")
+    appended = False
+    read_bytes = 0
+    real_read = os.read
+
+    def append_after_stat(kind, path, descriptor, limit):
+        nonlocal appended
+        if kind == "marker" and path == marker:
+            appended = True
+            with marker.open("ab") as target:
+                target.write(b" " * 100_000)
+
+    def bounded_read(descriptor, size):
+        nonlocal read_bytes
+        chunk = real_read(descriptor, size)
+        read_bytes += len(chunk)
+        return chunk
+
+    backend._safe_read_hook = append_after_stat
+    monkeypatch.setattr("apps.media.backends.local.os.read", bounded_read)
+
+    with pytest.raises(StorageValidationError, match="过大"):
+        backend._safe_read_marker_json(marker)
+    assert appended
+    assert read_bytes <= 1025
+
+
+@pytest.mark.parametrize("count,byte_limit", [(0, 1024), (-1, 1024), (10, 0), (10, -1)])
+def test_local_backend_rejects_non_positive_scanner_limits(tmp_path, settings, count, byte_limit):
+    settings.MEDIA_SCANNER_MAX_MARKERS = count
+    settings.MEDIA_SCANNER_MAX_MARKER_BYTES = byte_limit
+    with pytest.raises(StorageValidationError, match="扫描"):
+        LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+
+
+def test_local_backend_clamps_scanner_limits_to_hard_caps(tmp_path, settings):
+    settings.MEDIA_SCANNER_MAX_MARKERS = 10_000
+    settings.MEDIA_SCANNER_MAX_MARKER_BYTES = 10 * 1024 * 1024
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    assert backend.scanner_max_markers == backend.scanner_marker_hard_limit
+    assert backend.scanner_max_marker_bytes == backend.scanner_marker_bytes_hard_limit
+
+
+def test_parent_fd_closes_every_descriptor_when_intermediate_open_fails(tmp_path, monkeypatch):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    target = tmp_path / "a" / "b" / "file"
+    real_open, real_close = os.open, os.close
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def failing_open(path, flags, *args, **kwargs):
+        if path == "b":
+            raise OSError("injected intermediate failure")
+        descriptor = real_open(path, flags, *args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def tracking_close(descriptor):
+        closed.append(descriptor)
+        return real_close(descriptor)
+
+    monkeypatch.setattr("apps.media.backends.local.os.open", failing_open)
+    monkeypatch.setattr("apps.media.backends.local.os.close", tracking_close)
+    try:
+        with pytest.raises(StorageValidationError):
+            with backend._parent_fd(target):
+                pass
+        assert set(opened) <= set(closed)
+    finally:
+        for descriptor in set(opened) - set(closed):
+            real_close(descriptor)
+
+
+def test_safe_directory_never_follows_internal_symlink_to_create_outside(tmp_path):
+    root = tmp_path / "media"; root.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    (root / ".pending").symlink_to(outside, target_is_directory=True)
+    backend = LocalStorageBackend(root=root, signing_secret="secret", environment="test")
+
+    with pytest.raises(StorageValidationError):
+        backend._safe_directory(root / ".pending" / "must-not-exist")
+
+    assert not (outside / "must-not-exist").exists()
+
+
+def test_safe_replace_rejects_existing_symlink_destination_without_touching_target(tmp_path):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    source = tmp_path / "source"; source.write_bytes(b"new")
+    outside = tmp_path.parent / f"outside-replace-{uuid4().hex}"; outside.write_bytes(b"old")
+    destination = tmp_path / "destination"; destination.symlink_to(outside)
+    try:
+        with pytest.raises(StorageValidationError, match="目标"):
+            backend._safe_replace(source, destination)
+        assert destination.is_symlink()
+        assert outside.read_bytes() == b"old"
+    finally:
+        destination.unlink(missing_ok=True)
+        outside.unlink(missing_ok=True)
+
+
+def test_safe_replace_symlink_swap_after_check_never_writes_external_target(tmp_path):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    source = tmp_path / "source"; source.write_bytes(b"new")
+    destination = tmp_path / "destination"; destination.write_bytes(b"previous")
+    outside = tmp_path.parent / f"outside-race-{uuid4().hex}"; outside.write_bytes(b"external")
+
+    def swap(kind, path):
+        if kind == "replace" and path == destination:
+            destination.unlink()
+            destination.symlink_to(outside)
+
+    backend._safe_open_hook = swap
+    try:
+        backend._safe_replace(source, destination)
+        assert destination.read_bytes() == b"new"
+        assert not destination.is_symlink()
+        assert outside.read_bytes() == b"external"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_object_lock_rejects_non_regular_lockfile(tmp_path):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    object_key = f"test/singing_audio/2026/08/14/{uuid4().hex}"
+    backend._safe_directory(backend.locks_root)
+    lock_path = backend.locks_root / f"{backend._object_digest(object_key)}.lock"
+    os.mkfifo(lock_path)
+    with pytest.raises(StorageValidationError, match="锁类型"):
+        with backend.object_lock(object_key):
+            pass
+
+
+def test_local_backend_requires_preexisting_storage_root(tmp_path):
+    missing = tmp_path / "must-be-provisioned"
+    with pytest.raises(StorageValidationError, match="根目录|目录不可安全访问"):
+        LocalStorageBackend(root=missing, signing_secret="secret", environment="test")
+    assert not missing.exists()
+
+
+def test_blob_reference_check_is_conservative_when_pending_directory_is_unavailable(tmp_path):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    outside = tmp_path / "outside"; outside.mkdir()
+    backend.pending_root.symlink_to(outside, target_is_directory=True)
+    assert backend._blob_is_referenced(
+        "not-a-real-blob", object_key=f"test/singing_audio/2026/08/14/{uuid4().hex}",
+    ) is True
+
+
+def test_recovering_multiple_claims_reuses_one_bounded_marker_index(tmp_path, monkeypatch):
+    backend = LocalStorageBackend(root=tmp_path, signing_secret="secret", environment="test")
+    prepared = []
+    for _ in range(2):
+        asset_id = uuid4()
+        grant = backend.create_upload_grant(
+            owner_id=asset_id, media_type="singing_audio", mime="audio/mpeg", size=3,
+        )
+        upload = backend.prepare_authorized_stream(
+            object_key=grant.object_key, token=grant.upload_token, stream=io.BytesIO(b"old"),
+            mime="audio/mpeg", asset_id=asset_id,
+        )
+        prepared.append((asset_id, upload))
+    real_scandir = os.scandir
+    scans = 0
+
+    def counted_scandir(path):
+        nonlocal scans
+        if isinstance(path, int):
+            info = os.fstat(path)
+            pending = os.stat(backend.pending_root)
+            if (info.st_dev, info.st_ino) == (pending.st_dev, pending.st_ino):
+                scans += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr("apps.media.backends.local.os.scandir", counted_scandir)
+    index = backend.scan_pending_markers()
+    for asset_id, upload in prepared:
+        assert backend.recover_pending(
+            upload.object_key, asset_id=asset_id, expected_generation="", marker_index=index,
+        )
+    assert scans == 1
 
 
 @pytest.mark.django_db

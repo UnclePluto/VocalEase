@@ -249,7 +249,8 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
     now = now or timezone.now()
     stats = {"receiving_recovered": 0, "staged_finalized": 0, "ready_finalized": 0, "legacy_converted": 0, "errors": 0, "unknown_markers": 0, "oversized_markers": 0, "truncated_markers": 0}
     scanner_backend = storage_backend_for("local")
-    marker_claims, scan_stats = scanner_backend.pending_marker_claims()
+    marker_index = scanner_backend.scan_pending_markers()
+    marker_claims, scan_stats = list(marker_index.claims), marker_index.stats
     stats["unknown_markers"] = scan_stats["unknown"]
     stats["oversized_markers"] = scan_stats["oversized"]
     stats["truncated_markers"] = scan_stats["truncated"]
@@ -282,10 +283,12 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                             backend.recover_pending(
                                 locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
                                 expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                                marker_index=marker_index,
                             )
                             backend.finalize_generation(
                                 locked.object_key, locked.manifest_generation, asset_id=locked.id,
                                 expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                                marker_index=marker_index,
                             )
                         else:
                             backend.migrate_legacy_layout(
@@ -308,7 +311,10 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                     locked.save(update_fields=["metadata", "updated_at"])
                     stats["legacy_converted"] += 1
                 elif locked.status == MediaAsset.Status.RECEIVING and locked.upload_lease_expires_at and locked.upload_lease_expires_at <= now:
-                    backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+                    backend.recover_pending(
+                        locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
+                        marker_index=marker_index,
+                    )
                     locked.status = MediaAsset.Status.UPLOADING
                     locked.upload_nonce = None
                     locked.upload_lease_expires_at = None
@@ -318,10 +324,12 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                     recovered = backend.recover_pending(
                         locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
                         expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                        marker_index=marker_index,
                     )
                     finalized = backend.finalize_generation(
                         locked.object_key, locked.manifest_generation, asset_id=locked.id,
                         expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                        marker_index=marker_index,
                     )
                     if recovered or finalized:
                         stats["staged_finalized"] += 1
@@ -329,15 +337,20 @@ def recover_stale_local_uploads(*, now=None) -> dict[str, int]:
                     recovered = backend.recover_pending(
                         locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
                         expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                        marker_index=marker_index,
                     )
                     finalized = backend.finalize_generation(
                         locked.object_key, locked.manifest_generation, asset_id=locked.id,
                         expected_size=locked.size, expected_mime=locked.mime, expected_sha256=locked.sha256,
+                        marker_index=marker_index,
                     )
                     if recovered or finalized:
                         stats["ready_finalized"] += 1
                 elif locked.status == MediaAsset.Status.UPLOADING:
-                    backend.recover_pending(locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation)
+                    backend.recover_pending(
+                        locked.object_key, asset_id=locked.id, expected_generation=locked.manifest_generation,
+                        marker_index=marker_index,
+                    )
         except MediaAsset.DoesNotExist:
             stats["unknown_markers"] += max(1, len(claims_by_asset.get(asset_id, set())))
         except Exception:
