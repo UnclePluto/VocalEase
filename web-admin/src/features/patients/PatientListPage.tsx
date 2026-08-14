@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BarChartOutlined, DeleteOutlined, EditOutlined, LockOutlined, MoreOutlined, PlusOutlined } from '@ant-design/icons'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Dropdown, Input, Modal, Select, Space, message } from 'antd'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Button, Dropdown, Input, Modal, Select, Space, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import type { InputRef } from 'antd'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -11,23 +11,23 @@ import { ConfirmDelete } from '../../components/ConfirmDelete'
 import { DataTable } from '../../components/DataTable'
 import { StatusTag } from '../../components/StatusTag'
 import { useCompactActions } from '../../hooks/useCompactActions'
-import { useDebouncedValue } from '../../hooks/useDebouncedValue'
-import { doctorOptionKeys, listDoctors } from '../doctors/api'
+import { RemoteDoctorSelect } from '../doctors/RemoteDoctorSelect'
+import { useRemoteDoctorOptions } from '../doctors/useRemoteDoctorOptions'
 import {
   createPatient,
   deletePatient,
+  getPatient,
   listPatients,
   patientKeys,
   resetPatientPassword,
   updatePatient,
 } from './api'
 import { PatientFormModal } from './PatientFormModal'
-import type { Patient, PatientListQuery, PatientWrite, TreatmentStatus } from './types'
+import type { Patient, PatientDetail, PatientListQuery, PatientWrite, TreatmentStatus } from './types'
 
 const PAGE_SIZES = new Set([10, 20, 50, 100])
 const STATUSES = new Set<TreatmentStatus>(['pending', 'active', 'completed', 'cancelled'])
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
-const DOCTOR_OPTION_PAGE_SIZE = 20
 
 function positiveInteger(value: string | null, fallback: number) {
   const parsed = Number(value)
@@ -63,9 +63,10 @@ export function PatientListPage() {
   const searchRef = useRef<InputRef>(null)
   const navigate = useNavigate()
   const compactActions = useCompactActions()
-  const [doctorSearch, setDoctorSearch] = useState('')
-  const deferredDoctorSearch = useDebouncedValue(doctorSearch.trim(), 250)
-  const [formPatient, setFormPatient] = useState<Patient | null | undefined>(undefined)
+  const doctorSource = useRemoteDoctorOptions()
+  const [formPatient, setFormPatient] = useState<PatientDetail | null | undefined>(undefined)
+  const [detailTarget, setDetailTarget] = useState<Patient | null>(null)
+  const detailSubmissionRef = useRef(false)
   const [deleteTarget, setDeleteTarget] = useState<Patient | null>(null)
   const [resetTarget, setResetTarget] = useState<Patient | null>(null)
   const deleteSubmissionRef = useRef(false)
@@ -82,26 +83,8 @@ export function PatientListPage() {
     queryKey: patientKeys.list(query),
     queryFn: ({ signal }) => listPatients(query, signal),
   })
-  const doctorsQuery = useInfiniteQuery({
-    queryKey: doctorOptionKeys.list(deferredDoctorSearch),
-    initialPageParam: 1,
-    queryFn: ({ pageParam, signal }) => listDoctors({
-      page: pageParam,
-      page_size: DOCTOR_OPTION_PAGE_SIZE,
-      search: deferredDoctorSearch || undefined,
-      status: 'active',
-    }, signal),
-    getNextPageParam: (lastPage) => {
-      const loadedThrough = lastPage.page * lastPage.page_size
-      return loadedThrough < lastPage.count ? lastPage.page + 1 : undefined
-    },
-  })
-  const doctors = useMemo(
-    () => doctorsQuery.data?.pages.flatMap((page) => page.results) ?? [],
-    [doctorsQuery.data?.pages],
-  )
   const selectedDoctor = useMemo(() => {
-    if (!query.doctor || doctors.some((doctor) => doctor.id === query.doctor)) return null
+    if (!query.doctor || doctorSource.doctors.some((doctor) => doctor.id === query.doctor)) return null
     const patientWithDoctor = listQuery.data?.results.find((item) => item.primary_doctor === query.doctor)
     if (!patientWithDoctor) return null
     return {
@@ -109,15 +92,33 @@ export function PatientListPage() {
       name: patientWithDoctor.primary_doctor_name,
       employee_no: '',
     }
-  }, [doctors, listQuery.data?.results, query.doctor])
-  const doctorOptions = selectedDoctor ? [selectedDoctor, ...doctors] : doctors
+  }, [doctorSource.doctors, listQuery.data?.results, query.doctor])
+
+  const detailMutation = useMutation({
+    mutationFn: (id: string) => getPatient(id),
+    onSuccess: (patient) => {
+      setFormPatient(patient)
+      setDetailTarget(null)
+    },
+    onError: () => { detailSubmissionRef.current = false },
+  })
+
+  const openEdit = useCallback((patient: Patient) => {
+    if (detailSubmissionRef.current) return
+    detailSubmissionRef.current = true
+    detailMutation.reset()
+    setFormPatient(undefined)
+    setDetailTarget(patient)
+    detailMutation.mutate(patient.id)
+  }, [detailMutation])
 
   const saveMutation = useMutation({
-    mutationFn: ({ values, patient }: { values: PatientWrite; patient?: Patient | null }) => (
+    mutationFn: ({ values, patient }: { values: PatientWrite; patient?: PatientDetail | null }) => (
       patient ? updatePatient(patient.id, values) : createPatient(values)
     ),
     onSuccess: async (_saved, variables) => {
       await queryClient.invalidateQueries({ queryKey: patientKeys.list(query), exact: true })
+      detailSubmissionRef.current = false
       setFormPatient(undefined)
       if (variables.patient) messageApi.success('患者信息已更新')
       else messageApi.success('患者创建成功，初始密码为 888888，首次登录需修改')
@@ -164,14 +165,14 @@ export function PatientListPage() {
       title: '操作', key: 'actions', width: compactActions ? 72 : 380, fixed: 'right',
       render: (_value, row) => {
         const openData = () => navigate(`/patients/${row.id}/data`)
-        const openEdit = () => setFormPatient(row)
+        const openEditRow = () => openEdit(row)
         const openReset = () => { resetSubmissionRef.current = false; resetMutation.reset(); setResetTarget(row) }
         const openDelete = () => { deleteSubmissionRef.current = false; deleteMutation.reset(); setDeleteTarget(row) }
         if (compactActions) {
           return (
             <Dropdown menu={{ items: [
               { key: 'data', label: '查看患者数据', onClick: openData },
-              { key: 'edit', label: '编辑', onClick: openEdit },
+              { key: 'edit', label: '编辑', onClick: openEditRow },
               { key: 'reset', label: '重置密码', onClick: openReset },
               { key: 'delete', label: '删除', danger: true, onClick: openDelete },
             ] }} trigger={['click']}>
@@ -182,14 +183,14 @@ export function PatientListPage() {
         return (
           <Space size={4}>
             <Button type="link" size="small" icon={<BarChartOutlined />} aria-label={`查看${row.name}数据`} onClick={openData}>查看数据</Button>
-            <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEdit}>编辑</Button>
+            <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEditRow}>编辑</Button>
             <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={openReset}>重置密码</Button>
             <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={openDelete}>删除</Button>
           </Space>
         )
       },
     },
-  ], [compactActions, deleteMutation, navigate, resetMutation])
+  ], [compactActions, deleteMutation, navigate, openEdit, resetMutation])
 
   const resetError = resetMutation.error instanceof ApiError ? resetMutation.error : null
   return (
@@ -197,7 +198,7 @@ export function PatientListPage() {
       {messageContext}
       <div className="management-heading">
         <div><h1 id="patient-page-title">病人管理</h1><p>维护患者档案与当前治疗计划</p></div>
-        <Button aria-label="新增患者" type="primary" icon={<PlusOutlined />} onClick={() => setFormPatient(null)}>新增患者</Button>
+        <Button aria-label="新增患者" type="primary" icon={<PlusOutlined />} onClick={() => { detailSubmissionRef.current = false; setFormPatient(null) }}>新增患者</Button>
       </div>
       <div className="management-surface">
         <div className="management-toolbar">
@@ -214,6 +215,7 @@ export function PatientListPage() {
             <Button aria-label="搜索" type="primary" onClick={() => replaceQuery({ search: searchRef.current?.input?.value.trim() || undefined }, true)}>搜索</Button>
           </Space.Compact>
           <Select
+            id="patient-treatment-status-filter"
             aria-label="治疗状态"
             placeholder="全部治疗状态"
             value={query.status}
@@ -226,45 +228,17 @@ export function PatientListPage() {
             ]}
             onChange={(value) => replaceQuery({ status: value }, true)}
           />
-          <Select
-            aria-label="主治医生筛选"
-            placeholder="全部主治医生"
+          <RemoteDoctorSelect
+            ariaLabel="主治医生筛选"
+            mode="filter"
+            lookupEnabled={!listQuery.isPending}
+            source={doctorSource}
+            selectedDoctor={selectedDoctor}
             value={query.doctor}
-            allowClear
-            loading={doctorsQuery.isPending || doctorsQuery.isFetchingNextPage}
-            showSearch
-            filterOption={false}
-            searchValue={doctorSearch}
-            onSearch={setDoctorSearch}
-            options={doctorOptions.map((item) => ({ value: item.id, label: `${item.name}${item.employee_no ? ` · ${item.employee_no}` : ''}` }))}
-            popupRender={(menu) => (
-              <>
-                {menu}
-                {doctorsQuery.hasNextPage ? (
-                  <Button
-                    aria-label="加载更多医生"
-                    type="text"
-                    block
-                    loading={doctorsQuery.isFetchingNextPage}
-                    onClick={() => void doctorsQuery.fetchNextPage()}
-                  >加载更多</Button>
-                ) : null}
-              </>
-            )}
             onChange={(value) => replaceQuery({ doctor: value }, true)}
           />
           <Button onClick={() => setParams(uiParams({ page: 1, page_size: query.page_size }))}>重置</Button>
         </div>
-        {doctorsQuery.error ? (
-          <Alert
-            className="doctor-options-error"
-            type="error"
-            showIcon
-            title={doctorsQuery.error instanceof ApiError ? doctorsQuery.error.message : '医生选项加载失败'}
-            description={doctorsQuery.error instanceof ApiError && doctorsQuery.error.requestId ? `请求编号：${doctorsQuery.error.requestId}` : undefined}
-            action={<Button aria-label="重试医生选项" size="small" onClick={() => void doctorsQuery.refetch()}>重试</Button>}
-          />
-        ) : null}
         <DataTable<Patient>
           ariaLabel="正在加载患者列表"
           columns={columns}
@@ -279,14 +253,24 @@ export function PatientListPage() {
         />
       </div>
       <PatientFormModal
-        key={formPatient?.id ?? (formPatient === null ? 'new' : 'closed')}
+        key={detailTarget?.id ?? formPatient?.id ?? (formPatient === null ? 'new' : 'closed')}
+        detailError={detailMutation.error instanceof ApiError ? detailMutation.error : null}
+        detailLoading={detailMutation.isPending}
+        detailTarget={detailTarget}
         patient={formPatient}
-        doctors={doctors}
-        doctorSearch={doctorSearch}
-        loadingDoctors={doctorsQuery.isPending || doctorsQuery.isFetchingNextPage}
-        open={formPatient !== undefined}
-        onCancel={() => { if (!saveMutation.isPending) setFormPatient(undefined) }}
-        onDoctorSearch={setDoctorSearch}
+        doctorSource={doctorSource}
+        open={formPatient !== undefined || detailTarget !== null}
+        onCancel={() => {
+          if (saveMutation.isPending || detailMutation.isPending) return
+          detailSubmissionRef.current = false
+          setDetailTarget(null)
+          setFormPatient(undefined)
+        }}
+        onRetryDetail={() => {
+          if (!detailTarget || detailSubmissionRef.current) return
+          detailSubmissionRef.current = true
+          detailMutation.mutate(detailTarget.id)
+        }}
         onSubmit={async (values) => { await saveMutation.mutateAsync({ values, patient: formPatient }) }}
       />
       <ConfirmDelete

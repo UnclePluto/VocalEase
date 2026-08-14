@@ -10,6 +10,7 @@ from common.api.permissions import IsAdminNamespaceUser
 from .selectors import patients_for_list
 from .serializers import (
     PatientListQuerySerializer,
+    PatientListSerializer,
     PatientReadSerializer,
     PatientWriteSerializer,
 )
@@ -30,7 +31,7 @@ class PatientListView(APIView):
         data = paginated_data(
             queryset, page=query["page"], page_size=query["page_size"]
         )
-        data["results"] = PatientReadSerializer(data["results"], many=True).data
+        data["results"] = PatientListSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
     def post(self, request):

@@ -20,9 +20,10 @@ export type Patient = {
   phone: string
   primary_doctor: string
   primary_doctor_name: string
-  notes: string
   treatment_plan: TreatmentPlan | null
 }
+
+export type PatientDetail = Patient & { notes: string }
 
 export type PatientWrite = {
   name: string

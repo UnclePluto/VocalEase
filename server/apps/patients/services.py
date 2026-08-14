@@ -5,6 +5,7 @@ from rest_framework.exceptions import APIException, ValidationError
 from apps.accounts.models import Role, User
 from apps.accounts.services import update_account_security_state
 from apps.audit.services import record
+from common.privacy import normalize_phone
 from apps.doctors.models import DoctorProfile
 from apps.doctors.services import next_sequence, run_with_database_retry
 
@@ -184,13 +185,14 @@ def _create_patient_once(*, name, gender, enrollment_age, phone, doctor, start_d
             actor=actor,
             action="patient.create",
             target=patient,
-            changes={"medical_record_no": medical_record_no, "name": name, "gender": gender, "enrollment_age": enrollment_age, "phone": phone, "primary_doctor": str(locked_doctor.id), "medical_notes": notes},
+            changes={"changed_fields": ["enrollment_age", "gender", "medical_record_no", "name", "notes", "phone", "primary_doctor"]},
             request_id=request_id,
         )
         return patient
 
 
 def create_patient(*, name, gender, enrollment_age, phone, doctor, start_date, cycle_weeks, notes="", actor=None, request_id=""):
+    phone = normalize_phone(phone)
     return run_with_database_retry(
         lambda: _create_patient_once(
                 name=name, gender=gender, enrollment_age=enrollment_age, phone=phone, doctor=doctor,
@@ -201,6 +203,8 @@ def create_patient(*, name, gender, enrollment_age, phone, doctor, start_date, c
 
 def update_patient(*, actor, patient, request_id: str, **changes):
     editable = {key: value for key, value in changes.items() if key in {"name", "gender", "enrollment_age", "phone", "primary_doctor", "notes"}}
+    if "phone" in editable:
+        editable["phone"] = normalize_phone(editable["phone"])
     plan_changes = {key: value for key, value in changes.items() if key in {"start_date", "cycle_weeks"}}
     if not editable and not plan_changes:
         return patient
@@ -209,19 +213,17 @@ def update_patient(*, actor, patient, request_id: str, **changes):
     def update(locked, current_doctor, locked_requested_doctor):
         if "primary_doctor" in editable:
             editable["primary_doctor"] = locked_requested_doctor
-        before = {key: str(getattr(locked, f"{key}_id")) if key == "primary_doctor" else getattr(locked, key) for key in editable}
         for key, value in editable.items():
             setattr(locked, key, value)
         locked.save(update_fields=[*editable.keys(), "updated_at"])
-        audit_changes = {
-            key: {"from": before[key], "to": str(editable[key].id) if key == "primary_doctor" else editable[key]}
-            for key in editable
-            if key != "notes"
-        }
-        if "notes" in editable:
-            audit_changes["medical_notes"] = {"from": before["notes"], "to": editable["notes"]}
-        if audit_changes:
-            record(actor=actor, action="patient.update", target=locked, changes=audit_changes, request_id=request_id)
+        if editable:
+            record(
+                actor=actor,
+                action="patient.update",
+                target=locked,
+                changes={"changed_fields": sorted(editable)},
+                request_id=request_id,
+            )
         if plan_changes:
             plan = TreatmentPlan.objects.select_for_update().filter(
                 patient=locked,

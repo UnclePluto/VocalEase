@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 
 import pytest
 from django.db import IntegrityError, connection, connections, transaction
@@ -165,6 +166,79 @@ def test_patient_list_filters_real_treatment_status(api_client, admin_user, pati
     assert body["results"][0]["user_id"] == str(patient.user_id)
     assert body["results"][0]["primary_doctor_name"] == doctor.name
     assert body["results"][0]["treatment_plan"]["status"] == "active"
+
+
+@pytest.mark.django_db
+def test_patient_list_masks_phone_omits_notes_and_detail_returns_full_private_fields(
+    api_client, admin_user, patient
+):
+    api_client.force_authenticate(admin_user)
+
+    listed = api_client.get("/api/v1/admin/patients/")
+    detailed = api_client.get(f"/api/v1/admin/patients/{patient.id}/")
+
+    assert listed.status_code == detailed.status_code == 200
+    listed_patient = listed.json()["data"]["results"][0]
+    assert listed_patient["phone"] == "135****0001"
+    assert "notes" not in listed_patient
+    assert detailed.json()["data"]["phone"] == "13500000001"
+    assert detailed.json()["data"]["notes"] == "初诊记录"
+
+
+@pytest.mark.django_db
+def test_short_or_malformed_phone_is_fail_safe_masked_in_lists(
+    api_client, admin_user, patient
+):
+    patient.phone = "12异常"
+    patient.save(update_fields=["phone"])
+    api_client.force_authenticate(admin_user)
+
+    response = api_client.get("/api/v1/admin/patients/")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["results"][0]["phone"] == "***"
+
+
+@pytest.mark.django_db
+def test_patient_create_update_audit_never_store_phone_or_full_notes(
+    admin_user, doctor
+):
+    patient = create_patient(
+        actor=admin_user,
+        request_id="patient-private-create",
+        name="隐私患者",
+        gender="female",
+        enrollment_age=36,
+        phone="13724681357",
+        doctor=doctor,
+        start_date="2026-08-01",
+        cycle_weeks=4,
+        notes="完整病情备注-创建",
+    )
+    update_patient(
+        actor=admin_user,
+        patient=patient,
+        request_id="patient-private-update",
+        phone="13613572468",
+        notes="完整病情备注-更新",
+    )
+
+    payload = json.dumps(
+        list(
+            AuditLog.objects.filter(
+                request_id__in=["patient-private-create", "patient-private-update"]
+            ).values_list("changes", flat=True)
+        ),
+        ensure_ascii=False,
+    )
+    for secret in (
+        "13724681357",
+        "13613572468",
+        "完整病情备注-创建",
+        "完整病情备注-更新",
+    ):
+        assert secret not in payload
+    assert "changed_fields" in payload
 
 
 @pytest.mark.django_db
@@ -447,4 +521,4 @@ def test_patient_update_records_audit(api_client, doctor_user, patient):
     patient.refresh_from_db()
     assert patient.phone == "13500000999"
     audit = AuditLog.objects.get(action="patient.update", target_id=patient.id)
-    assert audit.changes["medical_notes"].startswith("[MEDICAL_CONTENT_REDACTED")
+    assert audit.changes == {"changed_fields": ["notes", "phone"]}

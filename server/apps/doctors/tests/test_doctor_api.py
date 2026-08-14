@@ -1,14 +1,17 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
+from threading import Barrier
 
 import pytest
 from django.db import IntegrityError, OperationalError, connection, connections
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
 from apps.accounts.models import RefreshToken, Role, User
 from apps.accounts.tokens import issue_token_pair
 from apps.audit.models import AuditLog
 from apps.doctors.models import DoctorProfile, SequenceCounter
-from apps.doctors.services import create_doctor, next_sequence, soft_delete_doctor
+from apps.doctors.services import create_doctor, next_sequence, run_with_database_retry, soft_delete_doctor
 from apps.patients.services import create_patient
 
 
@@ -129,6 +132,23 @@ def test_sequence_does_not_retry_non_retryable_database_errors(monkeypatch, erro
 
 
 @pytest.mark.django_db
+def test_database_retry_retries_the_exact_transient_sqlite_lock():
+    if connection.vendor != "sqlite":
+        pytest.skip("该回归只验证测试 SQLite 的精确锁重试分支")
+    calls = 0
+
+    def fail_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("database is locked")
+        return "ok"
+
+    assert run_with_database_retry(fail_once) == "ok"
+    assert calls == 2
+
+
+@pytest.mark.django_db
 def test_doctor_list_supports_keyword_filter_and_pagination(api_client, admin_user, doctor):
     create_doctor(name="李医生", gender="female", phone="13800000003", department="神经科", title="医师")
     create_doctor(name="李护士", gender="female", phone="13800000004", department="神经科", title="护士")
@@ -165,12 +185,127 @@ def test_doctor_list_exposes_account_identity_and_filters_status(api_client, adm
             "employee_no": inactive.employee_no,
             "name": "停用医生",
             "gender": "female",
-            "phone": "13800000005",
+            "phone": "138****0005",
             "department": "康复科",
             "title": "医师",
             "status": "inactive",
         }
     ]
+
+
+@pytest.mark.django_db
+def test_doctor_list_masks_phone_but_authorized_detail_returns_full_phone(
+    api_client, admin_user, doctor
+):
+    api_client.force_authenticate(admin_user)
+
+    listed = api_client.get("/api/v1/admin/doctors/")
+    detailed = api_client.get(f"/api/v1/admin/doctors/{doctor.id}/")
+
+    assert listed.status_code == detailed.status_code == 200
+    assert listed.json()["data"]["results"][0]["phone"] == "138****0001"
+    assert detailed.json()["data"]["phone"] == "13800000001"
+
+
+@pytest.mark.django_db
+def test_doctor_phone_is_normalized_and_globally_unique_including_deleted_records(
+    api_client, admin_user, doctor
+):
+    api_client.force_authenticate(admin_user)
+
+    duplicate = api_client.post(
+        "/api/v1/admin/doctors/",
+        doctor_payload(phone=" 138-0000-0001 "),
+        format="json",
+    )
+
+    assert duplicate.status_code == 400
+    assert duplicate.json()["code"] == "validation_error"
+    assert duplicate.json()["data"]["phone"] == ["手机号已存在"]
+    doctor.deleted_at = __import__("django.utils.timezone", fromlist=["now"]).now()
+    doctor.save(update_fields=["deleted_at"])
+    still_duplicate = api_client.post(
+        "/api/v1/admin/doctors/", doctor_payload(phone="13800000001"), format="json"
+    )
+    assert still_duplicate.status_code == 400
+    assert still_duplicate.json()["data"]["phone"] == ["手机号已存在"]
+
+
+@pytest.mark.django_db
+def test_doctor_database_rejects_duplicate_phone_even_without_serializer(doctor):
+    with pytest.raises(ValidationError) as exc_info:
+        create_doctor(
+            name="重复手机号医生",
+            gender="female",
+            phone="13800000001",
+            department="康复科",
+            title="医师",
+        )
+
+    assert exc_info.value.detail == {"phone": ["手机号已存在"]}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.postgresql
+def test_postgresql_concurrent_same_normalized_doctor_phone_allows_only_one():
+    if connection.vendor != "postgresql":
+        pytest.skip("手机号并发唯一性由真实 PostgreSQL 约束证明")
+    gate = Barrier(2)
+
+    def create(index):
+        try:
+            gate.wait(timeout=5)
+            return create_doctor(
+                name=f"手机号竞态医生{index}",
+                gender="male",
+                phone="139-0000-0999" if index == 1 else "13900000999",
+                department="康复科",
+                title="医师",
+            )
+        except Exception as exc:  # outcome is asserted below
+            return exc
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(create, (1, 2)))
+
+    assert sum(isinstance(value, DoctorProfile) for value in outcomes) == 1
+    errors = [value for value in outcomes if not isinstance(value, DoctorProfile)]
+    assert len(errors) == 1
+    assert getattr(errors[0], "detail", None) == {"phone": ["手机号已存在"]}
+
+
+@pytest.mark.django_db
+def test_doctor_create_and_update_audit_never_store_full_phone(admin_user, doctor):
+    created = create_doctor(
+        actor=admin_user,
+        request_id="doctor-private-create",
+        name="隐私医生",
+        gender="female",
+        phone="13712345678",
+        department="康复科",
+        title="医师",
+    )
+    update_doctor = __import__("apps.doctors.services", fromlist=["update_doctor"]).update_doctor
+    update_doctor(
+        actor=admin_user,
+        doctor=created,
+        request_id="doctor-private-update",
+        phone="13687654321",
+    )
+
+    payload = json.dumps(
+        list(
+            AuditLog.objects.filter(
+                request_id__in=["doctor-private-create", "doctor-private-update"]
+            ).values_list("changes", flat=True)
+        ),
+        ensure_ascii=False,
+    )
+    assert "13712345678" not in payload
+    assert "13687654321" not in payload
+    assert "changed_fields" in payload
 
 
 @pytest.mark.django_db

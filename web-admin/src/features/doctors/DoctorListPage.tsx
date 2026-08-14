@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircleOutlined, DeleteOutlined, EditOutlined, LockOutlined, MoreOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Dropdown, Input, Modal, Select, Space, message } from 'antd'
@@ -17,6 +17,7 @@ import {
   deleteDoctor,
   doctorKeys,
   doctorOptionKeys,
+  getDoctor,
   listDoctors,
   resetDoctorPassword,
   setDoctorActive,
@@ -61,6 +62,8 @@ export function DoctorListPage() {
   const searchRef = useRef<InputRef>(null)
   const departmentRef = useRef<InputRef>(null)
   const [formDoctor, setFormDoctor] = useState<Doctor | null | undefined>(undefined)
+  const [detailTarget, setDetailTarget] = useState<Doctor | null>(null)
+  const detailSubmissionRef = useRef(false)
   const [deleteTarget, setDeleteTarget] = useState<Doctor | null>(null)
   const [resetTarget, setResetTarget] = useState<Doctor | null>(null)
   const [statusTarget, setStatusTarget] = useState<Doctor | null>(null)
@@ -83,15 +86,36 @@ export function DoctorListPage() {
     queryFn: ({ signal }) => listDoctors(query, signal),
   })
 
+  const detailMutation = useMutation({
+    mutationFn: (id: string) => getDoctor(id),
+    onSuccess: (doctor) => {
+      setFormDoctor(doctor)
+      setDetailTarget(null)
+    },
+    onError: () => { detailSubmissionRef.current = false },
+  })
+
+  const openEdit = useCallback((doctor: Doctor) => {
+    if (detailSubmissionRef.current) return
+    detailSubmissionRef.current = true
+    detailMutation.reset()
+    setFormDoctor(undefined)
+    setDetailTarget(doctor)
+    detailMutation.mutate(doctor.id)
+  }, [detailMutation])
+
+  const expireDoctorOptions = () => {
+    queryClient.removeQueries({ queryKey: doctorOptionKeys.all })
+  }
+
   const saveMutation = useMutation({
     mutationFn: ({ values, doctor }: { values: DoctorWrite; doctor?: Doctor | null }) => (
       doctor ? updateDoctor(doctor.id, values) : createDoctor(values)
     ),
     onSuccess: async (_saved, variables) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true }),
-        queryClient.invalidateQueries({ queryKey: doctorOptionKeys.list(''), exact: true }),
-      ])
+      await queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true })
+      expireDoctorOptions()
+      detailSubmissionRef.current = false
       setFormDoctor(undefined)
       if (variables.doctor) messageApi.success('医生信息已更新')
       else messageApi.success('医生创建成功，初始密码为 888888，首次登录需修改')
@@ -100,10 +124,8 @@ export function DoctorListPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteDoctor(id),
     onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true }),
-        queryClient.invalidateQueries({ queryKey: doctorOptionKeys.list(''), exact: true }),
-      ])
+      await queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true })
+      expireDoctorOptions()
       setDeleteTarget(null)
       messageApi.success('医生已停用并隐藏，历史记录已保留')
     },
@@ -120,10 +142,8 @@ export function DoctorListPage() {
   const statusMutation = useMutation({
     mutationFn: (target: Doctor) => setDoctorActive(target.id, target.status === 'inactive'),
     onSuccess: async (updated) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true }),
-        queryClient.invalidateQueries({ queryKey: doctorOptionKeys.list(''), exact: true }),
-      ])
+      await queryClient.invalidateQueries({ queryKey: doctorKeys.list(query), exact: true })
+      expireDoctorOptions()
       setStatusTarget(null)
       messageApi.success(updated.status === 'active' ? '医生已启用' : '医生已停用')
     },
@@ -146,13 +166,13 @@ export function DoctorListPage() {
       title: '操作', key: 'actions', width: compactActions ? 72 : 350, fixed: 'right',
       render: (_value, row) => {
         const isSelf = currentUserRole === 'doctor' && currentLoginId === row.employee_no
-        const openEdit = () => setFormDoctor(row)
+        const openEditRow = () => openEdit(row)
         const openStatus = () => { statusSubmissionRef.current = false; statusMutation.reset(); setStatusTarget(row) }
         const openReset = () => { resetSubmissionRef.current = false; resetMutation.reset(); setResetTarget(row) }
         const openDelete = () => { deleteSubmissionRef.current = false; deleteMutation.reset(); setDeleteTarget(row) }
         if (compactActions) {
           const items = [
-            { key: 'edit', label: '编辑', onClick: openEdit },
+            { key: 'edit', label: '编辑', onClick: openEditRow },
             ...(!isSelf ? [{ key: 'status', label: row.status === 'active' ? '停用' : '启用', onClick: openStatus }] : []),
             ...(!isSelf ? [{ key: 'reset', label: '重置密码', onClick: openReset }] : []),
             { key: 'delete', label: '删除', danger: true, onClick: openDelete },
@@ -165,7 +185,7 @@ export function DoctorListPage() {
         }
         return (
           <Space size={4}>
-            <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEdit}>编辑</Button>
+            <Button type="link" size="small" icon={<EditOutlined />} aria-label={`编辑${row.name}`} onClick={openEditRow}>编辑</Button>
             {!isSelf ? <Button type="link" size="small" icon={row.status === 'active' ? <StopOutlined /> : <CheckCircleOutlined />} aria-label={`${row.status === 'active' ? '停用' : '启用'}${row.name}`} onClick={openStatus}>{row.status === 'active' ? '停用' : '启用'}</Button> : null}
             {!isSelf ? <Button type="link" size="small" icon={<LockOutlined />} aria-label={`重置${row.name}密码`} onClick={openReset}>重置密码</Button> : null}
             <Button danger type="link" size="small" icon={<DeleteOutlined />} aria-label={`删除${row.name}`} onClick={openDelete}>删除</Button>
@@ -173,7 +193,7 @@ export function DoctorListPage() {
         )
       },
     },
-  ], [compactActions, currentLoginId, currentUserRole, deleteMutation, resetMutation, statusMutation])
+  ], [compactActions, currentLoginId, currentUserRole, deleteMutation, openEdit, resetMutation, statusMutation])
 
   const resetError = resetMutation.error instanceof ApiError ? resetMutation.error : null
   return (
@@ -181,7 +201,7 @@ export function DoctorListPage() {
       {messageContext}
       <div className="management-heading">
         <div><h1 id="doctor-page-title">医生管理</h1><p>维护医生账号与基础资料</p></div>
-        <Button aria-label="新增医生" type="primary" icon={<PlusOutlined />} onClick={() => setFormDoctor(null)}>新增医生</Button>
+        <Button aria-label="新增医生" type="primary" icon={<PlusOutlined />} onClick={() => { detailSubmissionRef.current = false; setFormDoctor(null) }}>新增医生</Button>
       </div>
       <div className="management-surface">
         <div className="management-toolbar">
@@ -211,6 +231,7 @@ export function DoctorListPage() {
             }}
           />
           <Select
+            id="doctor-status-filter"
             aria-label="医生状态"
             placeholder="全部状态"
             value={query.status}
@@ -234,10 +255,23 @@ export function DoctorListPage() {
         />
       </div>
       <DoctorFormModal
-        key={formDoctor?.id ?? (formDoctor === null ? 'new' : 'closed')}
+        key={detailTarget?.id ?? formDoctor?.id ?? (formDoctor === null ? 'new' : 'closed')}
+        detailError={detailMutation.error instanceof ApiError ? detailMutation.error : null}
+        detailLoading={detailMutation.isPending}
+        detailTarget={detailTarget}
         doctor={formDoctor}
-        open={formDoctor !== undefined}
-        onCancel={() => { if (!saveMutation.isPending) setFormDoctor(undefined) }}
+        open={formDoctor !== undefined || detailTarget !== null}
+        onCancel={() => {
+          if (saveMutation.isPending || detailMutation.isPending) return
+          detailSubmissionRef.current = false
+          setDetailTarget(null)
+          setFormDoctor(undefined)
+        }}
+        onRetryDetail={() => {
+          if (!detailTarget || detailSubmissionRef.current) return
+          detailSubmissionRef.current = true
+          detailMutation.mutate(detailTarget.id)
+        }}
         onSubmit={async (values) => { await saveMutation.mutateAsync({ values, doctor: formDoctor }) }}
       />
       <ConfirmDelete

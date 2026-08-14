@@ -10,6 +10,7 @@ from common.api.permissions import IsAdminNamespaceUser
 from .selectors import doctors_for_list
 from .serializers import (
     DoctorListQuerySerializer,
+    DoctorListSerializer,
     DoctorReadSerializer,
     DoctorWriteSerializer,
 )
@@ -35,7 +36,7 @@ class DoctorListView(APIView):
         data = paginated_data(
             queryset, page=query["page"], page_size=query["page_size"]
         )
-        data["results"] = DoctorReadSerializer(data["results"], many=True).data
+        data["results"] = DoctorListSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
     def post(self, request):
@@ -67,7 +68,9 @@ class DoctorDetailView(APIView):
 
     def patch(self, request, doctor_id):
         doctor = self.get_object(doctor_id)
-        serializer = DoctorWriteSerializer(data=request.data, partial=True)
+        serializer = DoctorWriteSerializer(
+            data=request.data, partial=True, context={"doctor_id": doctor.pk}
+        )
         serializer.is_valid(raise_exception=True)
         updated = update_doctor(
             actor=request.user,

@@ -5,8 +5,12 @@ import { ApiError } from '../../api/errors'
 import type { Doctor, DoctorWrite } from './types'
 
 type DoctorFormModalProps = {
+  detailError?: ApiError | null
+  detailLoading?: boolean
+  detailTarget?: Doctor | null
   doctor?: Doctor | null
   onCancel: () => void
+  onRetryDetail?: () => void
   onSubmit: (values: DoctorWrite) => Promise<void>
   open: boolean
 }
@@ -15,7 +19,16 @@ function fieldMessage(value: string | string[]) {
   return Array.isArray(value) ? value.join('；') : value
 }
 
-export function DoctorFormModal({ doctor, onCancel, onSubmit, open }: DoctorFormModalProps) {
+export function DoctorFormModal({
+  detailError,
+  detailLoading = false,
+  detailTarget,
+  doctor,
+  onCancel,
+  onRetryDetail,
+  onSubmit,
+  open,
+}: DoctorFormModalProps) {
   const [form] = Form.useForm<DoctorWrite>()
   const [error, setError] = useState<ApiError | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -46,7 +59,7 @@ export function DoctorFormModal({ doctor, onCancel, onSubmit, open }: DoctorForm
 
   return (
     <Modal
-      title={doctor ? '编辑医生' : '新增医生'}
+      title={detailTarget ? '加载医生详情' : doctor ? '编辑医生' : '新增医生'}
       open={open}
       onCancel={onCancel}
       footer={null}
@@ -54,7 +67,21 @@ export function DoctorFormModal({ doctor, onCancel, onSubmit, open }: DoctorForm
       mask={{ closable: !submitting }}
       keyboard={!submitting}
     >
-      <Form
+      {detailTarget ? (
+        <div>
+          {detailLoading ? <p role="status">正在加载医生详情</p> : null}
+          {detailError ? (
+            <Alert
+              type="error"
+              showIcon
+              title={detailError.message}
+              description={detailError.requestId ? `请求编号：${detailError.requestId}` : undefined}
+              action={<Button aria-label="重试加载详情" onClick={onRetryDetail}>重试</Button>}
+            />
+          ) : null}
+        </div>
+      ) : (
+        <Form
         clearOnDestroy
         form={form}
         initialValues={{
@@ -103,7 +130,8 @@ export function DoctorFormModal({ doctor, onCancel, onSubmit, open }: DoctorForm
           <Button aria-label="取消" disabled={submitting} onClick={onCancel}>取消</Button>
           <Button aria-label="确定" type="primary" htmlType="submit" loading={submitting} disabled={submitting}>确定</Button>
         </div>
-      </Form>
+        </Form>
+      )}
     </Modal>
   )
 }

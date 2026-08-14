@@ -3,11 +3,12 @@ import time
 
 from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
-from rest_framework.exceptions import APIException, NotFound, PermissionDenied
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 
 from apps.accounts.models import Role, User
 from apps.accounts.services import update_account_security_state
 from apps.audit.services import record
+from common.privacy import normalize_phone
 
 from .models import DoctorProfile, SequenceCounter
 
@@ -84,6 +85,24 @@ def _is_retryable_database_error(exc) -> bool:
     )
 
 
+def _is_phone_unique_error(exc: IntegrityError) -> bool:
+    cause = getattr(exc, "__cause__", None)
+    constraint_name = getattr(getattr(cause, "diag", None), "constraint_name", None)
+    if constraint_name == "doctor_phone_global_unique":
+        return True
+    message = " ".join(str(value) for value in exc.args).lower()
+    return (
+        "doctor_phone_global_unique" in message
+        or "doctors_doctorprofile.phone" in message
+    )
+
+
+def _raise_phone_validation_error(exc: IntegrityError):
+    if _is_phone_unique_error(exc):
+        raise ValidationError({"phone": ["手机号已存在"]}) from exc
+    raise exc
+
+
 def run_with_database_retry(operation, *, attempts: int = 4):
     for attempt in range(attempts):
         try:
@@ -112,33 +131,47 @@ def _create_doctor_once(*, name, gender, phone, department, title, actor, reques
             actor=actor,
             action="doctor.create",
             target=doctor,
-            changes={"employee_no": employee_no, "name": name, "gender": gender, "phone": phone, "department": department, "title": title},
+            changes={"changed_fields": ["department", "employee_no", "gender", "name", "phone", "title"]},
             request_id=request_id,
         )
         return doctor
 
 
 def create_doctor(*, name, gender, phone, department, title, actor=None, request_id=""):
-    return run_with_database_retry(
-        lambda: _create_doctor_once(
-                name=name, gender=gender, phone=phone, department=department, title=title,
-                actor=actor, request_id=request_id,
+    phone = normalize_phone(phone)
+    try:
+        return run_with_database_retry(
+            lambda: _create_doctor_once(
+                    name=name, gender=gender, phone=phone, department=department, title=title,
+                    actor=actor, request_id=request_id,
+            )
         )
-    )
+    except IntegrityError as exc:
+        _raise_phone_validation_error(exc)
 
 
 def update_doctor(*, actor, doctor, request_id: str, **changes):
     editable = {key: value for key, value in changes.items() if key in {"name", "gender", "phone", "department", "title"}}
+    if "phone" in editable:
+        editable["phone"] = normalize_phone(editable["phone"])
     if not editable:
         return doctor
-    with transaction.atomic():
-        locked = DoctorProfile.objects.select_for_update().get(pk=doctor.pk, deleted_at__isnull=True)
-        before = {key: getattr(locked, key) for key in editable}
-        for key, value in editable.items():
-            setattr(locked, key, value)
-        locked.save(update_fields=[*editable.keys(), "updated_at"])
-        record(actor=actor, action="doctor.update", target=locked, changes={key: {"from": before[key], "to": editable[key]} for key in editable}, request_id=request_id)
-        return locked
+    try:
+        with transaction.atomic():
+            locked = DoctorProfile.objects.select_for_update().get(pk=doctor.pk, deleted_at__isnull=True)
+            for key, value in editable.items():
+                setattr(locked, key, value)
+            locked.save(update_fields=[*editable.keys(), "updated_at"])
+            record(
+                actor=actor,
+                action="doctor.update",
+                target=locked,
+                changes={"changed_fields": sorted(editable)},
+                request_id=request_id,
+            )
+            return locked
+    except IntegrityError as exc:
+        _raise_phone_validation_error(exc)
 
 
 def set_doctor_active(*, actor, doctor, is_active: bool, request_id: str):

@@ -75,7 +75,7 @@ export function DataTable<T extends object>({
             pageSize={pageSize}
             total={data?.count ?? 0}
             pageSizeOptions={[10, 20, 50, 100]}
-            showSizeChanger
+            showSizeChanger={{ id: `data-table-${String(rowKey)}-page-size` }}
             onChange={onPageChange}
           />
         </div>

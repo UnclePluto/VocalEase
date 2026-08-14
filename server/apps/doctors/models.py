@@ -27,3 +27,8 @@ class DoctorProfile(UUIDSoftDeleteModel):
 
     class Meta:
         ordering = ["employee_no"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("phone",), name="doctor_phone_global_unique"
+            )
+        ]

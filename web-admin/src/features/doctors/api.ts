@@ -5,11 +5,13 @@ export const doctorKeys = {
   all: ['doctors'] as const,
   lists: () => [...doctorKeys.all, 'list'] as const,
   list: (query: DoctorListQuery) => [...doctorKeys.lists(), query] as const,
+  details: () => [...doctorKeys.all, 'detail'] as const,
+  detail: (id: string) => [...doctorKeys.details(), id] as const,
 }
 
 export const doctorOptionKeys = {
   all: ['doctor-options'] as const,
-  list: (search: string) => [...doctorOptionKeys.all, { search }] as const,
+  page: (search: string, page: number) => [...doctorOptionKeys.all, { search, page }] as const,
 }
 
 function doctorSearch(query: DoctorListQuery) {
@@ -24,6 +26,10 @@ function doctorSearch(query: DoctorListQuery) {
 
 export function listDoctors(query: DoctorListQuery, signal?: AbortSignal) {
   return apiRequest<PaginatedDoctors>(`/v1/admin/doctors/?${doctorSearch(query)}`, { signal })
+}
+
+export function getDoctor(id: string, signal?: AbortSignal) {
+  return apiRequest<Doctor>(`/v1/admin/doctors/${id}/`, { signal })
 }
 
 export function createDoctor(values: DoctorWrite) {

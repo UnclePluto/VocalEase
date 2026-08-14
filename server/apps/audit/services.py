@@ -33,6 +33,7 @@ SENSITIVE_FIELDS = {
     "etags",
 }
 MEDICAL_NOTE_FIELDS = {"medicalnote", "medicalnotes", "clinicalnote", "clinicalnotes"}
+PHONE_FIELDS = {"phone", "mobile", "phonenumber", "mobilenumber"}
 
 
 def normalize_field_name(key: Any) -> str:
@@ -68,6 +69,10 @@ def redact_value(value: Any) -> Any:
                 ("medicalnote", "medicalnotes", "clinicalnote", "clinicalnotes")
             ):
                 result[key] = medical_content_placeholder(nested_value)
+            elif normalized in PHONE_FIELDS or normalized.endswith(
+                ("phone", "mobile", "phonenumber", "mobilenumber")
+            ):
+                result[key] = "[PHONE_REDACTED]"
             else:
                 result[key] = redact_value(nested_value)
         return result

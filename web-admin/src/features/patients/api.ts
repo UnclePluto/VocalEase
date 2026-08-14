@@ -1,10 +1,12 @@
 import { apiRequest } from '../../api/client'
-import type { PaginatedPatients, Patient, PatientListQuery, PatientWrite } from './types'
+import type { PaginatedPatients, PatientDetail, PatientListQuery, PatientWrite } from './types'
 
 export const patientKeys = {
   all: ['patients'] as const,
   lists: () => [...patientKeys.all, 'list'] as const,
   list: (query: PatientListQuery) => [...patientKeys.lists(), query] as const,
+  details: () => [...patientKeys.all, 'detail'] as const,
+  detail: (id: string) => [...patientKeys.details(), id] as const,
 }
 
 function patientSearch(query: PatientListQuery) {
@@ -21,12 +23,16 @@ export function listPatients(query: PatientListQuery, signal?: AbortSignal) {
   return apiRequest<PaginatedPatients>(`/v1/admin/patients/?${patientSearch(query)}`, { signal })
 }
 
+export function getPatient(id: string, signal?: AbortSignal) {
+  return apiRequest<PatientDetail>(`/v1/admin/patients/${id}/`, { signal })
+}
+
 export function createPatient(values: PatientWrite) {
-  return apiRequest<Patient>('/v1/admin/patients/', { method: 'POST', body: JSON.stringify(values) })
+  return apiRequest<PatientDetail>('/v1/admin/patients/', { method: 'POST', body: JSON.stringify(values) })
 }
 
 export function updatePatient(id: string, values: PatientWrite) {
-  return apiRequest<Patient>(`/v1/admin/patients/${id}/`, { method: 'PATCH', body: JSON.stringify(values) })
+  return apiRequest<PatientDetail>(`/v1/admin/patients/${id}/`, { method: 'PATCH', body: JSON.stringify(values) })
 }
 
 export function deletePatient(id: string) {

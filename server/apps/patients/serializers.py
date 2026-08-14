@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from apps.doctors.models import DoctorProfile, Gender
 from common.api.pagination import PaginationQuerySerializer
+from common.privacy import mask_phone, normalize_phone
 
 from .models import PatientProfile, TreatmentPlan
 
@@ -19,6 +20,9 @@ class PatientWriteSerializer(serializers.Serializer):
         min_value=1, max_value=520, required=False, write_only=True
     )
     notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_phone(self, value):
+        return normalize_phone(value)
 
     def validate_primary_doctor(self, value):
         try:
@@ -91,6 +95,18 @@ class PatientReadSerializer(serializers.ModelSerializer):
         if plan is None:
             plan = plans.first()
         return TreatmentPlanReadSerializer(plan).data if plan else None
+
+
+class PatientListSerializer(PatientReadSerializer):
+    phone = serializers.SerializerMethodField()
+
+    class Meta(PatientReadSerializer.Meta):
+        fields = tuple(
+            field for field in PatientReadSerializer.Meta.fields if field != "notes"
+        )
+
+    def get_phone(self, obj):
+        return mask_phone(obj.phone)
 
 
 class PatientListQuerySerializer(PaginationQuerySerializer):
