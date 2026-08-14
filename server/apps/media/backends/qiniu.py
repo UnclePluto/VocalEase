@@ -44,10 +44,13 @@ class QiniuStorageBackend:
     def reissue_upload_grant(self, *, object_key: str, owner_id: UUID, media_type: str, mime: str, size: int, expires_at) -> UploadGrant:
         del owner_id
         validate_media_request(media_type=media_type, mime=mime, size=size)
-        remaining_seconds = (expires_at - timezone.now()).total_seconds()
+        issued_at = timezone.now()
+        remaining_seconds = (expires_at - issued_at).total_seconds()
         if remaining_seconds <= 0:
             raise StorageValidationError("上传凭证已过期")
         deadline = int(expires_at.timestamp())
+        if deadline <= int(issued_at.timestamp()):
+            raise StorageValidationError("上传凭证剩余时间不足")
         policy = {
             "scope": f"{self.bucket}:{object_key}", "insertOnly": 1, "fsizeLimit": size,
             "mimeLimit": mime, "detectMime": 1, "callbackUrl": self.callback_url,

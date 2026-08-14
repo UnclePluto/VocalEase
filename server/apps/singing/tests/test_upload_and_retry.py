@@ -429,21 +429,26 @@ def test_qiniu_reissued_token_uses_database_absolute_deadline(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("now_offset", "deadline_offset"),
+    ("now_offset", "expires_offset", "should_issue"),
     [
-        (0.9, 0.2),
-        (0.1, 0.8),
-        (0.1, 120.7),
+        (0.1, 0.9, False),
+        (0.9, 1.1, True),
+        (0.1, 120.8, True),
+        (0.5, 0.4, False),
     ],
 )
-def test_qiniu_real_auth_reissue_signs_exact_database_deadline_across_seconds(
+def test_qiniu_real_auth_reissue_requires_usable_absolute_deadline(
     now_offset,
-    deadline_offset,
+    expires_offset,
+    should_issue,
     monkeypatch,
 ):
     epoch = 1_786_700_000
     fixed_now = datetime.fromtimestamp(epoch + now_offset, tz=datetime_timezone.utc)
-    database_deadline = fixed_now + timedelta(seconds=deadline_offset)
+    database_deadline = datetime.fromtimestamp(
+        epoch + expires_offset,
+        tz=datetime_timezone.utc,
+    )
     auth = Auth("ak", "sk")
     backend = QiniuStorageBackend(
         access_key="ak", secret_key="sk", bucket="private", domain="https://cdn.test",
@@ -451,18 +456,28 @@ def test_qiniu_real_auth_reissue_signs_exact_database_deadline_across_seconds(
         bucket_manager=object(),
     )
     monkeypatch.setattr("apps.media.backends.qiniu.timezone.now", lambda: fixed_now)
-    monkeypatch.setattr("qiniu.auth.time.time", lambda: fixed_now.timestamp() + 1.1)
 
-    grant = backend.reissue_upload_grant(
-        object_key="test/singing_audio/2026/08/14/exact-deadline",
-        owner_id=uuid.uuid4(), media_type="singing_audio", mime="audio/mpeg", size=6,
-        expires_at=database_deadline,
-    )
+    def issue():
+        return backend.reissue_upload_grant(
+            object_key="test/singing_audio/2026/08/14/usable-deadline",
+            owner_id=uuid.uuid4(),
+            media_type="singing_audio",
+            mime="audio/mpeg",
+            size=6,
+            expires_at=database_deadline,
+        )
+    if not should_issue:
+        with pytest.raises(StorageValidationError):
+            issue()
+        return
+
+    grant = issue()
 
     _ak, _signature, policy = Auth.up_token_decode(grant.upload_token)
     assert policy["deadline"] == int(database_deadline.timestamp())
+    assert policy["deadline"] > int(fixed_now.timestamp())
     assert policy["deadline"] <= database_deadline.timestamp()
-    assert policy["scope"] == "private:test/singing_audio/2026/08/14/exact-deadline"
+    assert policy["scope"] == "private:test/singing_audio/2026/08/14/usable-deadline"
     assert policy["insertOnly"] == 1
     assert policy["fsizeLimit"] == 6
     assert policy["mimeLimit"] == "audio/mpeg"

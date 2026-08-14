@@ -145,11 +145,13 @@ def test_postgresql_reverse_barrier_locks_before_check_and_blocks_new_singing_ta
                 assert release_migration.wait(10)
             return result
 
-        with thread_connection.execute_wrapper(observe_lock):
-            MigrationExecutor(thread_connection).migrate(
-                [("analysis", "0003_analysistask_next_dispatch_at")]
-            )
-        thread_connection.close()
+        try:
+            with thread_connection.execute_wrapper(observe_lock):
+                MigrationExecutor(thread_connection).migrate(
+                    [("analysis", "0003_analysistask_next_dispatch_at")]
+                )
+        finally:
+            thread_connection.close()
 
     def insert_singing_task():
         connections.close_all()
