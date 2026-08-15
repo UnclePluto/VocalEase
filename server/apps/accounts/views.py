@@ -15,6 +15,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from drf_spectacular.utils import extend_schema
 
 from apps.audit.services import record
 from common.api.permissions import (
@@ -33,6 +34,7 @@ from .serializers import (
 from .models import Role, User
 from .services import change_password, login, reset_password
 from .tokens import ActiveUserJWTAuthentication, revoke_refresh_token, rotate_refresh_token
+from common.api.schema import ApiEnvelopeSerializer
 
 
 def api_response(*, data, request_id: str, status_code=status.HTTP_200_OK):
@@ -124,6 +126,7 @@ class LoginView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_login"
 
+    @extend_schema(request=LoginSerializer, responses=ApiEnvelopeSerializer)
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -162,6 +165,7 @@ class RefreshView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_refresh"
 
+    @extend_schema(request=RefreshSerializer, responses=ApiEnvelopeSerializer)
     def post(self, request):
         serializer = RefreshSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -202,6 +206,7 @@ class ChangePasswordView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_change_password"
 
+    @extend_schema(request=ChangePasswordSerializer, responses=ApiEnvelopeSerializer)
     def post(self, request):
         serializer = ChangePasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -220,6 +225,7 @@ class LogoutView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_logout"
 
+    @extend_schema(request=LogoutSerializer, responses=ApiEnvelopeSerializer)
     def post(self, request):
         serializer = LogoutSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -271,6 +277,7 @@ class AdminResetPasswordView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_reset_password"
 
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, user_id):
         target = get_object_or_404(User, pk=user_id, deleted_at__isnull=True)
         if request.user.role == Role.DOCTOR:

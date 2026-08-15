@@ -971,3 +971,19 @@ class LocalStorageBackend:
 
     def mark_for_cleanup(self, object_key: str) -> None:
         self._path(object_key)
+
+    def purge_for_qa(self, object_key: str, *, asset_id: UUID | str) -> None:
+        """只供隔离 local/test QA 收敛自身对象；按资产标识校验后安全删除。"""
+        if self.environment not in {"local", "test"}:
+            raise StorageValidationError("QA 媒体清理仅允许在 local/test 环境运行")
+        normalized_asset_id = str(UUID(str(asset_id)))
+        with self.object_lock(object_key):
+            manifest = self._load_manifest(object_key, required=False)
+            if manifest is not None:
+                if manifest["asset_id"] != normalized_asset_id:
+                    raise StorageValidationError("QA 媒体清理资产标识不匹配")
+                blob_path = self._blob_path(manifest["blob"], object_key)
+                self._safe_unlink(self._manifest_path(object_key))
+                self._safe_unlink(blob_path)
+            self._safe_unlink(self._legacy_metadata_path(object_key))
+            self._safe_unlink(self._path(object_key))

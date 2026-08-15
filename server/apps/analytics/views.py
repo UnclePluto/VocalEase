@@ -13,10 +13,13 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.views import APIView
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
 
 from apps.accounts.views import api_response
 from apps.audit.services import record
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
+from common.api.schema import ApiEnvelopeSerializer
 
 from .calculations import METRIC_VERSION
 from .assets import ExportAssetError, issue_export_private_url, resolve_export_asset
@@ -71,6 +74,7 @@ def _job_data(job):
 class DashboardView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
+    @extend_schema(responses=ApiEnvelopeSerializer)
     def get(self, request):
         if request.query_params:
             raise ValidationError({key: "不支持的查询参数" for key in sorted(request.query_params)})
@@ -80,6 +84,7 @@ class DashboardView(APIView):
 class PatientMetricsView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
+    @extend_schema(responses=ApiEnvelopeSerializer)
     def get(self, request):
         query = _validate_query(request)
         filters = PatientMetricFilters.from_validated(query)
@@ -157,6 +162,17 @@ def _find_or_create_job(
 class ExportCreateView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
+    @extend_schema(
+        request=ExportRequestSerializer,
+        responses={
+            (200, "text/csv"): OpenApiTypes.BINARY,
+            (
+                200,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ): OpenApiTypes.BINARY,
+            202: ApiEnvelopeSerializer,
+        },
+    )
     def post(self, request):
         try:
             runtime = get_export_runtime_config()
@@ -219,6 +235,7 @@ class ExportCreateView(APIView):
 class ExportDetailView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
+    @extend_schema(responses=ApiEnvelopeSerializer)
     def get(self, request, job_id):
         job = get_object_or_404(ExportJob, pk=job_id)
         if job.expires_at <= timezone.now() and job.status != ExportJob.Status.EXPIRED:
@@ -236,6 +253,7 @@ class ExportDetailView(APIView):
 class ExportPrivateUrlView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
+    @extend_schema(request=None, responses=ApiEnvelopeSerializer)
     def post(self, request, job_id):
         get_object_or_404(ExportJob, pk=job_id)
         try:

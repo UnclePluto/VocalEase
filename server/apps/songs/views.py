@@ -2,6 +2,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import BasePermission
@@ -16,6 +17,7 @@ from apps.analysis.services import request_song_analysis
 from apps.audit.services import record
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
+from common.api.schema import ApiEnvelopeSerializer
 
 from .models import Song
 from .selectors import songs_for_admin, songs_for_patient
@@ -48,6 +50,7 @@ class SongUploadGrantView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
+    @extend_schema(request=SongUploadGrantSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         serializer = SongUploadGrantSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -73,6 +76,7 @@ class AdminSongListView(APIView):
         data["results"] = SongReadSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
+    @extend_schema(request=SongWriteSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         serializer = SongWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -93,6 +97,7 @@ class AdminSongDetailView(APIView):
     def get(self, request, song_id):
         return api_response(data=SongReadSerializer(self.get_object(song_id)).data, request_id=request.request_id)
 
+    @extend_schema(request=SongWriteSerializer, responses={200: ApiEnvelopeSerializer})
     def patch(self, request, song_id):
         serializer = SongWriteSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -102,6 +107,7 @@ class AdminSongDetailView(APIView):
         song = update_song(actor=request.user, request_id=request.request_id, song=self.get_object(song_id), source_asset=values.pop("source_asset", None), **values)
         return api_response(data=SongReadSerializer(song).data, request_id=request.request_id)
 
+    @extend_schema(request=None, responses={204: None})
     def delete(self, request, song_id):
         # DELETE 对同一 UUID 幂等：已软删仍返回 204；未知 UUID 返回 404。
         if soft_delete_song(actor=request.user, request_id=request.request_id, song_id=song_id) is None:
@@ -112,6 +118,7 @@ class AdminSongDetailView(APIView):
 class AdminSongPublishView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, song_id):
         song = publish_song(actor=request.user, request_id=request.request_id, song=get_object_or_404(songs_for_admin(), pk=song_id), publish=True)
         return api_response(data=SongReadSerializer(song).data, request_id=request.request_id)
@@ -120,6 +127,7 @@ class AdminSongPublishView(APIView):
 class AdminSongUnpublishView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, song_id):
         song = publish_song(actor=request.user, request_id=request.request_id, song=get_object_or_404(songs_for_admin(), pk=song_id), publish=False)
         return api_response(data=SongReadSerializer(song).data, request_id=request.request_id)
@@ -128,6 +136,7 @@ class AdminSongUnpublishView(APIView):
 class AdminSongPreviewView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, song_id):
         private_url = preview_source(actor=request.user, request_id=request.request_id, song=get_object_or_404(songs_for_admin(), pk=song_id))
         return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)
@@ -136,6 +145,10 @@ class AdminSongPreviewView(APIView):
 class AdminSongReanalyzeView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
+    @extend_schema(
+        request=ReanalyzeSerializer,
+        responses={202: ApiEnvelopeSerializer, 409: ApiEnvelopeSerializer},
+    )
     def post(self, request, song_id):
         serializer = ReanalyzeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -194,6 +207,7 @@ class PatientSongDetailView(APIView):
 class PatientSongPreviewView(APIView):
     permission_classes = [PatientCatalogPermission, MustChangePasswordPermission]
 
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, song_id):
         private_url = preview_source(actor=request.user, request_id=request.request_id, song=PatientSongDetailView().get_object(song_id))
         return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)

@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -6,6 +7,7 @@ from rest_framework.views import APIView
 from apps.accounts.views import api_response
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser
+from common.api.schema import ApiEnvelopeSerializer
 
 from .selectors import patients_for_list
 from .serializers import (
@@ -34,6 +36,7 @@ class PatientListView(APIView):
         data["results"] = PatientListSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
+    @extend_schema(request=PatientWriteSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         serializer = PatientWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -61,6 +64,7 @@ class PatientDetailView(APIView):
             request_id=request.request_id,
         )
 
+    @extend_schema(request=PatientWriteSerializer, responses={200: ApiEnvelopeSerializer})
     def patch(self, request, patient_id):
         patient = self.get_object(patient_id)
         serializer = PatientWriteSerializer(data=request.data, partial=True)
@@ -75,6 +79,7 @@ class PatientDetailView(APIView):
             data=PatientReadSerializer(updated).data, request_id=request.request_id
         )
 
+    @extend_schema(request=None, responses={204: None})
     def delete(self, request, patient_id):
         soft_delete_patient(
             actor=request.user,

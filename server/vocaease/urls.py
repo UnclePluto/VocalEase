@@ -1,4 +1,5 @@
 from django.urls import include, path
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from . import health
 from .admin import system_admin_site
@@ -9,6 +10,12 @@ from apps.singing.urls import admin_urlpatterns as admin_singing_urlpatterns, pa
 from apps.singing.views import PatientMeView
 
 urlpatterns = [
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path(
+        "api/docs/",
+        SpectacularSwaggerView.as_view(url_name="schema"),
+        name="swagger-ui",
+    ),
     path("internal/admin/", system_admin_site.urls),
     path("api/v1/auth/", include("apps.accounts.urls")),
     path("api/v1/admin/doctors/", include("apps.doctors.urls")),

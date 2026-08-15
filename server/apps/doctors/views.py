@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -6,6 +7,7 @@ from rest_framework.views import APIView
 from apps.accounts.views import api_response
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser
+from common.api.schema import ApiEnvelopeSerializer
 
 from .selectors import doctors_for_list
 from .serializers import (
@@ -40,6 +42,7 @@ class DoctorListView(APIView):
         data["results"] = DoctorListSerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
+    @extend_schema(request=DoctorWriteSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         serializer = DoctorWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -67,6 +70,7 @@ class DoctorDetailView(APIView):
             request_id=request.request_id,
         )
 
+    @extend_schema(request=DoctorWriteSerializer, responses={200: ApiEnvelopeSerializer})
     def patch(self, request, doctor_id):
         doctor = self.get_object(doctor_id)
         serializer = DoctorWriteSerializer(
@@ -83,6 +87,7 @@ class DoctorDetailView(APIView):
             data=DoctorReadSerializer(updated).data, request_id=request.request_id
         )
 
+    @extend_schema(request=None, responses={204: None})
     def delete(self, request, doctor_id):
         try:
             soft_delete_doctor(
@@ -117,6 +122,7 @@ class DoctorOptionView(APIView):
 class DoctorStatusView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, doctor_id, action):
         doctor = get_object_or_404(doctors_for_list(), pk=doctor_id)
         updated = set_doctor_active(

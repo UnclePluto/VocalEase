@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import BasePermission
@@ -13,6 +14,7 @@ from apps.patients.models import PatientProfile, TreatmentPlan
 from apps.patients.serializers import TreatmentPlanReadSerializer
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
+from common.api.schema import ApiEnvelopeSerializer
 
 from .selectors import attach_analysis_details, sessions_for_admin, sessions_for_patient
 from .serializers import (
@@ -82,6 +84,7 @@ class PatientSessionListView(APIView):
         data["results"] = SingingSessionSummarySerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
+    @extend_schema(request=CreateSessionSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         patient = patient_for_request(request)
         serializer = CreateSessionSerializer(data=request.data)
@@ -116,6 +119,10 @@ class PatientSessionUploadGrantView(PatientSessionMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
+    @extend_schema(
+        request=SessionUploadGrantSerializer,
+        responses={200: ApiEnvelopeSerializer, 201: ApiEnvelopeSerializer},
+    )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         serializer = SessionUploadGrantSerializer(data=request.data)
@@ -148,6 +155,7 @@ class PatientSessionConfirmUploadView(PatientSessionMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
+    @extend_schema(request=ConfirmSessionMediaSerializer, responses={200: ApiEnvelopeSerializer})
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         serializer = ConfirmSessionMediaSerializer(data=request.data)
@@ -159,6 +167,10 @@ class PatientSessionConfirmUploadView(PatientSessionMixin, APIView):
 
 
 class PatientSessionSubmitView(PatientSessionMixin, APIView):
+    @extend_schema(
+        request=None,
+        responses={200: ApiEnvelopeSerializer, 202: ApiEnvelopeSerializer},
+    )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         result = submit_session(
@@ -173,6 +185,7 @@ class PatientSessionSubmitView(PatientSessionMixin, APIView):
 
 
 class PatientSessionCancelView(PatientSessionMixin, APIView):
+    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         session = cancel_session(session_id=session.id, patient_id=session.patient_id)
@@ -180,6 +193,10 @@ class PatientSessionCancelView(PatientSessionMixin, APIView):
 
 
 class PatientSessionRetryView(PatientSessionMixin, APIView):
+    @extend_schema(
+        request=None,
+        responses={200: ApiEnvelopeSerializer, 202: ApiEnvelopeSerializer},
+    )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         result = retry_session(

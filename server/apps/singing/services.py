@@ -163,7 +163,11 @@ def issue_session_upload_grant(*, session_id: UUID, patient_id: UUID, media_type
                         raise SingingStateConflict()
                     grant = reissue_upload_grant(asset=asset)
                 return UploadGrantResult(session=session, asset=asset, grant=grant, created=False)
-        if session.status not in {SingingSession.Status.CREATED, SingingSession.Status.AWAITING_UPLOAD}:
+        if session.status not in {
+            SingingSession.Status.CREATED,
+            SingingSession.Status.AWAITING_UPLOAD,
+            SingingSession.Status.UPLOADED,
+        }:
             raise SingingStateConflict()
         if SessionMedia.objects.filter(session=session, media_type=media_type).exists():
             raise SingingMediaConflict("该类型媒体已申请上传凭证")
@@ -174,7 +178,7 @@ def issue_session_upload_grant(*, session_id: UUID, patient_id: UUID, media_type
             session=session, asset=asset, media_type=media_type,
             grant_idempotency_key=idempotency_key or uuid4().hex,
         )
-        if session.status == SingingSession.Status.CREATED:
+        if session.status in {SingingSession.Status.CREATED, SingingSession.Status.UPLOADED}:
             session.status = SingingSession.Status.AWAITING_UPLOAD
             session.save(update_fields=["status", "updated_at"])
         return UploadGrantResult(session=session, asset=asset, grant=grant, created=True)

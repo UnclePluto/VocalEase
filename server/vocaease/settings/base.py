@@ -17,14 +17,24 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
 settings_module = os.getenv("DJANGO_SETTINGS_MODULE", "")
-if not SECRET_KEY and settings_module not in {
+DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
+if (
+    (not SECRET_KEY or SECRET_KEY == "change-me" or len(SECRET_KEY.encode()) < 32)
+    and settings_module not in {
     "vocaease.settings.local",
     "vocaease.settings.test",
     "vocaease.settings.postgresql_test",
-}:
-    raise ImproperlyConfigured("生产环境必须配置 DJANGO_SECRET_KEY")
-DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
+    }
+):
+    raise ImproperlyConfigured("生产环境必须配置至少 32 字节且非示例值的 DJANGO_SECRET_KEY")
 ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host]
+SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "false").lower() == "true"
+SECURE_HSTS_SECONDS = _integer_env_or_raw("DJANGO_SECURE_HSTS_SECONDS", 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", "false").lower() == "true"
+SECURE_HSTS_PRELOAD = os.getenv("DJANGO_SECURE_HSTS_PRELOAD", "false").lower() == "true"
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -34,6 +44,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "drf_spectacular",
     "apps.accounts",
     "apps.audit",
     "apps.doctors",
@@ -111,6 +122,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "apps.accounts.tokens.ActiveUserJWTAuthentication",
     ],
+    "DEFAULT_SCHEMA_CLASS": "common.api.schema.VocaEaseAutoSchema",
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
         "common.api.permissions.MustChangePasswordPermission",
@@ -129,6 +141,14 @@ REST_FRAMEWORK = {
         "auth_reset_password": "5/min",
         "credential_upload": "10/min",
     },
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "VocaEase API",
+    "DESCRIPTION": "VocaEase 医生后台与患者端共享服务 API",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
 }
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
@@ -196,6 +216,10 @@ ANALYTICS_EXPORT_MAX_ATTEMPTS = _integer_env_or_raw("ANALYTICS_EXPORT_MAX_ATTEMP
 ANALYTICS_AUTO_DISPATCH_EXPORTS = not CELERY_TASK_ALWAYS_EAGER
 
 if settings_module not in {"vocaease.settings.local", "vocaease.settings.test", "vocaease.settings.postgresql_test"}:
+    if MEDIA_ENVIRONMENT in {"", "local", "test"}:
+        raise ImproperlyConfigured(
+            "生产环境必须把 MEDIA_ENVIRONMENT 设置为独立的非 local/test 命名空间"
+        )
     if MEDIA_BACKEND != "qiniu" or not all((QINIU_ACCESS_KEY, QINIU_SECRET_KEY, QINIU_BUCKET, QINIU_DOMAIN, QINIU_CALLBACK_URL)):
         raise ImproperlyConfigured("生产环境必须配置七牛私有空间凭据、域名和回调地址")
 

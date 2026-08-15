@@ -13,6 +13,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
 
 from apps.accounts.views import api_response
 from apps.audit.services import record
@@ -23,6 +25,11 @@ from apps.media.models import MediaAsset
 from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, ensure_local_asset_layout, publish_local_upload, release_local_upload, storage_backend_for
 from apps.patients.models import PatientProfile
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
+from common.api.schema import (
+    ApiEnvelopeSerializer,
+    MediaUploadGrantRequestSerializer,
+    QiniuCallbackRequestSerializer,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +65,7 @@ class PatientUploadGrantView(GrantMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
+    @extend_schema(request=MediaUploadGrantRequestSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         patient = _patient_for_user(request.user)
         if str(request.data.get("owner_id")) != str(patient.id):
@@ -72,6 +80,7 @@ class AdminUploadGrantView(GrantMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
+    @extend_schema(request=MediaUploadGrantRequestSerializer, responses={201: ApiEnvelopeSerializer})
     def post(self, request):
         owner_type, owner_id = request.data.get("owner_type"), request.data.get("owner_id")
         if not owner_type or not owner_id:
@@ -103,6 +112,10 @@ class LocalUploadView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
+    @extend_schema(
+        request={"application/octet-stream": OpenApiTypes.BINARY},
+        responses={204: None},
+    )
     def put(self, request, asset_id):
         asset = get_object_or_404(MediaAsset.objects.select_related("patient_owner__user"), pk=asset_id, deleted_at__isnull=True)
         is_owner = asset.owner_type == "patient" and asset.patient_owner and request.user == asset.patient_owner.user
@@ -127,6 +140,7 @@ class LocalUploadView(APIView):
 class PatientCompleteView(PatientAssetMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
+    @extend_schema(request=None, responses=ApiEnvelopeSerializer)
     def post(self, request, asset_id):
         asset = self.asset(request, asset_id)
         if asset.backend != "local":
@@ -138,6 +152,7 @@ class PatientCompleteView(PatientAssetMixin, APIView):
 class AdminCompleteView(AdminAssetMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
+    @extend_schema(request=None, responses=ApiEnvelopeSerializer)
     def post(self, request, asset_id):
         asset = self.asset(request, asset_id)
         if asset.backend != "local":
@@ -147,11 +162,13 @@ class AdminCompleteView(AdminAssetMixin, APIView):
 
 
 class PatientPrivateUrlView(PatientAssetMixin, APIView):
+    @extend_schema(request=None, responses=ApiEnvelopeSerializer)
     def post(self, request, asset_id):
         return _private_url_response(request, self.asset(request, asset_id))
 
 
 class AdminPrivateUrlView(AdminAssetMixin, APIView):
+    @extend_schema(request=None, responses=ApiEnvelopeSerializer)
     def post(self, request, asset_id):
         return _private_url_response(request, self.asset(request, asset_id))
 
@@ -174,6 +191,7 @@ def _private_url_response(request, asset):
 
 class LocalPrivateDownloadView(APIView):
     permission_classes = [AllowAny]
+    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request, object_key):
         try:
             backend = storage_backend_for("local")
@@ -200,6 +218,11 @@ class LocalPrivateDownloadView(APIView):
 class QiniuCallbackView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    @extend_schema(
+        request={"application/x-www-form-urlencoded": QiniuCallbackRequestSerializer},
+        responses=ApiEnvelopeSerializer,
+        auth=[],
+    )
     def post(self, request):
         raw_body = request.body
         raw_uri = request.META.get("RAW_URI") or request.get_full_path()

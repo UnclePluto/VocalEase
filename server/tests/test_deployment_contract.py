@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -9,9 +10,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def compose_config():
+    environment = os.environ.copy()
+    environment.pop("DJANGO_SETTINGS_MODULE", None)
     result = subprocess.run(
         ["docker", "compose", "-f", "deploy/compose.yaml", "config", "--format", "json"],
         cwd=REPOSITORY_ROOT,
+        env=environment,
         check=True,
         capture_output=True,
         text=True,
@@ -78,6 +82,113 @@ def test_runtime_services_share_one_private_local_media_volume():
     )
 
 
+def test_runtime_services_receive_all_media_and_logging_environment_contracts():
+    services = compose_config()["services"]
+    expected = {
+        "LOG_LEVEL": "INFO",
+        "MEDIA_SCANNER_MAX_MARKERS": "1000",
+        "MEDIA_SCANNER_MAX_MARKER_BYTES": "65536",
+        "QINIU_UPLOAD_URL": "https://up.qiniup.com",
+        "QINIU_RS_HOST": "https://rs.qiniu.com",
+        "QINIU_STAT_TIMEOUT_SECONDS": "5",
+    }
+    for service_name in ("server", "celery", "celery-beat"):
+        for key, value in expected.items():
+            assert services[service_name]["environment"][key] == value
+
+
+def test_compose_explicitly_propagates_one_settings_module_to_all_runtime_services():
+    services = compose_config()["services"]
+    for service_name in ("server", "celery", "celery-beat"):
+        assert services[service_name]["environment"]["DJANGO_SETTINGS_MODULE"] == "vocaease.settings.local"
+
+
+def test_https_proxy_topology_preserves_edge_proto_without_public_backend_port():
+    services = compose_config()["services"]
+    assert services["web"]["ports"][0]["host_ip"] == "127.0.0.1"
+    assert services["server"]["ports"][0]["host_ip"] == "127.0.0.1"
+    nginx = (REPOSITORY_ROOT / "deploy/nginx/default.conf").read_text()
+    assert "map $http_x_forwarded_proto $vocaease_forwarded_proto" in nginx
+    assert "proxy_set_header X-Forwarded-Proto $vocaease_forwarded_proto;" in nginx
+    assert "proxy_set_header X-Forwarded-Proto $scheme;" not in nginx
+    readme = (REPOSITORY_ROOT / "README.md").read_text()
+    assert "DJANGO_ALLOWED_HOSTS" in readme
+    assert "AUTH_WEB_ALLOWED_ORIGINS" in readme
+    assert "覆盖客户端传入的 X-Forwarded-Proto" in readme
+
+
+def test_compose_production_path_rejects_placeholder_secret_key():
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DJANGO_SETTINGS_MODULE": "vocaease.settings.base",
+            "DJANGO_SECRET_KEY": "change-me",
+            "DJANGO_DEBUG": "false",
+            "MEDIA_BACKEND": "qiniu",
+            "QINIU_ACCESS_KEY": "test-access",
+            "QINIU_SECRET_KEY": "test-secret",
+            "QINIU_BUCKET": "test-bucket",
+            "QINIU_DOMAIN": "https://media.example.test",
+            "QINIU_CALLBACK_URL": "https://api.example.test/api/v1/media/qiniu/callback/",
+        }
+    )
+    rendered = subprocess.run(
+        ["docker", "compose", "-f", "deploy/compose.yaml", "config", "--format", "json"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    server_environment = json.loads(rendered.stdout)["services"]["server"]["environment"]
+    assert server_environment["DJANGO_SETTINGS_MODULE"] == "vocaease.settings.base"
+    process_environment = os.environ.copy()
+    process_environment.update({key: str(value) for key, value in server_environment.items()})
+    result = subprocess.run(
+        [sys.executable, "-c", "from django.conf import settings; print(settings.SECRET_KEY)"],
+        cwd=REPOSITORY_ROOT / "server",
+        env=process_environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "DJANGO_SECRET_KEY" in result.stderr
+
+
+def test_all_compose_services_have_healthchecks_and_server_checks_readiness():
+    services = compose_config()["services"]
+    assert set(services) == {
+        "postgres",
+        "redis",
+        "server",
+        "celery",
+        "celery-beat",
+        "web",
+    }
+    for service_name in services:
+        assert "healthcheck" in services[service_name], service_name
+    server_probe = " ".join(services["server"]["healthcheck"]["test"])
+    assert "/health/ready/" in server_probe
+    assert "/health/live/" not in server_probe
+    assert services["web"]["depends_on"]["server"]["condition"] == "service_healthy"
+
+
+def test_compose_host_ports_can_be_isolated_for_parallel_qa_runs():
+    environment = os.environ.copy()
+    environment.update({"SERVER_PORT": "18013", "WEB_PORT": "13013"})
+    result = subprocess.run(
+        ["docker", "compose", "-f", "deploy/compose.yaml", "config", "--format", "json"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    services = json.loads(result.stdout)["services"]
+    assert services["server"]["ports"][0]["published"] == "18013"
+    assert services["web"]["ports"][0]["published"] == "13013"
+
+
 def test_server_image_prepares_private_media_directory_before_runtime():
     dockerfile = (REPOSITORY_ROOT / "deploy/docker/server.Dockerfile").read_text()
     assert "/app/private-media" in dockerfile
@@ -96,6 +207,14 @@ def test_runtime_commands_never_sync_dependencies_on_startup():
     services = compose_config()["services"]
     for service_name in ("server", "celery", "celery-beat"):
         assert "--no-sync" in services[service_name]["command"]
+
+
+def test_playwright_browser_path_is_portable_and_documented():
+    config = (REPOSITORY_ROOT / "web-admin/playwright.config.ts").read_text()
+    readme = (REPOSITORY_ROOT / "README.md").read_text()
+    assert "/Users/" not in config
+    assert "PLAYWRIGHT_CHROMIUM_EXECUTABLE" in config
+    assert "playwright install chromium" in readme
 
 
 def test_non_integer_analysis_lease_is_reported_as_stable_system_check_error():
