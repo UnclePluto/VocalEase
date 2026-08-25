@@ -17,6 +17,7 @@ export function ConfirmDelete({ content, error, loading, onCancel, onConfirm, op
   return (
     <Modal
       title={title}
+      width={420}
       open={open}
       onCancel={onCancel}
       onOk={onConfirm}

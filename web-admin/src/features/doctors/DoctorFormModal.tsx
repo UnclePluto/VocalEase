@@ -61,6 +61,7 @@ export function DoctorFormModal({
     <Modal
       title={detailTarget ? '加载医生详情' : doctor ? '编辑医生' : '新增医生'}
       open={open}
+      width={560}
       onCancel={onCancel}
       footer={null}
       destroyOnHidden

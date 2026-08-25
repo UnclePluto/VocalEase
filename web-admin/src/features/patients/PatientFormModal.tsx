@@ -74,7 +74,7 @@ export function PatientFormModal({
       open={open}
       onCancel={onCancel}
       footer={null}
-      width={680}
+      width={620}
       destroyOnHidden
       mask={{ closable: !submitting }}
       keyboard={!submitting}

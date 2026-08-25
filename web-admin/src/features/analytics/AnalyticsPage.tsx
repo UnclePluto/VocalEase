@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { MedicineBoxOutlined, SoundOutlined, TeamOutlined, TrophyOutlined } from '@ant-design/icons'
 import { Alert, Button, Card, Dropdown, Input, Select, Space, Table, Tag } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -80,13 +81,13 @@ function DashboardCards({ epoch }: { epoch: number }) {
   if (dashboard.isError) return <Alert className="analytics-dashboard-error" type="error" showIcon title={errorMessage(dashboard.error, '无法加载统计汇总')} description={errorDescription(dashboard.error)} action={<Button aria-label="重试统计汇总" onClick={() => void dashboard.refetch()}>重试</Button>} />
   const data = dashboard.data
   const items = [
-    ['在治患者', data?.active_patient_count, false], ['累计完成演唱', data?.completed_session_count, false],
-    ['平均得分', data?.average_score, true], ['平均嗳气次数', data?.average_burp_count, true],
+    ['在治患者', data?.active_patient_count, false, <TeamOutlined />, 'blue'], ['累计完成演唱', data?.completed_session_count, false, <SoundOutlined />, 'cyan'],
+    ['平均得分', data?.average_score, true, <TrophyOutlined />, 'green'], ['平均嗳气次数', data?.average_burp_count, true, <MedicineBoxOutlined />, 'gold'],
   ] as const
   return <>
     <div className="analytics-cards" aria-label="统计汇总">
-      {items.map(([label, value, nullable]) => <Card key={label} size="small" className="analytics-card" loading={dashboard.isPending}>
-        <span className="analytics-card-label">{label}</span><strong>{nullable && value === null ? '暂无数据' : (value ?? 0)}</strong>
+      {items.map(([label, value, nullable, icon, tone]) => <Card key={label} size="small" className="analytics-card" loading={dashboard.isPending}>
+        <span className={`analytics-card-icon is-${tone}`}>{icon}</span><span className="analytics-card-label">{label}</span><strong>{nullable && value === null ? '暂无数据' : (value ?? 0)}</strong>
       </Card>)}
     </div>
     {!dashboard.isPending && data ? <div className="analytics-meta">统计口径：{data.metric_version}{data.is_mock ? <Tag color="gold">模拟统计</Tag> : null}</div> : null}

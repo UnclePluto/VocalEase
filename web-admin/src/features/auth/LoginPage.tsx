@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import { ApiError } from '../../api/errors'
 import { useAuthStore } from '../../auth/store'
+import { BrandLogo } from '../../components/BrandLogo'
 
 type LoginFields = { login_id: string; password: string; remember_me: boolean }
 
@@ -30,34 +31,37 @@ export function LoginPage() {
   return (
     <main className="auth-page">
       <section className="auth-panel" aria-labelledby="login-title">
-        <div className="auth-brand" aria-label="VocaEase">
-          <span className="auth-brand-mark" aria-hidden="true">V</span>
-          <span>VocaEase</span>
+        <div className="auth-brand-block">
+          <div className="auth-brand" aria-label="VocaEase">
+            <BrandLogo className="auth-brand-mark" />
+            <span>VocaEase</span>
+          </div>
+          <Typography.Text className="auth-slogan">胃上嗳气歌唱疗法研究管理后台</Typography.Text>
         </div>
-        <Typography.Title id="login-title" level={1}>登录 VocaEase</Typography.Title>
-        <Typography.Paragraph className="auth-description">医生后台管理系统</Typography.Paragraph>
+        <Typography.Title id="login-title" level={1} className="visually-hidden">登录 VocaEase</Typography.Title>
         {passwordChanged ? <Alert type="success" showIcon title="密码修改成功，请重新登录" className="auth-error" /> : null}
         {error ? <Alert type="error" showIcon title={error} className="auth-error" /> : null}
         <Form<LoginFields>
-          layout="vertical"
+          className="auth-form"
           initialValues={{ remember_me: false }}
           requiredMark={false}
           onFinish={submit}
-          size="large"
+          size="middle"
         >
-          <Form.Item label="账号" name="login_id" rules={[{ required: true, message: '请输入账号' }]}>
-            <Input prefix={<UserOutlined />} autoComplete="username" placeholder="请输入医生工号或管理员账号" />
+          <Form.Item name="login_id" rules={[{ required: true, message: '请输入账号' }]}>
+            <Input aria-label="账号" prefix={<UserOutlined />} autoComplete="username" placeholder="请输入账号" />
           </Form.Item>
-          <Form.Item label="密码" name="password" rules={[{ required: true, message: '请输入密码' }]}>
-            <Input.Password prefix={<LockOutlined />} autoComplete="current-password" placeholder="请输入密码" />
+          <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
+            <Input.Password aria-label="密码" prefix={<LockOutlined />} autoComplete="current-password" placeholder="请输入密码" />
           </Form.Item>
           <Form.Item name="remember_me" valuePropName="checked" className="remember-row">
             <Checkbox>记住我</Checkbox>
           </Form.Item>
           <Button type="primary" htmlType="submit" aria-label="登录" block>登录</Button>
         </Form>
-        <Typography.Text type="secondary" className="auth-hint">首次登录需要修改初始密码</Typography.Text>
+        <Typography.Text type="secondary" className="auth-hint visually-hidden">首次登录需要修改初始密码</Typography.Text>
       </section>
+      <footer className="auth-footer">VocaEase © 2026 胃上嗳气歌唱疗法研究项目组</footer>
     </main>
   )
 }

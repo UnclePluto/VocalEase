@@ -22,6 +22,13 @@ async function actionsForSong() {
   if (!row) throw new Error('歌曲行不存在')
   return within(row)
 }
+async function actionForSong(label: string) {
+  const rowActions = await actionsForSong()
+  const directAction = rowActions.queryByText(label)
+  if (directAction) return directAction
+  fireEvent.click(rowActions.getByText('更多'))
+  return screen.findByText(label)
+}
 
 describe('曲库管理页面', () => {
   beforeEach(() => { window.innerWidth = 1440 })
@@ -38,7 +45,7 @@ describe('曲库管理页面', () => {
     const gate = new Promise<void>((resolve) => { release = resolve })
     server.use(http.post(`/api/v1/admin/songs/${song.id}/publish/`, async () => { await gate; return HttpResponse.json({ code: 'song_not_publishable', message: '仅分析成功歌曲可发布', data: null, request_id: 'publish-409' }, { status: 409 }) }))
     renderApp('/songs')
-    const publish = (await actionsForSong()).getByText('发布')
+    const publish = await actionForSong('发布')
     act(() => { fireEvent.click(publish); fireEvent.click(publish) })
     await waitFor(() => expect(server.calls(`/api/v1/admin/songs/${song.id}/publish/`)).toHaveLength(1))
     await act(async () => { release() })
@@ -54,11 +61,11 @@ describe('曲库管理页面', () => {
       return attempt === 1 ? HttpResponse.error() : HttpResponse.json(envelope({ task_id: 'task-1', status: 'pending', is_mock: true }), { status: 202 })
     }))
     renderApp('/songs')
-    const reanalyze = (await actionsForSong()).getByText('重新分析')
+    const reanalyze = await actionForSong('重新分析')
     act(() => { fireEvent.click(reanalyze); fireEvent.click(reanalyze) })
     await waitFor(() => expect(server.calls(`/api/v1/admin/songs/${song.id}/reanalyze/`)).toHaveLength(1))
     expect(await screen.findByText('网络连接失败，请稍后重试')).toBeInTheDocument()
-    fireEvent.click((await actionsForSong()).getByText('重新分析'))
+    fireEvent.click(await actionForSong('重新分析'))
     await waitFor(() => expect(server.calls(`/api/v1/admin/songs/${song.id}/reanalyze/`)).toHaveLength(2))
     const bodies = server.calls(`/api/v1/admin/songs/${song.id}/reanalyze/`).map((call) => call.json as { idempotency_key: string })
     expect(bodies[0].idempotency_key).toBe(bodies[1].idempotency_key)
@@ -74,10 +81,10 @@ describe('曲库管理页面', () => {
         : HttpResponse.json(envelope({ task_id: 'task-2', status: 'pending', is_mock: true }), { status: 202 })
     }))
     renderApp('/songs')
-    fireEvent.click((await actionsForSong()).getByText('重新分析'))
+    fireEvent.click(await actionForSong('重新分析'))
     expect(await screen.findByText('当前状态不可重新分析')).toBeInTheDocument()
     expect(screen.getByText('请求编号：reanalyze-409')).toBeInTheDocument()
-    fireEvent.click((await actionsForSong()).getByText('重新分析'))
+    fireEvent.click(await actionForSong('重新分析'))
     await waitFor(() => expect(server.calls(`/api/v1/admin/songs/${song.id}/reanalyze/`)).toHaveLength(2))
     const bodies = server.calls(`/api/v1/admin/songs/${song.id}/reanalyze/`).map((call) => call.json as { idempotency_key: string })
     expect(bodies[0].idempotency_key).not.toBe(bodies[1].idempotency_key)
