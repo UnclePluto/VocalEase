@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import timedelta
+import hashlib
 from io import BytesIO
 import os
 from uuid import NAMESPACE_URL, uuid5
@@ -27,7 +28,11 @@ from apps.media.services import (
 )
 from apps.patients.models import PatientProfile, TreatmentPlan
 from apps.singing.models import SessionMedia, SingingSession
-from apps.singing.services import _create_generation_tasks_locked, submit_session
+from apps.singing.services import (
+    _create_generation_tasks_locked,
+    _task_snapshot,
+    submit_session,
+)
 from apps.songs.models import Song
 from apps.songs.services import validate_source_asset
 
@@ -69,6 +74,13 @@ def _demo_wav(label: str, duration_ms: int = 90_000) -> bytes:
 def _demo_mp4() -> bytes:
     """返回可解码的 16×16 单帧 MPEG-4 演示录像。"""
     return base64.b64decode(DEMO_MP4_BASE64, validate=True)
+
+
+def _legacy_demo_mp4(label: str) -> bytes:
+    """返回 fix base 曾发布的已知无效 MP4 字节，仅用于精确升级识别。"""
+    ftyp = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+    payload = label.encode("utf-8")
+    return ftyp + (len(payload) + 8).to_bytes(4, "big") + b"free" + payload
 
 
 class Command(BaseCommand):
@@ -393,7 +405,11 @@ class Command(BaseCommand):
             created_at = timezone.now() - timedelta(days=days_ago)
             SingingSession.objects.filter(pk=session.id).update(created_at=created_at)
             session.refresh_from_db()
-        if session.created_source != "seed_demo" or session.patient_id != patient.id:
+        if (
+            session.created_source != "seed_demo"
+            or session.patient_id != patient.id
+            or session.song_id != song.id
+        ):
             raise ValueError(f"演示演唱 {key} 的固定标识已被其他数据占用")
         bindings = list(session.media_bindings.select_related("asset"))
         generation_tasks = AnalysisTask.objects.filter(
@@ -412,6 +428,129 @@ class Command(BaseCommand):
             (binding for binding in bindings if binding.media_type == "singing_audio"),
             None,
         )
+        video_binding = next(
+            (binding for binding in bindings if binding.media_type == "singing_video"),
+            None,
+        )
+        required_tasks = {
+            AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+            AnalysisTask.TaskType.FACE_LANDMARKS,
+        }
+        legacy_video_content = _legacy_demo_mp4(f"demo-video-{key}")
+        legacy_video_sha256 = hashlib.sha256(legacy_video_content).hexdigest()
+        video_asset = video_binding.asset if video_binding else None
+        object_key_parts = video_asset.object_key.split("/") if video_asset else []
+        legacy_video_shape = bool(
+            session.status == SingingSession.Status.COMPLETED
+            and session.is_mock
+            and binding_types == {"singing_audio", "singing_video"}
+            and task_types == required_tasks
+            and result_types == required_tasks
+            and not generation_tasks.exclude(status=AnalysisTask.Status.SUCCEEDED).exists()
+            and video_binding
+            and video_binding.confirmed_at
+            and video_binding.grant_idempotency_key == f"seed-demo:video-grant:{key}"
+            and video_asset
+            and video_asset.deleted_at is None
+            and video_asset.patient_owner_id == patient.id
+            and video_asset.owner_type == MediaAsset.OwnerType.PATIENT
+            and video_asset.owner_id == patient.id
+            and video_asset.media_type == "singing_video"
+            and video_asset.backend == "local"
+            and video_asset.mime == "video/mp4"
+            and video_asset.size == len(legacy_video_content)
+            and video_asset.sha256 == legacy_video_sha256
+            and video_asset.status == MediaAsset.Status.READY
+            and video_asset.metadata == {}
+            and len(video_asset.manifest_generation) == 32
+            and len(object_key_parts) == 6
+            and object_key_parts[0] == settings.MEDIA_ENVIRONMENT
+            and object_key_parts[1] == "singing_video"
+            and all(part.isdigit() for part in object_key_parts[2:5])
+            and len(object_key_parts[5]) == 32
+            and all(character in "0123456789abcdef" for character in object_key_parts[5])
+        )
+        if legacy_video_shape:
+            face_task = generation_tasks.get(
+                task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+            )
+            legacy_video_shape = bool(
+                face_task.source_asset_id == video_asset.id
+                and face_task.input_snapshot == _task_snapshot(
+                    session=session,
+                    asset=video_asset,
+                    generation=session.analysis_generation,
+                )
+            )
+        if legacy_video_shape:
+            private_url = backend.create_private_url(
+                video_asset.object_key,
+                ttl_seconds=60,
+                asset_id=video_asset.id,
+                expected_generation=video_asset.manifest_generation,
+            )
+            with backend.open_authorized_private(
+                private_url.token,
+                video_asset.object_key,
+                asset_id=video_asset.id,
+                expected_generation=video_asset.manifest_generation,
+            ) as stream:
+                legacy_video_shape = stream.read() == legacy_video_content
+        if legacy_video_shape:
+            replacement = self._publish_asset(
+                owner_type=MediaAsset.OwnerType.PATIENT,
+                owner_id=patient.id,
+                media_type="singing_video",
+                mime="video/mp4",
+                content=_demo_mp4(),
+                backend=backend,
+            )
+            old_asset_id = video_asset.id
+            old_object_key = video_asset.object_key
+            video_binding.asset = replacement
+            video_binding.save(update_fields=["asset"])
+            face_task.source_asset = replacement
+            face_task.input_snapshot = _task_snapshot(
+                session=session,
+                asset=replacement,
+                generation=session.analysis_generation,
+            )
+            face_task.status = AnalysisTask.Status.PENDING
+            face_task.attempt = 0
+            face_task.claim_token = None
+            face_task.lease_expires_at = None
+            face_task.heartbeat_at = None
+            face_task.next_dispatch_at = None
+            face_task.error_code = ""
+            face_task.error_summary = ""
+            face_task.started_at = None
+            face_task.completed_at = None
+            face_task.save()
+            session.status = SingingSession.Status.PROCESSING
+            session.completed_at = None
+            session.save(update_fields=["status", "completed_at", "updated_at"])
+            video_asset.delete()
+            transaction.on_commit(
+                lambda object_key=old_object_key, asset_id=old_asset_id: backend.purge_for_qa(
+                    object_key,
+                    asset_id=asset_id,
+                )
+            )
+            run_analysis(face_task.id)
+            session.refresh_from_db()
+            bindings = list(session.media_bindings.select_related("asset"))
+            generation_tasks = AnalysisTask.objects.filter(
+                target_type=AnalysisTask.TargetType.SINGING_SESSION,
+                target_id=session.id,
+                generation=session.analysis_generation,
+            )
+            binding_types = {binding.media_type for binding in bindings}
+            task_types = set(generation_tasks.values_list("task_type", flat=True))
+            result_types = set(
+                AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
+                    "task__task_type", flat=True,
+                )
+            )
         legacy_audio_only = bool(
             session.status == SingingSession.Status.COMPLETED
             and session.is_mock
@@ -468,10 +607,6 @@ class Command(BaseCommand):
         if session.status != SingingSession.Status.COMPLETED or not session.is_mock:
             raise ValueError(f"演示演唱 {key} 状态不完整，拒绝静默覆盖")
         required_media = {"singing_audio", "singing_video"}
-        required_tasks = {
-            AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
-            AnalysisTask.TaskType.FACE_LANDMARKS,
-        }
         if (
             binding_types != required_media
             or any(

@@ -14,7 +14,13 @@ from apps.media.models import MediaAsset
 from apps.patients.models import PatientProfile, TreatmentPlan
 from apps.singing.models import SessionMedia, SingingSession
 from apps.songs.models import Song
-from apps.media.services import storage_backend_for
+from apps.media.services import (
+    claim_local_upload,
+    complete_local_asset,
+    create_upload_grant,
+    publish_local_upload,
+    storage_backend_for,
+)
 
 
 DEMO_LOGIN_IDS = {"demo-admin", "DDEMO001", "PDEMO001", "PDEMO002"}
@@ -65,6 +71,37 @@ def _assert_parseable_video_mp4(content):
         if hdlr is not None and len(hdlr) >= 12:
             handlers.append(hdlr[8:12])
     assert b"vide" in handlers
+
+
+def _legacy_header_only_mp4(label):
+    ftyp = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+    payload = label.encode("utf-8")
+    return ftyp + (len(payload) + 8).to_bytes(4, "big") + b"free" + payload
+
+
+def _publish_local_patient_asset(*, patient, content, backend):
+    asset, grant = create_upload_grant(
+        owner=patient,
+        media_type="singing_video",
+        mime="video/mp4",
+        size=len(content),
+        backend=backend,
+    )
+    nonce = claim_local_upload(asset=asset)
+    prepared = backend.prepare_authorized_stream(
+        object_key=asset.object_key,
+        token=grant.upload_token,
+        stream=BytesIO(content),
+        mime="video/mp4",
+        asset_id=asset.id,
+    )
+    publish_local_upload(
+        asset_id=asset.id,
+        nonce=nonce,
+        prepared=prepared,
+        backend=backend,
+    )
+    return complete_local_asset(asset=asset)
 
 
 def _demo_counts():
@@ -255,6 +292,95 @@ def test_seed_demo_upgrades_legacy_audio_only_session_in_place(tmp_path, setting
 
     assert tuple(session.media_bindings.order_by("media_type").values_list("id", flat=True)) == stable_binding_ids
     assert tuple(tasks.order_by("task_type").values_list("id", flat=True)) == stable_task_ids
+
+
+@pytest.mark.django_db(transaction=True)
+def test_seed_demo_replaces_fix_base_header_only_video_in_place(tmp_path, settings):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    call_command("seed_demo", stdout=StringIO())
+    session = SingingSession.objects.get(
+        id="8ce19dd3-433a-5bf1-8329-1017a53b323f",
+        created_source="seed_demo",
+        patient__medical_record_no="PDEMO001",
+    )
+    binding = SessionMedia.objects.get(session=session, media_type="singing_video")
+    face_task = AnalysisTask.objects.get(
+        target_type=AnalysisTask.TargetType.SINGING_SESSION,
+        target_id=session.id,
+        generation=session.analysis_generation,
+        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+        status=AnalysisTask.Status.SUCCEEDED,
+    )
+    face_result = AnalysisResult.objects.get(task=face_task)
+    current_asset_id = binding.asset_id
+    backend = storage_backend_for("local")
+    legacy_content = _legacy_header_only_mp4("demo-video-session-1")
+    legacy_asset = _publish_local_patient_asset(
+        patient=session.patient,
+        content=legacy_content,
+        backend=backend,
+    )
+    binding.asset = legacy_asset
+    binding.save(update_fields=["asset"])
+    from apps.singing.services import _task_snapshot
+    face_task.source_asset = legacy_asset
+    face_task.input_snapshot = _task_snapshot(
+        session=session,
+        asset=legacy_asset,
+        generation=session.analysis_generation,
+    )
+    face_task.save(update_fields=["source_asset", "input_snapshot", "updated_at"])
+    MediaAsset.objects.filter(pk=current_asset_id).delete()
+    stable_ids = (session.id, binding.id, face_task.id, face_result.id)
+
+    assert legacy_asset.mime == "video/mp4"
+    assert legacy_asset.size == len(legacy_content)
+    assert legacy_asset.sha256 == hashlib.sha256(legacy_content).hexdigest()
+    assert set(AnalysisTask.objects.filter(target_id=session.id).values_list("status", flat=True)) == {
+        AnalysisTask.Status.SUCCEEDED,
+    }
+    assert AnalysisResult.objects.filter(task__target_id=session.id).count() == 2
+
+    call_command("seed_demo", stdout=StringIO())
+
+    session.refresh_from_db()
+    binding.refresh_from_db()
+    face_task.refresh_from_db()
+    face_result.refresh_from_db()
+    assert (session.id, binding.id, face_task.id, face_result.id) == stable_ids
+    assert binding.asset_id != legacy_asset.id
+    replacement = binding.asset
+    private_url = backend.create_private_url(
+        replacement.object_key,
+        ttl_seconds=60,
+        asset_id=replacement.id,
+        expected_generation=replacement.manifest_generation,
+    )
+    with backend.open_authorized_private(
+        private_url.token,
+        replacement.object_key,
+        asset_id=replacement.id,
+        expected_generation=replacement.manifest_generation,
+    ) as stream:
+        replacement_content = stream.read()
+    assert replacement.mime == "video/mp4"
+    assert replacement.size == len(replacement_content)
+    assert replacement.sha256 == hashlib.sha256(replacement_content).hexdigest()
+    _assert_parseable_video_mp4(replacement_content)
+    assert face_task.source_asset_id == replacement.id
+    assert not MediaAsset.objects.filter(pk=legacy_asset.id).exists()
+    stable_asset_id = replacement.id
+
+    call_command("seed_demo", stdout=StringIO())
+
+    session.refresh_from_db()
+    binding.refresh_from_db()
+    face_task.refresh_from_db()
+    face_result.refresh_from_db()
+    assert (session.id, binding.id, face_task.id, face_result.id) == stable_ids
+    assert binding.asset_id == stable_asset_id
+    assert _demo_counts()["assets"] == 14
 
 
 @pytest.mark.django_db(transaction=True)
