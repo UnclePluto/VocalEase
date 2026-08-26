@@ -1,0 +1,13 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "asset_id": "77777777-7777-4777-8777-777777777777",
+    "object_key": "private/patient/video.mp4",
+    "expires_at": "2026-08-27T10:00:00Z",
+    "upload_url": "https://upload.qiniup.com",
+    "upload_token": "upload-secret",
+    "fields": {"x:owner": "patient"}
+  },
+  "request_id": "patient-grant-1"
+}

@@ -1,0 +1,14 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "access": "next-access-secret",
+    "refresh_expires_at": "2026-09-02T08:00:00Z",
+    "user": {
+      "login_id": "patient001",
+      "role": "patient",
+      "must_change_password": false
+    }
+  },
+  "request_id": "auth-refresh-1"
+}

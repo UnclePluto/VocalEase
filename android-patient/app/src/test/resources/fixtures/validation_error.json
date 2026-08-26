@@ -1,0 +1,8 @@
+{
+  "code": "validation_error",
+  "message": "请求参数校验失败",
+  "data": {
+    "song_id": ["歌曲不存在或当前不可用"]
+  },
+  "request_id": "validation-request-1"
+}

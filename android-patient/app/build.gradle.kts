@@ -106,6 +106,7 @@ dependencies {
     implementation(libs.qiniu.android.sdk)
 
     testImplementation(libs.junit4)
+    testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.espresso.core)
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

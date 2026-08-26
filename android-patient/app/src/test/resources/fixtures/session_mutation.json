@@ -1,0 +1,10 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "session_id": "55555555-5555-4555-8555-555555555555",
+    "status": "processing",
+    "analysis_task_ids": ["88888888-8888-4888-8888-888888888888"]
+  },
+  "request_id": "session-mutation-1"
+}

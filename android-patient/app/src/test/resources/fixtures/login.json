@@ -1,0 +1,15 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "access": "access-secret",
+    "refresh": "refresh-secret",
+    "refresh_expires_at": "2026-09-01T08:00:00Z",
+    "user": {
+      "login_id": "patient001",
+      "role": "patient",
+      "must_change_password": false
+    }
+  },
+  "request_id": "auth-login-1"
+}

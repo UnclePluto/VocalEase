@@ -1,0 +1,9 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "url": "https://private.example/object?token=private-secret",
+    "expires_at": "2026-08-27T12:00:00Z"
+  },
+  "request_id": "private-url-1"
+}

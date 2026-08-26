@@ -1,0 +1,23 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "count": 1,
+    "page": 1,
+    "page_size": 20,
+    "results": [
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "title": "春风",
+        "artist": "演示歌手",
+        "genre": "流行",
+        "language": "中文",
+        "duration_seconds": 90,
+        "analysis_status": "succeeded",
+        "publication_status": "published",
+        "uploaded_at": "2026-08-20T10:30:00Z"
+      }
+    ]
+  },
+  "request_id": "song-page-1"
+}
