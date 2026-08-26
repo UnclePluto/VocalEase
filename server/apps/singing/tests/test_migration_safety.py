@@ -22,16 +22,6 @@ def test_creation_idempotency_migration_is_reversible_and_enforces_patient_scope
     previous_target = [("singing", "0004_remove_analysistimeseries_generation")]
 
     try:
-        executor = MigrationExecutor(connection)
-        executor.migrate(previous_target)
-        old_apps = executor.loader.project_state(previous_target).apps
-        OldSingingSession = old_apps.get_model("singing", "SingingSession")
-        assert "creation_idempotency_key" not in {
-            field.name for field in OldSingingSession._meta.fields
-        }
-
-        executor = MigrationExecutor(connection)
-        executor.migrate(executor.loader.graph.leaf_nodes())
         patient, existing = uploaded_session()
         session_values = {
             "song_id": existing.song_id,
@@ -44,12 +34,29 @@ def test_creation_idempotency_migration_is_reversible_and_enforces_patient_scope
         SingingSession.objects.filter(pk=existing.id).update(
             creation_idempotency_key="migration-create-001",
         )
+        keyed_session = SingingSession.objects.create(
+            patient_id=patient.id,
+            creation_idempotency_key="migration-create-002",
+            **session_values,
+        )
         with pytest.raises(IntegrityError), transaction.atomic():
             SingingSession.objects.create(
                 patient_id=patient.id,
                 creation_idempotency_key="migration-create-001",
                 **session_values,
             )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(previous_target)
+        old_apps = executor.loader.project_state(previous_target).apps
+        OldSingingSession = old_apps.get_model("singing", "SingingSession")
+        assert "creation_idempotency_key" not in {
+            field.name for field in OldSingingSession._meta.fields
+        }
+        assert set(OldSingingSession.objects.filter(pk__in=[existing.id, keyed_session.id]).values_list("id", flat=True)) == {
+            existing.id,
+            keyed_session.id,
+        }
     finally:
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
@@ -80,10 +87,14 @@ def _singing_schema_snapshot():
 
 @pytest.mark.django_db(transaction=True, databases="__all__")
 def test_singing_reverse_barrier_stops_before_schema_or_data_changes():
-    uploaded_session()
-    before = _singing_schema_snapshot()
-
     try:
+        previous_target = [("singing", "0004_remove_analysistimeseries_generation")]
+        executor = MigrationExecutor(connection)
+        executor.migrate(previous_target)
+        old_apps = executor.loader.project_state(previous_target).apps
+        OldSingingSession = old_apps.get_model("singing", "SingingSession")
+        uploaded_session(session_model=OldSingingSession)
+        before = _singing_schema_snapshot()
         with pytest.raises(IrreversibleError):
             MigrationExecutor(connection).migrate([("analysis", "0003_analysistask_next_dispatch_at")])
         assert _singing_schema_snapshot() == before
