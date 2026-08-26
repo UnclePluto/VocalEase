@@ -291,23 +291,9 @@ def test_old_local_upload_url_cannot_bypass_current_asset_state(
 
 
 @pytest.mark.django_db
-def test_qiniu_idempotent_reissue_keeps_object_deadline_and_insert_only_policy(monkeypatch):
+def test_qiniu_expired_reissue_keeps_object_policy_and_refreshes_deadline(monkeypatch):
     patient, _session = uploaded_session()
-
-    class RecordingAuth:
-        def __init__(self):
-            self.calls = []
-            self.signed_policies = []
-
-        def upload_token(self, bucket, object_key, *, expires, policy, strict_policy):
-            self.calls.append((bucket, object_key, expires, dict(policy), strict_policy))
-            return f"token-{len(self.calls)}"
-
-        def token_with_data(self, data):
-            self.signed_policies.append(json.loads(data))
-            return f"reissued-token-{len(self.signed_policies)}"
-
-    auth = RecordingAuth()
+    auth = Auth("ak", "sk")
     backend = QiniuStorageBackend(
         access_key="ak", secret_key="sk", bucket="private", domain="https://cdn.test",
         callback_url="https://api.test/callback", environment="test", auth=auth,
@@ -322,31 +308,34 @@ def test_qiniu_idempotent_reissue_keeps_object_deadline_and_insert_only_policy(m
 
     assert second.object_key == first.object_key == asset.object_key
     assert second.expires_at == asset.upload_expires_at
-    policy = auth.signed_policies[-1]
+    decoded_access_key, _signature, policy = Auth.up_token_decode(second.upload_token)
+    assert decoded_access_key == "ak"
     assert policy["scope"] == f"private:{asset.object_key}"
     assert policy["insertOnly"] == 1
     assert policy["fsizeLimit"] == 6
     assert policy["mimeLimit"] == "audio/mpeg"
     assert policy["deadline"] == int(asset.upload_expires_at.timestamp())
 
+    old_deadline = asset.upload_expires_at
     MediaAsset.objects.filter(pk=asset.id).update(
         upload_expires_at=timezone.now() - timedelta(minutes=1),
     )
-    renewed_after = timezone.now()
     renewed = reissue_upload_grant(asset=asset)
     asset.refresh_from_db()
 
     assert renewed.object_key == first.object_key == asset.object_key
     assert renewed.expires_at == asset.upload_expires_at
-    assert renewed.expires_at > renewed_after
-    policy = auth.signed_policies[-1]
+    assert renewed.expires_at > old_deadline
+    decoded_access_key, _signature, policy = Auth.up_token_decode(renewed.upload_token)
+    assert decoded_access_key == "ak"
     assert policy["scope"] == f"private:{asset.object_key}"
     assert policy["insertOnly"] == 1
-    assert policy["fsizeLimit"] == asset.size
-    assert policy["mimeLimit"] == asset.mime
+    assert policy["fsizeLimit"] == 6
+    assert policy["mimeLimit"] == "audio/mpeg"
     assert policy["callbackUrl"] == "https://api.test/callback"
     assert policy["callbackBodyType"] == "application/x-www-form-urlencoded"
     assert policy["callbackBody"] == "key=$(key)&hash=$(etag)&fsize=$(fsize)&mime=$(mimeType)"
+    assert policy["deadline"] == int(renewed.expires_at.timestamp())
     assert policy["deadline"] == int(asset.upload_expires_at.timestamp())
 
 
