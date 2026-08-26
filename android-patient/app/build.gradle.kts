@@ -1,5 +1,3 @@
-import java.net.URI
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -10,29 +8,9 @@ plugins {
 
 fun String.asBuildConfigString(): String = "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
-val releaseRequested = gradle.startParameter.taskNames.any {
-    it.contains("release", ignoreCase = true)
-}
 val releaseApiBaseUrl = providers.gradleProperty("vocaeaseApiBaseUrl")
     .orElse(providers.environmentVariable("VOCAEASE_API_BASE_URL"))
     .orNull
-
-fun validateReleaseUrl(rawUrl: String?): String {
-    require(!rawUrl.isNullOrBlank()) {
-        "release 构建必须通过 -PvocaeaseApiBaseUrl 或 VOCAEASE_API_BASE_URL 提供 API 地址"
-    }
-    val uri = runCatching { URI(rawUrl) }.getOrElse {
-        throw GradleException("release API 地址不是合法 URL", it)
-    }
-    require(uri.scheme == "https" && !uri.host.isNullOrBlank() && rawUrl.endsWith("/")) {
-        "release API 地址必须是包含主机且以 / 结尾的完整 HTTPS URL"
-    }
-    return rawUrl
-}
-
-if (releaseRequested) {
-    validateReleaseUrl(releaseApiBaseUrl)
-}
 
 android {
     namespace = "com.vocaease.patient"
@@ -75,6 +53,20 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+}
+
+val validateReleaseApiBaseUrl = tasks.register<Exec>("validateReleaseApiBaseUrl") {
+    group = "verification"
+    description = "校验 release API 地址"
+    inputs.property("releaseApiBaseUrl", releaseApiBaseUrl ?: "")
+    environment("VOCAEASE_RELEASE_API_BASE_URL", releaseApiBaseUrl ?: "")
+    commandLine(rootProject.file("scripts/validate_release_url.sh"))
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        variant.lifecycleTasks.registerPreBuild(validateReleaseApiBaseUrl)
     }
 }
 
