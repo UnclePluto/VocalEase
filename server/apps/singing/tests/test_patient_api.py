@@ -276,6 +276,30 @@ def test_create_session_exposes_idempotency_as_http_contract(patient, tmp_path, 
     assert conflict.json()["code"] == "singing_creation_conflict"
 
 
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+@pytest.mark.django_db
+def test_create_session_rejects_blank_idempotency_header(
+    idempotency_key,
+    patient,
+    tmp_path,
+    settings,
+):
+    song = ready_song(tmp_path, settings, title="空白幂等键歌曲")
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    response = client.post(
+        "/api/v1/patient/singing-sessions/",
+        {"song_id": str(song.id)},
+        format="json",
+        HTTP_IDEMPOTENCY_KEY=idempotency_key,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    assert SingingSession.objects.count() == 0
+
+
 @pytest.mark.django_db
 def test_session_upload_grant_is_bound_to_session_and_cross_patient_is_404(patient, other_patient, tmp_path, settings):
     song = ready_song(tmp_path, settings)

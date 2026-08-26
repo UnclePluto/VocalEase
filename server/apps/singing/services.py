@@ -95,7 +95,7 @@ def create_session(
     *, patient_id: UUID, song_id: UUID, idempotency_key: str,
     created_source="patient_android_api",
 ) -> SessionCreationResult:
-    if not idempotency_key or len(idempotency_key) > 128:
+    if not idempotency_key.strip() or len(idempotency_key) > 128:
         raise ValidationError({"idempotency_key": "幂等键不能为空且长度不能超过 128"})
     validation_error = None
     session = None
