@@ -3,9 +3,11 @@ package com.vocaease.patient.core.network
 import com.vocaease.patient.core.network.dto.AuthSession
 import com.vocaease.patient.core.network.dto.AuthTokensDto
 import com.vocaease.patient.core.network.dto.ClientKind
+import com.vocaease.patient.core.network.dto.ChangePasswordRequestDto
 import com.vocaease.patient.core.network.dto.ConfirmSessionMediaRequestDto
 import com.vocaease.patient.core.network.dto.CreateSessionRequestDto
 import com.vocaease.patient.core.network.dto.LoginRequestDto
+import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.MediaType
 import com.vocaease.patient.core.network.dto.PatientMeDto
 import com.vocaease.patient.core.network.dto.PatientMediaUploadGrantRequestDto
@@ -14,6 +16,7 @@ import com.vocaease.patient.core.network.dto.PrivateUrlDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.dto.SessionMutationDto
 import com.vocaease.patient.core.network.dto.SessionPageDto
+import com.vocaease.patient.core.network.dto.SessionStatus
 import com.vocaease.patient.core.network.dto.SessionUploadGrantDto
 import com.vocaease.patient.core.network.dto.SessionUploadGrantRequestDto
 import com.vocaease.patient.core.network.dto.SingingAudioAnalysisPayload
@@ -65,6 +68,8 @@ class ApiContractTest {
         val expectedOperations = setOf(
             "post /api/v1/auth/login/",
             "post /api/v1/auth/refresh/",
+            "post /api/v1/auth/change-password/",
+            "post /api/v1/auth/logout/",
             "get /api/v1/patient/me/",
             "get /api/v1/patient/songs/",
             "get /api/v1/patient/songs/{song_id}/",
@@ -84,6 +89,25 @@ class ApiContractTest {
             val (method, path) = operation.split(" ", limit = 2)
             assertTrue("契约缺少 $operation", paths.objectAt(path).containsKey(method))
         }
+        assertEquals(
+            expectedOperations,
+            ApiEndpoint.entries
+                .filterNot { it == ApiEndpoint.UNKNOWN }
+                .map { "${it.method.lowercase()} ${it.pathTemplate}" }
+                .toSet(),
+        )
+        assertEquals(
+            setOf(
+                "login", "refresh", "changePassword", "logout", "patientMe",
+                "songs", "song", "previewSong", "sessions", "createSession", "session",
+                "sessionUploadGrant", "patientMediaUploadGrant", "confirmSessionMedia",
+                "submitSession", "cancelSession", "retrySession", "patientMediaPrivateUrl",
+            ),
+            VocaEaseApi::class.java.declaredMethods
+                .filterNot { it.isSynthetic }
+                .map { it.name }
+                .toSet(),
+        )
 
         assertEquals(
             setOf("client_kind", "login_id", "password"),
@@ -210,30 +234,68 @@ class ApiContractTest {
         val refresh = api.refresh(RefreshRequestDto(ClientKind.ANDROID, "refresh-secret"))
         assertNull(refresh.data.refresh)
         server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
             assertEquals("/api/v1/auth/refresh/", request.path)
             assertJson(
                 """{"client_kind":"android","refresh":"refresh-secret"}""",
                 request.body.readUtf8(),
             )
+            assertNull(request.getHeader("Idempotency-Key"))
+        }
+
+        enqueue("fixtures/empty.json")
+        api.changePassword(ChangePasswordRequestDto("OldPassword!", "NewPassword!"))
+        server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/auth/change-password/", request.requestUrl?.encodedPath)
+            assertJson(
+                """{"old_password":"OldPassword!","new_password":"NewPassword!"}""",
+                request.body.readUtf8(),
+            )
+            assertNull(request.getHeader("Idempotency-Key"))
+        }
+
+        enqueue("fixtures/empty.json")
+        api.logout(LogoutRequestDto(ClientKind.ANDROID, "refresh-secret"))
+        server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/auth/logout/", request.requestUrl?.encodedPath)
+            assertJson(
+                """{"client_kind":"android","refresh":"refresh-secret"}""",
+                request.body.readUtf8(),
+            )
+            assertNull(request.getHeader("Idempotency-Key"))
         }
 
         enqueue("fixtures/patient_me.json")
         assertEquals("MR-2026-001", api.patientMe().data.medicalRecordNo)
-        assertEquals("/api/v1/patient/me/", server.takeRequest().path)
+        server.takeRequest().also { request ->
+            assertEquals("GET", request.method)
+            assertEquals("/api/v1/patient/me/", request.requestUrl?.encodedPath)
+            assertNull(request.requestUrl?.query)
+            assertNull(request.getHeader("Idempotency-Key"))
+        }
 
         enqueue("fixtures/songs_page.json")
         assertEquals(1, api.songs(page = 1, pageSize = 20, keyword = "春", sort = "-created_at").data.count)
         server.takeRequest().also { request ->
+            assertEquals("GET", request.method)
             assertEquals("/api/v1/patient/songs/", request.requestUrl?.encodedPath)
             assertEquals("1", request.requestUrl?.queryParameter("page"))
             assertEquals("20", request.requestUrl?.queryParameter("page_size"))
             assertEquals("春", request.requestUrl?.queryParameter("keyword"))
             assertEquals("-created_at", request.requestUrl?.queryParameter("sort"))
+            assertNull(request.getHeader("Idempotency-Key"))
         }
 
         enqueue("fixtures/song.json")
         assertEquals("春风", api.song(SONG_ID).data.title)
-        assertEquals("/api/v1/patient/songs/$SONG_ID/", server.takeRequest().path)
+        server.takeRequest().also { request ->
+            assertEquals("GET", request.method)
+            assertEquals("/api/v1/patient/songs/$SONG_ID/", request.requestUrl?.encodedPath)
+            assertNull(request.requestUrl?.query)
+            assertNull(request.getHeader("Idempotency-Key"))
+        }
 
         enqueue("fixtures/private_url.json")
         assertTrue(api.previewSong(SONG_ID).data.url.startsWith("https://private.example/"))
@@ -253,6 +315,8 @@ class ApiContractTest {
         enqueue("fixtures/session.json", status = 201)
         assertEquals(SESSION_ID, api.createSession("create-key", CreateSessionRequestDto(SONG_ID)).data.id)
         server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/patient/singing-sessions/", request.requestUrl?.encodedPath)
             assertEquals("/api/v1/patient/singing-sessions/", request.path)
             assertEquals("create-key", request.getHeader("Idempotency-Key"))
             assertJson("""{"song_id":"$SONG_ID"}""", request.body.readUtf8())
@@ -262,19 +326,33 @@ class ApiContractTest {
         val page: ApiEnvelope<SessionPageDto> = api.sessions(
             page = 1,
             pageSize = 20,
-            status = "completed",
+            status = SessionStatus.COMPLETED,
             createdFrom = "2026-08-01",
             createdTo = "2026-08-31",
         )
         assertEquals(SESSION_ID, page.data.results.single().id)
         server.takeRequest().also { request ->
+            assertEquals("GET", request.method)
+            assertEquals("/api/v1/patient/singing-sessions/", request.requestUrl?.encodedPath)
+            assertEquals("1", request.requestUrl?.queryParameter("page"))
+            assertEquals("20", request.requestUrl?.queryParameter("page_size"))
             assertEquals("completed", request.requestUrl?.queryParameter("status"))
+            assertEquals("2026-08-01", request.requestUrl?.queryParameter("created_from"))
+            assertEquals("2026-08-31", request.requestUrl?.queryParameter("created_to"))
             assertNull(request.getHeader("Idempotency-Key"))
         }
 
         enqueue("fixtures/session.json")
         assertEquals(SESSION_ID, api.session(SESSION_ID).data.id)
-        assertNull(server.takeRequest().getHeader("Idempotency-Key"))
+        server.takeRequest().also { request ->
+            assertEquals("GET", request.method)
+            assertEquals(
+                "/api/v1/patient/singing-sessions/$SESSION_ID/",
+                request.requestUrl?.encodedPath,
+            )
+            assertNull(request.requestUrl?.query)
+            assertNull(request.getHeader("Idempotency-Key"))
+        }
 
         enqueue("fixtures/session_grant.json", status = 201)
         val sessionGrant: ApiEnvelope<SessionUploadGrantDto> = api.sessionUploadGrant(
@@ -284,6 +362,7 @@ class ApiContractTest {
         )
         assertEquals("private/session/audio.m4a", sessionGrant.data.objectKey)
         server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
             assertEquals("/api/v1/patient/singing-sessions/$SESSION_ID/upload-grants/", request.path)
             assertEquals("grant-key", request.getHeader("Idempotency-Key"))
             assertJson(
@@ -292,14 +371,38 @@ class ApiContractTest {
             )
         }
 
+        enqueue("fixtures/session_grant.json", status = 200)
+        api.sessionUploadGrant(
+            SESSION_ID,
+            null,
+            SessionUploadGrantRequestDto(MediaType.SINGING_AUDIO, "audio/mp4", 1234),
+        )
+        server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
+            assertEquals(
+                "/api/v1/patient/singing-sessions/$SESSION_ID/upload-grants/",
+                request.requestUrl?.encodedPath,
+            )
+            assertNull(request.getHeader("Idempotency-Key"))
+            assertJson(
+                """{"media_type":"singing_audio","mime":"audio/mp4","size":1234}""",
+                request.body.readUtf8(),
+            )
+        }
+
         enqueue("fixtures/patient_grant.json", status = 201)
         val patientGrant: ApiEnvelope<PatientMediaUploadGrantDto> = api.patientMediaUploadGrant(
-            PatientMediaUploadGrantRequestDto(PATIENT_ID, "singing_video", "video/mp4", 5678),
+            PatientMediaUploadGrantRequestDto(PATIENT_ID, MediaType.SINGING_VIDEO, "video/mp4", 5678),
         )
         assertEquals("private/patient/video.mp4", patientGrant.data.objectKey)
         server.takeRequest().also { request ->
-            assertEquals("/api/v1/patient/media/upload-grants/", request.path)
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/patient/media/upload-grants/", request.requestUrl?.encodedPath)
             assertNull(request.getHeader("Idempotency-Key"))
+            assertJson(
+                """{"owner_id":"$PATIENT_ID","media_type":"singing_video","mime":"video/mp4","size":5678}""",
+                request.body.readUtf8(),
+            )
         }
 
         enqueue("fixtures/session.json")
@@ -308,38 +411,66 @@ class ApiContractTest {
             ConfirmSessionMediaRequestDto(assetId = "66666666-6666-4666-8666-666666666666"),
         ).data.id)
         server.takeRequest().also { request ->
-            assertEquals("/api/v1/patient/singing-sessions/$SESSION_ID/confirm-upload/", request.path)
+            assertEquals("POST", request.method)
+            assertEquals(
+                "/api/v1/patient/singing-sessions/$SESSION_ID/confirm-upload/",
+                request.requestUrl?.encodedPath,
+            )
             assertNull(request.getHeader("Idempotency-Key"))
+            assertJson(
+                """{"asset_id":"66666666-6666-4666-8666-666666666666"}""",
+                request.body.readUtf8(),
+            )
         }
 
         enqueue("fixtures/session_mutation.json", status = 202)
         val submit: ApiEnvelope<SessionMutationDto> = api.submitSession(SESSION_ID, "submit-key")
         assertEquals("processing", submit.data.status.serializedValue)
         server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
             assertEquals("submit-key", request.getHeader("Idempotency-Key"))
-            assertEquals("/api/v1/patient/singing-sessions/$SESSION_ID/submit/", request.path)
+            assertEquals(
+                "/api/v1/patient/singing-sessions/$SESSION_ID/submit/",
+                request.requestUrl?.encodedPath,
+            )
+            assertEquals(0L, request.bodySize)
         }
 
         enqueue("fixtures/session.json")
         assertEquals(SESSION_ID, api.cancelSession(SESSION_ID).data.id)
         server.takeRequest().also { request ->
-            assertEquals("/api/v1/patient/singing-sessions/$SESSION_ID/cancel/", request.path)
+            assertEquals("POST", request.method)
+            assertEquals(
+                "/api/v1/patient/singing-sessions/$SESSION_ID/cancel/",
+                request.requestUrl?.encodedPath,
+            )
             assertNull(request.getHeader("Idempotency-Key"))
+            assertEquals(0L, request.bodySize)
         }
 
         enqueue("fixtures/session_mutation.json", status = 202)
         assertEquals(SESSION_ID, api.retrySession(SESSION_ID, "retry-key").data.sessionId)
         server.takeRequest().also { request ->
+            assertEquals("POST", request.method)
             assertEquals("retry-key", request.getHeader("Idempotency-Key"))
-            assertEquals("/api/v1/patient/singing-sessions/$SESSION_ID/retry/", request.path)
+            assertEquals(
+                "/api/v1/patient/singing-sessions/$SESSION_ID/retry/",
+                request.requestUrl?.encodedPath,
+            )
+            assertEquals(0L, request.bodySize)
         }
 
         enqueue("fixtures/private_url.json")
         val privateUrl: ApiEnvelope<PrivateUrlDto> = api.patientMediaPrivateUrl(ASSET_ID)
         assertEquals(Instant.parse("2026-08-27T12:00:00Z"), privateUrl.data.toDomain().expiresAt)
             server.takeRequest().also { request ->
-                assertEquals("/api/v1/patient/media/$ASSET_ID/private-url/", request.path)
+                assertEquals("POST", request.method)
+                assertEquals(
+                    "/api/v1/patient/media/$ASSET_ID/private-url/",
+                    request.requestUrl?.encodedPath,
+                )
                 assertNull(request.getHeader("Idempotency-Key"))
+                assertEquals(0L, request.bodySize)
             }
         }
     }
@@ -350,8 +481,7 @@ class ApiContractTest {
         val conflict = ApiErrorMapper.map(
             status = 409,
             envelope = envelope,
-            method = "POST",
-            pathTemplate = "/api/v1/patient/singing-sessions/{session_id}/submit/",
+            endpoint = ApiEndpoint.SESSION_SUBMIT,
         )
         assertTrue(conflict is ApiFailure.SingingConflict)
         assertEquals("演唱记录状态冲突，请刷新后重试", conflict.userMessage)
@@ -361,8 +491,8 @@ class ApiContractTest {
             fixture("fixtures/validation_error.json"),
         )
         assertTrue(
-            ApiErrorMapper.map(400, validationEnvelope, "POST", "/api/v1/patient/singing-sessions/")
-                is ApiFailure.Validation,
+            ApiErrorMapper.map(400, validationEnvelope, ApiEndpoint.SESSION_CREATE)
+                is ApiFailure.SongUnavailable,
         )
 
         val cases = listOf(
@@ -378,8 +508,7 @@ class ApiContractTest {
             val failure = ApiErrorMapper.map(
                 status,
                 ApiErrorEnvelope(code, "服务端原始文案", null, "request-$status"),
-                "GET",
-                "/api/v1/patient/me/",
+                ApiEndpoint.PATIENT_ME,
             )
             assertTrue("$status/$code 映射错误", expectedType.isInstance(failure))
             assertFalse(failure.userMessage.contains("服务端原始文案"))
@@ -401,8 +530,7 @@ class ApiContractTest {
         assertTrue(thrown is HttpException)
         val mapped = ApiErrorMapper.map(
             error = thrown as HttpException,
-            method = "POST",
-            pathTemplate = "/api/v1/auth/login/",
+            endpoint = ApiEndpoint.AUTH_LOGIN,
         )
         assertTrue(mapped is ApiFailure.SingingConflict)
 

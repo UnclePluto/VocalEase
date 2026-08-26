@@ -13,6 +13,7 @@ import com.vocaease.patient.core.network.dto.PrivateUrlDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.dto.SessionMutationDto
 import com.vocaease.patient.core.network.dto.SessionPageDto
+import com.vocaease.patient.core.network.dto.SessionStatus
 import com.vocaease.patient.core.network.dto.SessionUploadGrantDto
 import com.vocaease.patient.core.network.dto.SessionUploadGrantRequestDto
 import com.vocaease.patient.core.network.dto.SingingSessionDto
@@ -59,7 +60,7 @@ interface VocaEaseApi {
     suspend fun sessions(
         @Query("page") page: Int? = null,
         @Query("page_size") pageSize: Int? = null,
-        @Query("status") status: String? = null,
+        @Query("status") status: SessionStatus? = null,
         @Query("created_from") createdFrom: String? = null,
         @Query("created_to") createdTo: String? = null,
     ): ApiEnvelope<SessionPageDto>

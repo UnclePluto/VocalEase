@@ -1,0 +1,8 @@
+{
+  "code": "validation_error",
+  "message": "请求参数校验失败",
+  "data": {
+    "password": ["输入无效"]
+  },
+  "request_id": "validation-general-1"
+}

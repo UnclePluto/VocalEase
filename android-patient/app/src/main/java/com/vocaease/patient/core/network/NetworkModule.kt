@@ -23,26 +23,61 @@ import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.PUT
 
-class NetworkDiagnostic private constructor(
+enum class ApiEndpoint(
     val method: String,
     val pathTemplate: String,
+) {
+    AUTH_LOGIN("POST", "/api/v1/auth/login/"),
+    AUTH_REFRESH("POST", "/api/v1/auth/refresh/"),
+    AUTH_CHANGE_PASSWORD("POST", "/api/v1/auth/change-password/"),
+    AUTH_LOGOUT("POST", "/api/v1/auth/logout/"),
+    PATIENT_ME("GET", "/api/v1/patient/me/"),
+    SONG_LIST("GET", "/api/v1/patient/songs/"),
+    SONG_DETAIL("GET", "/api/v1/patient/songs/{song_id}/"),
+    SONG_PREVIEW("POST", "/api/v1/patient/songs/{song_id}/preview/"),
+    SESSION_LIST("GET", "/api/v1/patient/singing-sessions/"),
+    SESSION_CREATE("POST", "/api/v1/patient/singing-sessions/"),
+    SESSION_DETAIL("GET", "/api/v1/patient/singing-sessions/{session_id}/"),
+    SESSION_UPLOAD_GRANT("POST", "/api/v1/patient/singing-sessions/{session_id}/upload-grants/"),
+    PATIENT_MEDIA_UPLOAD_GRANT("POST", "/api/v1/patient/media/upload-grants/"),
+    SESSION_CONFIRM_UPLOAD("POST", "/api/v1/patient/singing-sessions/{session_id}/confirm-upload/"),
+    SESSION_SUBMIT("POST", "/api/v1/patient/singing-sessions/{session_id}/submit/"),
+    SESSION_CANCEL("POST", "/api/v1/patient/singing-sessions/{session_id}/cancel/"),
+    SESSION_RETRY("POST", "/api/v1/patient/singing-sessions/{session_id}/retry/"),
+    PATIENT_MEDIA_PRIVATE_URL("POST", "/api/v1/patient/media/{asset_id}/private-url/"),
+    UNKNOWN("UNKNOWN", "/unknown"),
+    ;
+
+    companion object {
+        internal fun from(method: String, pathTemplate: String): ApiEndpoint = entries.firstOrNull {
+            it.method == method && it.pathTemplate == pathTemplate
+        } ?: UNKNOWN
+    }
+}
+
+class NetworkDiagnostic private constructor(
+    val endpoint: ApiEndpoint,
     val status: Int?,
     val code: String,
     val requestId: String,
 ) {
+    val method: String
+        get() = endpoint.method
+
+    val pathTemplate: String
+        get() = endpoint.pathTemplate
+
     fun toLogLine(): String =
         "method=$method path=$pathTemplate status=${status ?: "-"} code=$code requestId=$requestId"
 
     companion object {
         fun safe(
-            method: String,
-            pathTemplate: String,
+            endpoint: ApiEndpoint,
             status: Int?,
             code: String,
             requestId: String,
         ): NetworkDiagnostic = NetworkDiagnostic(
-            method = method.sanitizeDiagnostic(defaultValue = "UNKNOWN", maxLength = 12),
-            pathTemplate = pathTemplate.sanitizeDiagnostic(defaultValue = "/unknown", maxLength = 180),
+            endpoint = endpoint,
             status = status,
             code = code.sanitizeDiagnostic(defaultValue = "unknown", maxLength = 64),
             requestId = requestId.sanitizeDiagnostic(defaultValue = "", maxLength = 64),
@@ -81,17 +116,16 @@ private class SafeNetworkDiagnosticInterceptor(
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val (method, template) = request.tag(Invocation::class.java)
+        val endpoint = request.tag(Invocation::class.java)
             ?.method()
-            ?.httpTemplate()
-            ?: (request.method to "/unknown")
+            ?.apiEndpoint()
+            ?: ApiEndpoint.UNKNOWN
         return try {
             chain.proceed(request).also { response ->
                 val envelope = response.safeDiagnosticEnvelope()
                 sink(
                     NetworkDiagnostic.safe(
-                        method = method,
-                        pathTemplate = template,
+                        endpoint = endpoint,
                         status = response.code,
                         code = envelope?.code.orEmpty(),
                         requestId = envelope?.requestId ?: response.header("X-Request-ID").orEmpty(),
@@ -101,8 +135,7 @@ private class SafeNetworkDiagnosticInterceptor(
         } catch (error: IOException) {
             sink(
                 NetworkDiagnostic.safe(
-                    method = method,
-                    pathTemplate = template,
+                    endpoint = endpoint,
                     status = null,
                     code = "network_error",
                     requestId = "",
@@ -125,7 +158,7 @@ private fun Response.safeDiagnosticEnvelope(): DiagnosticEnvelope? = runCatching
     apiJson.decodeFromString<DiagnosticEnvelope>(peekBody(MAX_DIAGNOSTIC_ENVELOPE_BYTES).string())
 }.getOrNull()
 
-private fun java.lang.reflect.Method.httpTemplate(): Pair<String, String>? {
+private fun java.lang.reflect.Method.apiEndpoint(): ApiEndpoint {
     annotations.forEach { annotation ->
         val result = when (annotation) {
             is GET -> "GET" to annotation.value
@@ -140,10 +173,10 @@ private fun java.lang.reflect.Method.httpTemplate(): Pair<String, String>? {
         }
         if (result != null) {
             val path = if (result.second.startsWith('/')) result.second else "/${result.second}"
-            return result.first to path.substringBefore('?')
+            return ApiEndpoint.from(result.first, path.substringBefore('?'))
         }
     }
-    return null
+    return ApiEndpoint.UNKNOWN
 }
 
 private fun String.sanitizeDiagnostic(defaultValue: String, maxLength: Int): String {

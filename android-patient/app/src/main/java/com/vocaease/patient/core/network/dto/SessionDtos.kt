@@ -24,21 +24,34 @@ enum class SessionStatus(val serializedValue: String) {
     @SerialName("completed") COMPLETED("completed"),
     @SerialName("failed") FAILED("failed"),
     @SerialName("cancelled") CANCELLED("cancelled"),
+    ;
+
+    override fun toString(): String = serializedValue
 }
 
 @Serializable
-enum class MediaType {
-    @SerialName("singing_audio") SINGING_AUDIO,
-    @SerialName("singing_video") SINGING_VIDEO,
+enum class MediaType(val serializedValue: String) {
+    @SerialName("singing_audio") SINGING_AUDIO("singing_audio"),
+    @SerialName("singing_video") SINGING_VIDEO("singing_video"),
+    ;
+
+    override fun toString(): String = serializedValue
 }
 
-@Serializable
-enum class AnalysisTaskType {
-    @SerialName("vocal_separation") VOCAL_SEPARATION,
-    @SerialName("accompaniment_generation") ACCOMPANIMENT_GENERATION,
-    @SerialName("lyrics_recognition") LYRICS_RECOGNITION,
-    @SerialName("singing_audio_metrics") SINGING_AUDIO_METRICS,
-    @SerialName("face_landmarks") FACE_LANDMARKS,
+enum class AnalysisTaskType(val serializedValue: String) {
+    VOCAL_SEPARATION("vocal_separation"),
+    ACCOMPANIMENT_GENERATION("accompaniment_generation"),
+    LYRICS_RECOGNITION("lyrics_recognition"),
+    SINGING_AUDIO_METRICS("singing_audio_metrics"),
+    FACE_LANDMARKS("face_landmarks"),
+    UNKNOWN("unknown"),
+    ;
+
+    companion object {
+        internal fun fromSerialized(value: String): AnalysisTaskType = entries.firstOrNull {
+            it != UNKNOWN && it.serializedValue == value
+        } ?: UNKNOWN
+    }
 }
 
 @Serializable
@@ -66,7 +79,7 @@ data class SessionUploadGrantRequestDto(
 @Serializable
 data class PatientMediaUploadGrantRequestDto(
     @SerialName("owner_id") val ownerId: String,
-    @SerialName("media_type") val mediaType: String,
+    @SerialName("media_type") val mediaType: MediaType,
     val mime: String,
     val size: Long,
 )
@@ -75,7 +88,17 @@ data class PatientMediaUploadGrantRequestDto(
 data class ConfirmSessionMediaRequestDto(
     @SerialName("asset_id") val assetId: String? = null,
     @SerialName("object_key") val objectKey: String? = null,
-)
+) {
+    init {
+        if (assetId == null && objectKey == null) {
+            throw NetworkContractException("confirm_upload 至少需要 asset_id 或 object_key")
+        }
+        assetId?.asUuid("confirm_upload.asset_id")
+        if (objectKey != null && (objectKey.isBlank() || objectKey.length > 255)) {
+            throw NetworkContractException("confirm_upload.object_key 长度无效")
+        }
+    }
+}
 
 @Serializable
 data class PatientSnapshotDto(
@@ -119,7 +142,7 @@ data class AnalysisTimeSeriesDto(
 @Serializable
 class SingingAnalysisResultDto(
     val id: String,
-    @SerialName("task_type") val taskType: AnalysisTaskType,
+    @SerialName("task_type") val taskType: String,
     val status: AnalysisTaskStatus,
     val generation: Int,
     @SerialName("protocol_version") val protocolVersion: String,
@@ -132,12 +155,16 @@ class SingingAnalysisResultDto(
 ) {
     internal fun toDomain(): SingingAnalysisResult = SingingAnalysisResult(
         id = id.asUuid("session.analysis_results.id"),
-        taskType = taskType,
+        taskType = AnalysisTaskType.fromSerialized(taskType),
         status = status,
         generation = generation,
-        protocolVersion = protocolVersion.requireNotBlank("session.analysis_results.protocol_version"),
+        protocolVersion = protocolVersion,
         isMock = isMock,
-        payload = payload.toTypedPayload(taskType),
+        payload = payload.toTypedPayload(
+            taskType = taskType,
+            protocolVersion = protocolVersion,
+            isMock = isMock,
+        ),
         timeSeries = timeSeries.mapValues { (metric, value) ->
             if (value.sampleIntervalMs <= 0) {
                 throw NetworkContractException("analysis.time_series.$metric.sample_interval_ms 必须大于 0")
@@ -264,6 +291,19 @@ data class SessionMedia(
 
 sealed interface AnalysisPayload
 
+enum class AnalysisPayloadIssue {
+    NON_MOCK,
+    UNKNOWN_TASK_TYPE,
+    UNSUPPORTED_PROTOCOL,
+    UNRECOGNIZED_STRUCTURE,
+}
+
+data class UnsupportedAnalysisPayload(
+    val issue: AnalysisPayloadIssue,
+) : AnalysisPayload
+
+data object UnavailableAnalysisPayload : AnalysisPayload
+
 data class SingingAudioAnalysisPayload(
     val protocolVersion: String,
     val isMock: Boolean,
@@ -290,7 +330,7 @@ data class SingingAnalysisResult(
     val generation: Int,
     val protocolVersion: String,
     val isMock: Boolean?,
-    val payload: AnalysisPayload?,
+    val payload: AnalysisPayload,
     val timeSeries: Map<String, AnalysisTimeSeries>,
     val errorCode: String,
     val errorSummary: String,
@@ -316,6 +356,37 @@ data class SingingSession(
     val media: List<SessionMedia>,
     val analysisTaskIds: List<UUID>,
     val analysisResults: List<SingingAnalysisResult>,
+)
+
+data class SingingSessionSummary(
+    val id: UUID,
+    val patient: PatientSnapshot,
+    val song: SongSnapshot,
+    val treatmentPlan: TreatmentPlanSnapshot,
+    val status: SessionStatus,
+    val score: Int?,
+    val burpCount: Int?,
+    val durationSeconds: Int?,
+    val isMock: Boolean,
+    val createdSource: String,
+    val analysisGeneration: Int,
+    val submittedAt: Instant?,
+    val completedAt: Instant?,
+    val createdAt: Instant,
+    val updatedAt: Instant,
+)
+
+data class SingingSessionPage(
+    val count: Int,
+    val page: Int,
+    val pageSize: Int,
+    val results: List<SingingSessionSummary>,
+)
+
+data class SessionMutation(
+    val sessionId: UUID,
+    val status: SessionStatus,
+    val analysisTaskIds: List<UUID>,
 )
 
 data class UploadGrant(
@@ -363,6 +434,42 @@ fun SingingSessionDto.toDomain(): SingingSession = SingingSession(
     analysisResults = analysisResults.map { it.toDomain() },
 )
 
+fun SessionSummaryDto.toDomain(): SingingSessionSummary = SingingSessionSummary(
+    id = id.asUuid("session_summary.id"),
+    patient = patient.toDomain(),
+    song = song.toDomain(),
+    treatmentPlan = treatmentPlan.toDomain(),
+    status = status,
+    score = score,
+    burpCount = burpCount,
+    durationSeconds = durationSeconds,
+    isMock = isMock,
+    createdSource = createdSource,
+    analysisGeneration = analysisGeneration,
+    submittedAt = submittedAt?.asInstant("session_summary.submitted_at"),
+    completedAt = completedAt?.asInstant("session_summary.completed_at"),
+    createdAt = createdAt.asInstant("session_summary.created_at"),
+    updatedAt = updatedAt.asInstant("session_summary.updated_at"),
+)
+
+fun SessionPageDto.toDomain(): SingingSessionPage {
+    if (count < 0 || page <= 0 || pageSize <= 0) {
+        throw NetworkContractException("session_page 分页边界无效")
+    }
+    return SingingSessionPage(
+        count = count,
+        page = page,
+        pageSize = pageSize,
+        results = results.map { it.toDomain() },
+    )
+}
+
+fun SessionMutationDto.toDomain(): SessionMutation = SessionMutation(
+    sessionId = sessionId.asUuid("session_mutation.session_id"),
+    status = status,
+    analysisTaskIds = analysisTaskIds.map { it.asUuid("session_mutation.analysis_task_ids") },
+)
+
 fun SessionUploadGrantDto.toDomain(): UploadGrant = UploadGrant(
     sessionId = sessionId.asUuid("grant.session_id"),
     assetId = assetId.asUuid("grant.asset_id"),
@@ -408,12 +515,27 @@ private fun TreatmentPlanSnapshotDto.toDomain() = TreatmentPlanSnapshot(
     targetSessionCount = targetSessionCount,
 )
 
-private fun JsonObject?.toTypedPayload(taskType: AnalysisTaskType): AnalysisPayload? {
-    if (this == null) return null
-    return when (taskType) {
-        AnalysisTaskType.SINGING_AUDIO_METRICS -> toSingingAudioPayload()
-        AnalysisTaskType.FACE_LANDMARKS -> toFaceLandmarksPayload()
-        else -> throw NetworkContractException("session.analysis_results.payload 与任务类型不匹配")
+private fun JsonObject?.toTypedPayload(
+    taskType: String,
+    protocolVersion: String,
+    isMock: Boolean?,
+): AnalysisPayload {
+    if (this == null) return UnavailableAnalysisPayload
+    if (isMock != true) return UnsupportedAnalysisPayload(AnalysisPayloadIssue.NON_MOCK)
+    if (AnalysisTaskType.fromSerialized(taskType) == AnalysisTaskType.UNKNOWN) {
+        return UnsupportedAnalysisPayload(AnalysisPayloadIssue.UNKNOWN_TASK_TYPE)
+    }
+    if (protocolVersion != SUPPORTED_ANALYSIS_PROTOCOL) {
+        return UnsupportedAnalysisPayload(AnalysisPayloadIssue.UNSUPPORTED_PROTOCOL)
+    }
+    return try {
+        when (AnalysisTaskType.fromSerialized(taskType)) {
+            AnalysisTaskType.SINGING_AUDIO_METRICS -> toSingingAudioPayload()
+            AnalysisTaskType.FACE_LANDMARKS -> toFaceLandmarksPayload()
+            else -> UnsupportedAnalysisPayload(AnalysisPayloadIssue.UNRECOGNIZED_STRUCTURE)
+        }
+    } catch (_: RuntimeException) {
+        UnsupportedAnalysisPayload(AnalysisPayloadIssue.UNRECOGNIZED_STRUCTURE)
     }
 }
 
@@ -486,3 +608,5 @@ private fun JsonObject.array(name: String): JsonArray = try {
 } catch (error: IllegalArgumentException) {
     throw NetworkContractException("analysis.payload.$name 必须为数组", error)
 }
+
+private const val SUPPORTED_ANALYSIS_PROTOCOL = "1.0"
