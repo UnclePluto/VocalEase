@@ -1,3 +1,5 @@
+import com.vocaease.build.ValidateReleaseApiBaseUrlTask
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -8,9 +10,10 @@ plugins {
 
 fun String.asBuildConfigString(): String = "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
-val releaseApiBaseUrl = providers.gradleProperty("vocaeaseApiBaseUrl")
+val releaseApiBaseUrlProvider = providers.gradleProperty("vocaeaseApiBaseUrl")
     .orElse(providers.environmentVariable("VOCAEASE_API_BASE_URL"))
-    .orNull
+    .orElse("")
+val releaseApiBaseUrl = releaseApiBaseUrlProvider.get()
 
 android {
     namespace = "com.vocaease.patient"
@@ -36,7 +39,7 @@ android {
             buildConfigField(
                 "String",
                 "API_BASE_URL",
-                (releaseApiBaseUrl ?: "https://invalid.invalid/").asBuildConfigString(),
+                releaseApiBaseUrl.asBuildConfigString(),
             )
         }
     }
@@ -56,12 +59,10 @@ android {
     }
 }
 
-val validateReleaseApiBaseUrl = tasks.register<Exec>("validateReleaseApiBaseUrl") {
+val validateReleaseApiBaseUrl = tasks.register<ValidateReleaseApiBaseUrlTask>("validateReleaseApiBaseUrl") {
     group = "verification"
     description = "校验 release API 地址"
-    inputs.property("releaseApiBaseUrl", releaseApiBaseUrl ?: "")
-    environment("VOCAEASE_RELEASE_API_BASE_URL", releaseApiBaseUrl ?: "")
-    commandLine(rootProject.file("scripts/validate_release_url.sh"))
+    apiBaseUrl.set(releaseApiBaseUrlProvider)
 }
 
 androidComponents {
