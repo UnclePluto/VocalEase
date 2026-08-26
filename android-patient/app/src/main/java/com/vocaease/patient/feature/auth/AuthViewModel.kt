@@ -32,14 +32,24 @@ class AuthViewModel(
     }
 
     fun login(loginId: String, password: String) {
-        viewModelScope.launch { repository.login(loginId, password) }
+        launchOperation { repository.login(loginId, password) }
     }
 
     fun changePassword(oldPassword: String, newPassword: String) {
-        viewModelScope.launch { repository.changePassword(oldPassword, newPassword) }
+        launchOperation { repository.changePassword(oldPassword, newPassword) }
     }
 
     fun dismissError() = repository.dismissError()
+
+    private fun launchOperation(operation: suspend () -> Unit) {
+        viewModelScope.launch {
+            try {
+                operation()
+            } finally {
+                repository.finishOperation()
+            }
+        }
+    }
 
     companion object {
         fun factory(repository: AuthRepository): ViewModelProvider.Factory =

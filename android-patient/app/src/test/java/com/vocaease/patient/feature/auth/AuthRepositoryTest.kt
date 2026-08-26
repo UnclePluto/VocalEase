@@ -9,17 +9,23 @@ import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshResult
-import com.vocaease.patient.core.security.AccessTokenSnapshot
+import com.vocaease.patient.core.security.RefreshTokenLease
+import com.vocaease.patient.core.security.SessionMutation
+import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -49,7 +55,7 @@ class AuthRepositoryTest {
         repository.restoreSession()
 
         assertEquals(AuthState.Authenticated, repository.state.value)
-        assertEquals("new-access", vault.accessSnapshot().value)
+        assertEquals("new-access", vault.sessionSnapshot().accessToken)
         assertEquals(1, remote.refreshCalls.get())
         assertEquals(RefreshRequestDto(ClientKind.ANDROID, "stored-refresh"), remote.lastRefresh)
     }
@@ -64,8 +70,8 @@ class AuthRepositoryTest {
         repository.restoreSession()
 
         assertEquals(AuthState.LoggedOut, repository.state.value)
-        assertNull(vault.accessSnapshot().value)
-        assertNull(vault.readRefreshToken())
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(vault.refreshValue())
         assertEquals(AuthEvent.SessionExpired, event.await())
     }
 
@@ -114,8 +120,8 @@ class AuthRepositoryTest {
             remote.lastChangePassword,
         )
         assertEquals(LogoutRequestDto(ClientKind.ANDROID, "refresh"), remote.lastLogout)
-        assertNull(vault.accessSnapshot().value)
-        assertNull(vault.readRefreshToken())
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(vault.refreshValue())
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertEquals(AuthEvent.PasswordChanged, event.await())
     }
@@ -129,7 +135,7 @@ class AuthRepositoryTest {
             refreshGate = gate,
         )
         val coordinator = RefreshCoordinator(vault, remote)
-        val failedGeneration = vault.accessSnapshot().generation
+        val failedGeneration = vault.sessionSnapshot().epoch
 
         val requests = List(20) {
             async(Dispatchers.Default) {
@@ -143,14 +149,47 @@ class AuthRepositoryTest {
         assertEquals(1, remote.refreshCalls.get())
         assertTrue(results.all { it is RefreshResult.Success })
         assertTrue(results.all { (it as RefreshResult.Success).accessToken == "new-access" })
-        assertEquals("rotated-refresh", vault.readRefreshToken())
+        assertEquals("rotated-refresh", vault.refreshValue())
+    }
+
+    @Test
+    fun `同一代二十个刷新失败只清除并广播一次`() = runBlocking {
+        val vault = FakeTokenVault(accessToken = "expired", refreshToken = "stored-refresh")
+        val gate = CompletableDeferred<Unit>()
+        val remote = FakeAuthRemote(
+            refreshFailure = java.io.IOException("offline"),
+            refreshGate = gate,
+        )
+        val coordinator = RefreshCoordinator(vault, remote)
+        val eventCount = AtomicInteger()
+        val eventCollector = launch(start = CoroutineStart.UNDISPATCHED) {
+            coordinator.events.collect { eventCount.incrementAndGet() }
+        }
+        val failedEpoch = vault.sessionSnapshot().epoch
+
+        val requests = List(20) {
+            async(Dispatchers.Default) {
+                coordinator.refreshAfterUnauthorized(failedEpoch)
+            }
+        }
+        while (remote.refreshCalls.get() == 0) delay(1)
+        gate.complete(Unit)
+        val results = requests.awaitAll()
+        yield()
+
+        assertEquals(1, remote.refreshCalls.get())
+        assertTrue(results.all { it is RefreshResult.Failed })
+        assertEquals(1, vault.clearCalls.get())
+        assertEquals(failedEpoch + 1, vault.sessionSnapshot().epoch)
+        assertEquals(1, eventCount.get())
+        eventCollector.cancel()
     }
 
     @Test
     fun `旧代请求收到 401 时复用已更新 token 不二次刷新`() = runBlocking {
         val vault = FakeTokenVault(accessToken = "old", refreshToken = "refresh")
-        val failedGeneration = vault.accessSnapshot().generation
-        vault.replaceTokens("already-new", "rotated")
+        val failedGeneration = vault.sessionSnapshot().epoch
+        vault.replaceTokens(failedGeneration, "already-new", "rotated")
         val remote = FakeAuthRemote()
         val coordinator = RefreshCoordinator(vault, remote)
 
@@ -167,10 +206,10 @@ class AuthRepositoryTest {
         val coordinator = RefreshCoordinator(vault, remote)
         var requestCalls = 0
 
-        val result = coordinator.executeAuthenticated { token ->
+        val result = coordinator.executeAuthenticated {
             requestCalls += 1
             if (requestCalls == 1) throw unauthorized()
-            token
+            requireNotNull(vault.sessionSnapshot().accessToken)
         }
 
         assertEquals("new-access", result)
@@ -205,11 +244,51 @@ class AuthRepositoryTest {
         val coordinator = RefreshCoordinator(vault, remote)
 
         assertThrows(java.util.concurrent.CancellationException::class.java) {
-            runBlocking { coordinator.refreshAfterUnauthorized(vault.accessSnapshot().generation) }
+            runBlocking { coordinator.refreshAfterUnauthorized(vault.sessionSnapshot().epoch) }
         }
 
-        assertEquals("expired", vault.accessSnapshot().value)
-        assertEquals("stored-refresh", runBlocking { vault.readRefreshToken() })
+        assertEquals("expired", vault.sessionSnapshot().accessToken)
+        assertEquals("stored-refresh", runBlocking { vault.refreshValue() })
+    }
+
+    @Test
+    fun `登录持久化已提交后收到取消仍清除本次凭据并传播取消`() {
+        val vault = FakeTokenVault(
+            replaceFailureAfterApply = java.util.concurrent.CancellationException("cancel after commit"),
+        )
+        val repository = repository(
+            vault,
+            FakeAuthRemote(loginResult = session(access = "must-not-survive", refresh = "must-not-survive")),
+        )
+
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            runBlocking { repository.login("patient-001", "password") }
+        }
+
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(runBlocking { vault.refreshValue() })
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertEquals(AuthOperationState.Idle, repository.operation.value)
+    }
+
+    @Test
+    fun `刷新持久化已提交后收到取消仍清除本次凭据并传播取消`() {
+        val vault = FakeTokenVault(
+            accessToken = "expired",
+            refreshToken = "stored-refresh",
+            replaceFailureAfterApply = java.util.concurrent.CancellationException("cancel after commit"),
+        )
+        val coordinator = RefreshCoordinator(
+            vault,
+            FakeAuthRemote(refreshResult = session(access = "must-not-survive", refresh = "must-not-survive")),
+        )
+
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            runBlocking { coordinator.refreshAfterUnauthorized(vault.sessionSnapshot().epoch) }
+        }
+
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(runBlocking { vault.refreshValue() })
     }
 
     @Test
@@ -224,11 +303,11 @@ class AuthRepositoryTest {
             FakeAuthRemote(refreshResult = session(access = "new-access", refresh = "new-refresh")),
         )
 
-        val result = coordinator.refreshAfterUnauthorized(vault.accessSnapshot().generation)
+        val result = coordinator.refreshAfterUnauthorized(vault.sessionSnapshot().epoch)
 
         assertTrue(result is RefreshResult.Failed)
-        assertNull(vault.accessSnapshot().value)
-        assertNull(vault.readRefreshToken())
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(vault.refreshValue())
     }
 
     @Test
@@ -240,11 +319,11 @@ class AuthRepositoryTest {
         )
 
         assertThrows(IllegalStateException::class.java) {
-            runBlocking { coordinator.refreshAfterUnauthorized(vault.accessSnapshot().generation) }
+            runBlocking { coordinator.refreshAfterUnauthorized(vault.sessionSnapshot().epoch) }
         }
 
-        assertEquals("expired", vault.accessSnapshot().value)
-        assertEquals("stored-refresh", runBlocking { vault.readRefreshToken() })
+        assertEquals("expired", vault.sessionSnapshot().accessToken)
+        assertEquals("stored-refresh", runBlocking { vault.refreshValue() })
     }
 
     @Test
@@ -256,7 +335,7 @@ class AuthRepositoryTest {
         repository.restoreSession()
         val event = async { repository.events.first() }
 
-        coordinator.refreshAfterUnauthorized(vault.accessSnapshot().generation)
+        coordinator.refreshAfterUnauthorized(vault.sessionSnapshot().epoch)
 
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertEquals(AuthEvent.SessionExpired, event.await())
@@ -276,28 +355,46 @@ private class FakeTokenVault(
     accessToken: String? = null,
     refreshToken: String? = null,
     private val replaceFailure: Throwable? = null,
+    private val replaceFailureAfterApply: Throwable? = null,
 ) : TokenVault {
-    private var access = AccessTokenSnapshot(accessToken, if (accessToken == null) 0 else 1)
+    private var access = SessionSnapshot(accessToken, if (accessToken == null) 0 else 1)
     private var refresh = refreshToken
+    val clearCalls = AtomicInteger()
 
-    override fun accessSnapshot(): AccessTokenSnapshot = synchronized(this) { access }
+    override fun sessionSnapshot(): SessionSnapshot = synchronized(this) { access }
 
-    override suspend fun readRefreshToken(): String? = synchronized(this) { refresh }
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = synchronized(this) {
+        if (access.epoch == expectedEpoch) refresh?.let { RefreshTokenLease(it, expectedEpoch) } else null
+    }
 
-    override suspend fun replaceTokens(accessToken: String, refreshToken: String) {
+    override suspend fun replaceTokens(
+        expectedEpoch: Long,
+        accessToken: String,
+        refreshToken: String,
+    ): SessionMutation {
         replaceFailure?.let { throw it }
-        synchronized(this) {
+        val mutation = synchronized(this) {
+            if (access.epoch != expectedEpoch) return@synchronized SessionMutation(false, access)
             refresh = refreshToken
-            access = AccessTokenSnapshot(accessToken, access.generation + 1)
+            access = SessionSnapshot(accessToken, access.epoch + 1)
+            SessionMutation(true, access)
+        }
+        if (mutation.applied) replaceFailureAfterApply?.let { throw it }
+        return mutation
+    }
+
+    override suspend fun clear(expectedEpoch: Long?): SessionMutation = synchronized(this) {
+        clearCalls.incrementAndGet()
+        if (expectedEpoch != null && access.epoch != expectedEpoch) {
+            SessionMutation(false, access)
+        } else {
+            refresh = null
+            access = SessionSnapshot(null, access.epoch + 1)
+            SessionMutation(true, access)
         }
     }
 
-    override suspend fun clear() {
-        synchronized(this) {
-            refresh = null
-            access = AccessTokenSnapshot(null, access.generation + 1)
-        }
-    }
+    suspend fun refreshValue(): String? = readRefreshToken(sessionSnapshot().epoch)?.value
 }
 
 private class FakeAuthRemote(

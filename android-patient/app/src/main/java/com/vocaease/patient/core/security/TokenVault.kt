@@ -1,20 +1,32 @@
 package com.vocaease.patient.core.security
 
-data class AccessTokenSnapshot(
-    val value: String?,
-    val generation: Long,
+data class SessionSnapshot(
+    val accessToken: String?,
+    val epoch: Long,
 )
 
-/**
- * Access token 只允许由实现保存在进程内存；持久化边界只包含 refresh token。
- */
+data class RefreshTokenLease(
+    val value: String,
+    val epoch: Long,
+)
+
+data class SessionMutation(
+    val applied: Boolean,
+    val snapshot: SessionSnapshot,
+)
+
+/** refresh 明文只作为短生命周期 lease 返回，永不进入 SessionSnapshot。 */
 interface TokenVault {
-    fun accessSnapshot(): AccessTokenSnapshot
+    fun sessionSnapshot(): SessionSnapshot
 
-    suspend fun readRefreshToken(): String?
+    suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease?
 
-    /** 持久化 refresh 成功后才可发布新的 access，避免半更新会话。 */
-    suspend fun replaceTokens(accessToken: String, refreshToken: String)
+    suspend fun replaceTokens(
+        expectedEpoch: Long,
+        accessToken: String,
+        refreshToken: String,
+    ): SessionMutation
 
-    suspend fun clear()
+    /** expectedEpoch=null 表示无条件使当前 epoch 失效。 */
+    suspend fun clear(expectedEpoch: Long? = null): SessionMutation
 }

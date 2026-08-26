@@ -10,7 +10,6 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.security.KeyStore
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -18,49 +17,84 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+interface VaultFileStore {
+    fun exists(): Boolean
+    fun readFully(): ByteArray
+    fun writeAtomically(payload: ByteArray)
+    fun delete()
+}
 
 class AndroidTokenVault(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val fileStore: VaultFileStore = AtomicVaultFileStore(context.applicationContext),
 ) : TokenVault {
-    private val applicationContext = context.applicationContext
-    private val encryptedFile = AtomicFile(applicationContext.getFileStreamPath(FILE_NAME))
-    private val access = AtomicReference<String?>(null)
-    private val generation = AtomicLong(0)
+    private val session = AtomicReference(SessionSnapshot(accessToken = null, epoch = 0))
+    private val storageMutex = Mutex()
 
-    override fun accessSnapshot(): AccessTokenSnapshot = AccessTokenSnapshot(
-        value = access.get(),
-        generation = generation.get(),
-    )
+    override fun sessionSnapshot(): SessionSnapshot = session.get()
 
-    override suspend fun readRefreshToken(): String? = withContext(ioDispatcher) {
-        if (!encryptedFile.baseFile.exists()) return@withContext null
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = serialized {
+        val current = session.get()
+        if (current.epoch != expectedEpoch || !fileStore.exists()) return@serialized null
         try {
-            decrypt(encryptedFile.readFully()).also { token ->
-                require(token.isNotBlank()) { "refresh token 为空" }
-            }
-        } catch (error: Exception) {
-            invalidateLocalSession()
+            val token = decrypt(fileStore.readFully())
+            require(token.isNotBlank()) { "refresh token 为空" }
+            RefreshTokenLease(token, current.epoch)
+        } catch (_: Exception) {
+            invalidateLocked(current)
             null
         }
     }
 
-    override suspend fun replaceTokens(accessToken: String, refreshToken: String) {
+    override suspend fun replaceTokens(
+        expectedEpoch: Long,
+        accessToken: String,
+        refreshToken: String,
+    ): SessionMutation {
         require(accessToken.isNotBlank()) { "access token 不能为空" }
         require(refreshToken.isNotBlank()) { "refresh token 不能为空" }
-        withContext(ioDispatcher) {
-            val encrypted = encrypt(refreshToken)
-            writeAtomically(encrypted)
-            access.set(accessToken)
-            generation.incrementAndGet()
+        return serialized {
+            val current = session.get()
+            if (current.epoch != expectedEpoch) {
+                return@serialized SessionMutation(applied = false, current)
+            }
+            try {
+                fileStore.writeAtomically(encrypt(refreshToken))
+                val updated = SessionSnapshot(accessToken, current.epoch + 1)
+                session.set(updated)
+                SessionMutation(applied = true, updated)
+            } catch (error: Exception) {
+                invalidateLocked(current)
+                throw error
+            }
         }
     }
 
-    override suspend fun clear() {
-        withContext(ioDispatcher) {
-            invalidateLocalSession()
+    override suspend fun clear(expectedEpoch: Long?): SessionMutation = serialized {
+        val current = session.get()
+        if (expectedEpoch != null && current.epoch != expectedEpoch) {
+            return@serialized SessionMutation(applied = false, current)
         }
+        val cleared = SessionSnapshot(accessToken = null, epoch = current.epoch + 1)
+        session.set(cleared)
+        fileStore.delete()
+        SessionMutation(applied = true, cleared)
+    }
+
+    private suspend fun <T> serialized(block: () -> T): T =
+        withContext(ioDispatcher + NonCancellable) {
+            storageMutex.withLock { block() }
+        }
+
+    private fun invalidateLocked(current: SessionSnapshot) {
+        session.set(SessionSnapshot(accessToken = null, epoch = current.epoch + 1))
+        runCatching { fileStore.delete() }
     }
 
     private fun encrypt(refreshToken: String): ByteArray {
@@ -113,25 +147,6 @@ class AndroidTokenVault(
         }
     }
 
-    private fun writeAtomically(payload: ByteArray) {
-        val output = encryptedFile.startWrite()
-        try {
-            output.write(payload)
-            output.fd.sync()
-            encryptedFile.finishWrite(output)
-            Os.chmod(encryptedFile.baseFile.absolutePath, PRIVATE_FILE_MODE)
-        } catch (error: Exception) {
-            encryptedFile.failWrite(output)
-            throw error
-        }
-    }
-
-    private fun invalidateLocalSession() {
-        encryptedFile.delete()
-        access.set(null)
-        generation.incrementAndGet()
-    }
-
     companion object {
         const val KEY_ALIAS = "vocaease.refresh.v1"
         const val FILE_NAME = "vocaease-refresh-token.vault"
@@ -145,6 +160,35 @@ class AndroidTokenVault(
         private const val MAX_IV_BYTES = 32
         private const val MIN_CIPHERTEXT_BYTES = 17
         private const val MAX_CIPHERTEXT_BYTES = 64 * 1024
-        private const val PRIVATE_FILE_MODE = 384 // 0600
+    }
+}
+
+private class AtomicVaultFileStore(context: Context) : VaultFileStore {
+    private val atomicFile = AtomicFile(context.getFileStreamPath(AndroidTokenVault.FILE_NAME))
+
+    override fun exists(): Boolean = atomicFile.baseFile.exists()
+    override fun readFully(): ByteArray = atomicFile.readFully()
+
+    override fun writeAtomically(payload: ByteArray) {
+        val output = atomicFile.startWrite()
+        var finished = false
+        try {
+            output.write(payload)
+            output.fd.sync()
+            atomicFile.finishWrite(output)
+            finished = true
+            Os.chmod(atomicFile.baseFile.absolutePath, PRIVATE_FILE_MODE)
+        } catch (error: Exception) {
+            if (finished) atomicFile.delete() else atomicFile.failWrite(output)
+            throw error
+        }
+    }
+
+    override fun delete() {
+        atomicFile.delete()
+    }
+
+    private companion object {
+        const val PRIVATE_FILE_MODE = 384 // 0600
     }
 }

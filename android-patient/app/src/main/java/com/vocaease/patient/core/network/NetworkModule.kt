@@ -9,6 +9,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Interceptor
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -87,7 +88,7 @@ class NetworkDiagnostic private constructor(
 }
 
 object NetworkModule {
-    fun createApi(
+    internal fun createApi(
         baseUrl: String = BuildConfig.API_BASE_URL,
         client: OkHttpClient = createHttpClient(),
     ): VocaEaseApi = Retrofit.Builder()
@@ -103,14 +104,22 @@ object NetworkModule {
         .addInterceptor(SafeNetworkDiagnosticInterceptor(diagnosticSink))
         .build()
 
-    fun createAuthenticatedHttpClient(
+    internal fun createAuthenticatedHttpClient(
         tokenVault: TokenVault,
         diagnosticSink: (NetworkDiagnostic) -> Unit = DefaultDiagnosticSink::accept,
     ): OkHttpClient = OkHttpClient.Builder()
+        .dispatcher(
+            Dispatcher().apply {
+                maxRequests = MAX_AUTHENTICATED_REQUESTS
+                maxRequestsPerHost = MAX_AUTHENTICATED_REQUESTS
+            },
+        )
         .addInterceptor(AuthInterceptor(tokenVault))
         .addInterceptor(SafeNetworkDiagnosticInterceptor(diagnosticSink))
         .build()
 }
+
+private const val MAX_AUTHENTICATED_REQUESTS = 64
 
 private object DefaultDiagnosticSink {
     private val logger = Logger.getLogger("VocaEaseNetwork")

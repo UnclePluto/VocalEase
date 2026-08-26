@@ -14,10 +14,11 @@ class AuthInterceptor(
         if (request.url.encodedPath in UNAUTHENTICATED_PATHS) {
             return chain.proceed(request.newBuilder().removeHeader("Authorization").build())
         }
-        val snapshot = tokenVault.accessSnapshot()
+        val snapshot = tokenVault.sessionSnapshot()
         val builder = request.newBuilder()
-            .tag(AuthRequestGeneration::class.java, AuthRequestGeneration(snapshot.generation))
-        snapshot.value?.let { token ->
+            .removeHeader("Authorization")
+            .tag(AuthRequestGeneration::class.java, AuthRequestGeneration(snapshot.epoch))
+        snapshot.accessToken?.let { token ->
             builder.header("Authorization", "Bearer $token")
         }
         return chain.proceed(builder.build())

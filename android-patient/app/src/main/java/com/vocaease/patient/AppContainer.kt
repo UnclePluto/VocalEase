@@ -2,13 +2,14 @@ package com.vocaease.patient
 
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
-import com.vocaease.patient.core.network.NetworkModule
-import com.vocaease.patient.core.network.RefreshCoordinator
+import com.vocaease.patient.BuildConfig
+import com.vocaease.patient.core.network.PatientApi
+import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
 import com.vocaease.patient.feature.auth.AuthRepository
-import com.vocaease.patient.feature.auth.VocaEaseAuthRemoteDataSource
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharedFlow
 
 fun interface AppClock {
     fun nowEpochMilliseconds(): Long
@@ -38,7 +39,8 @@ interface AppContainer {
     val mediaFactory: MediaFactory
     val uploadFactory: UploadFactory
     val authRepository: AuthRepository
-    val refreshCoordinator: RefreshCoordinator
+    val patientApi: PatientApi
+    val sessionEvents: SharedFlow<SessionLifecycleEvent>
 
     companion object {
         fun unavailable(): AppContainer = UnavailableAppContainer
@@ -47,12 +49,11 @@ interface AppContainer {
 
 class AndroidAppContainer(context: Context) : AppContainer {
     private val tokenVault = AndroidTokenVault(context)
-    private val httpClient = NetworkModule.createAuthenticatedHttpClient(tokenVault)
-    private val api = NetworkModule.createApi(client = httpClient)
-    private val authRemote = VocaEaseAuthRemoteDataSource(api)
-    override val refreshCoordinator = RefreshCoordinator(tokenVault, authRemote)
+    private val sessionGraph = createProductionSessionGraph(BuildConfig.API_BASE_URL, tokenVault)
 
-    override val authRepository = AuthRepository(tokenVault, authRemote, refreshCoordinator)
+    override val authRepository = sessionGraph.authRepository
+    override val patientApi = sessionGraph.patientApi
+    override val sessionEvents = sessionGraph.sessionEvents
     override val clock = AppClock(System::currentTimeMillis)
     override val dispatchers = object : AppDispatchers {
         override val io: CoroutineDispatcher = Dispatchers.IO
@@ -84,6 +85,8 @@ private object UnavailableAppContainer : AppContainer {
         get() = unavailable()
     override val authRepository: AuthRepository
         get() = unavailable()
-    override val refreshCoordinator: RefreshCoordinator
+    override val patientApi: PatientApi
+        get() = unavailable()
+    override val sessionEvents: SharedFlow<SessionLifecycleEvent>
         get() = unavailable()
 }

@@ -4,17 +4,21 @@ import android.system.ErrnoException
 import com.vocaease.patient.core.network.dto.AuthSession
 import com.vocaease.patient.core.network.dto.ClientKind
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
+import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.TokenVault
 import java.io.IOException
 import java.security.GeneralSecurityException
+import java.security.ProviderException
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 
@@ -25,7 +29,7 @@ sealed interface SessionLifecycleEvent {
 sealed interface RefreshResult {
     data class Success(
         val accessToken: String,
-        val generation: Long,
+        val epoch: Long,
         val session: AuthSession?,
     ) : RefreshResult
 
@@ -42,8 +46,10 @@ class RefreshCoordinator(
     private val tokenVault: TokenVault,
     private val remote: RefreshRemoteDataSource,
 ) {
+    private data class EpochOutcome(val sourceEpoch: Long, val result: RefreshResult)
+
     private val mutex = Mutex()
-    private val latestSuccess = AtomicReference<RefreshResult.Success?>(null)
+    private val latestOutcome = AtomicReference<EpochOutcome?>(null)
     private val mutableEvents = MutableSharedFlow<SessionLifecycleEvent>(extraBufferCapacity = 1)
     private val sessionExpiredListeners = CopyOnWriteArrayList<() -> Unit>()
 
@@ -53,63 +59,107 @@ class RefreshCoordinator(
         sessionExpiredListeners += listener
     }
 
-    suspend fun refreshAfterUnauthorized(failedGeneration: Long): RefreshResult = mutex.withLock {
-        val current = tokenVault.accessSnapshot()
-        if (current.generation != failedGeneration && current.value != null) {
-            return@withLock latestSuccess.get()
-                ?.takeIf { it.generation == current.generation }
-                ?: RefreshResult.Success(current.value, current.generation, session = null)
+    suspend fun refreshAfterUnauthorized(failedEpoch: Long): RefreshResult = mutex.withLock {
+        latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let { return@withLock it.result }
+
+        val current = tokenVault.sessionSnapshot()
+        if (current.epoch != failedEpoch) {
+            val result = current.accessToken?.let {
+                RefreshResult.Success(it, current.epoch, session = null)
+            } ?: RefreshResult.Failed(cause = null)
+            latestOutcome.set(EpochOutcome(failedEpoch, result))
+            return@withLock result
         }
 
-        val storedRefresh = tokenVault.readRefreshToken()
-            ?: return@withLock expireSession(cause = null)
-        try {
-            val session = remote.refresh(
+        val refreshLease = tokenVault.readRefreshToken(failedEpoch)
+            ?: return@withLock expireEpoch(failedEpoch, cause = null)
+        val session = try {
+            remote.refresh(
                 RefreshRequestDto(
                     clientKind = ClientKind.ANDROID,
-                    refresh = storedRefresh,
+                    refresh = refreshLease.value,
                 ),
             )
-            val rotatedRefresh = session.refresh ?: storedRefresh
-            tokenVault.replaceTokens(session.access, rotatedRefresh)
-            val updated = tokenVault.accessSnapshot()
-            RefreshResult.Success(
-                accessToken = requireNotNull(updated.value),
-                generation = updated.generation,
-                session = session,
-            ).also(latestSuccess::set)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            if (error.isExpectedRefreshFailure()) expireSession(error) else throw error
+            if (error.isExpectedRefreshFailure()) return@withLock expireEpoch(failedEpoch, error)
+            throw error
         }
+
+        val mutation = try {
+            tokenVault.replaceTokens(
+                expectedEpoch = failedEpoch,
+                accessToken = session.access,
+                refreshToken = session.refresh ?: refreshLease.value,
+            )
+        } catch (error: CancellationException) {
+            clearRefreshAttempt(failedEpoch)
+            throw error
+        } catch (error: Throwable) {
+            if (error.isExpectedRefreshFailure()) return@withLock expireEpoch(failedEpoch, error)
+            throw error
+        }
+
+        val result = if (mutation.applied) {
+            RefreshResult.Success(
+                accessToken = requireNotNull(mutation.snapshot.accessToken),
+                epoch = mutation.snapshot.epoch,
+                session = session,
+            )
+        } else {
+            mutation.snapshot.accessToken?.let {
+                RefreshResult.Success(it, mutation.snapshot.epoch, session = null)
+            } ?: RefreshResult.Failed(cause = null)
+        }
+        latestOutcome.set(EpochOutcome(failedEpoch, result))
+        result
     }
 
-    /** 每个原请求最多因 401 刷新并重试一次；第二个 401 原样返回。 */
-    suspend fun <T> executeAuthenticated(
-        request: suspend (accessToken: String) -> T,
-    ): T {
-        val original = tokenVault.accessSnapshot()
-        val access = original.value ?: throw SessionExpiredException()
+    /** 每个原请求最多因 401 刷新并重试一次；第二个 401 原样传播。 */
+    suspend fun <T> executeAuthenticated(request: suspend () -> T): T {
+        val original = tokenVault.sessionSnapshot()
+        if (original.accessToken == null) throw SessionExpiredException()
         return try {
-            request(access)
+            request()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             if (!error.isUnauthorized()) throw error
-            when (val refreshed = refreshAfterUnauthorized(original.generation)) {
-                is RefreshResult.Success -> request(refreshed.accessToken)
+            when (val refreshed = refreshAfterUnauthorized(original.epoch)) {
+                is RefreshResult.Success -> request()
                 is RefreshResult.Failed -> throw SessionExpiredException(refreshed.cause)
             }
         }
     }
 
-    private suspend fun expireSession(cause: Throwable?): RefreshResult.Failed {
-        tokenVault.clear()
-        latestSuccess.set(null)
-        mutableEvents.emit(SessionLifecycleEvent.SessionExpired)
-        sessionExpiredListeners.forEach { listener -> listener() }
-        return RefreshResult.Failed(cause)
+    private suspend fun expireEpoch(failedEpoch: Long, cause: Throwable?): RefreshResult.Failed {
+        val mutation = try {
+            withContext(NonCancellable) { tokenVault.clear(failedEpoch) }
+        } catch (error: Throwable) {
+            if (!error.isExpectedRefreshFailure()) throw error
+            val current = tokenVault.sessionSnapshot()
+            SessionMutation(applied = current.epoch != failedEpoch, snapshot = current)
+        }
+        val result = RefreshResult.Failed(cause)
+        latestOutcome.set(EpochOutcome(failedEpoch, result))
+        if (mutation.applied) {
+            mutableEvents.emit(SessionLifecycleEvent.SessionExpired)
+            sessionExpiredListeners.forEach { listener -> listener() }
+        }
+        return result
+    }
+
+    private suspend fun clearRefreshAttempt(failedEpoch: Long) {
+        withContext(NonCancellable) {
+            val current = tokenVault.sessionSnapshot()
+            val cleanupEpoch = when {
+                current.epoch == failedEpoch -> failedEpoch
+                current.epoch == failedEpoch + 1 && current.accessToken != null -> current.epoch
+                else -> null
+            }
+            cleanupEpoch?.let { tokenVault.clear(it) }
+        }
     }
 
     private fun Throwable.isUnauthorized(): Boolean = this is HttpException && code() == 401
@@ -120,5 +170,6 @@ class RefreshCoordinator(
             this is SerializationException ||
             this is NetworkContractException ||
             this is GeneralSecurityException ||
+            this is ProviderException ||
             this is ErrnoException
 }

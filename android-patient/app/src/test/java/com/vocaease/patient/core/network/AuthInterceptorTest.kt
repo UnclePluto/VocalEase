@@ -1,6 +1,8 @@
 package com.vocaease.patient.core.network
 
-import com.vocaease.patient.core.security.AccessTokenSnapshot
+import com.vocaease.patient.core.security.RefreshTokenLease
+import com.vocaease.patient.core.security.SessionMutation
+import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
 import java.util.concurrent.atomic.AtomicReference
 import okhttp3.OkHttpClient
@@ -67,15 +69,32 @@ class AuthInterceptorTest {
         assertEquals("Bearer memory-access", recorded.getHeader("Authorization"))
         assertEquals("7", recorded.getHeader("X-Test-Generation"))
     }
+
+    @Test
+    fun `内存无 token 时患者请求也会移除调用方遗留 Authorization`() {
+        server.enqueue(MockResponse().setResponseCode(200))
+        val client = OkHttpClient.Builder()
+            .addInterceptor(AuthInterceptor(InterceptorTokenVault(null, 8)))
+            .build()
+        val request = Request.Builder()
+            .url(server.url("/api/v1/patient/me/"))
+            .header("Authorization", "Bearer stale-token")
+            .build()
+
+        client.newCall(request).execute().close()
+
+        assertNull(server.takeRequest().getHeader("Authorization"))
+    }
 }
 
 private class InterceptorTokenVault(
     token: String?,
     generation: Long,
 ) : TokenVault {
-    private val snapshot = AccessTokenSnapshot(token, generation)
-    override fun accessSnapshot() = snapshot
-    override suspend fun readRefreshToken(): String? = null
-    override suspend fun replaceTokens(accessToken: String, refreshToken: String) = Unit
-    override suspend fun clear() = Unit
+    private val snapshot = SessionSnapshot(token, generation)
+    override fun sessionSnapshot() = snapshot
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = null
+    override suspend fun replaceTokens(expectedEpoch: Long, accessToken: String, refreshToken: String) =
+        SessionMutation(false, snapshot)
+    override suspend fun clear(expectedEpoch: Long?) = SessionMutation(false, snapshot)
 }
