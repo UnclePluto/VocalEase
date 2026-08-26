@@ -5,7 +5,7 @@ from datetime import timedelta
 import hashlib
 from io import BytesIO
 import os
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 import wave
 
 from django.conf import settings
@@ -86,8 +86,29 @@ def _legacy_demo_mp4(label: str) -> bytes:
 class Command(BaseCommand):
     help = "创建或更新 VocaEase 本地演示数据"
 
-    @transaction.atomic
     def handle(self, *args, **options):
+        replacement_assets: list[tuple[LocalStorageBackend, str, UUID]] = []
+        try:
+            return self._handle_atomic(
+                *args,
+                replacement_assets=replacement_assets,
+                **options,
+            )
+        except Exception:
+            # 此时原子装饰器已经完成数据库回滚，只补偿本次命令发布的新替换对象。
+            for backend, object_key, asset_id in reversed(replacement_assets):
+                backend.purge_for_qa(object_key, asset_id=asset_id)
+            raise
+
+    @transaction.atomic
+    def _handle_atomic(
+        self,
+        *args,
+        replacement_assets: list[tuple[LocalStorageBackend, str, UUID]],
+        **options,
+    ):
+        # 提交回调按登记顺序执行：先解除替换对象补偿，再清理各旧对象。
+        transaction.on_commit(replacement_assets.clear)
         settings_module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
         if (
             settings_module
@@ -145,6 +166,7 @@ class Command(BaseCommand):
                 song=songs[index % 2],
                 backend=backend,
                 days_ago=5 - index,
+                replacement_assets=replacement_assets,
             )
 
         self.stdout.write(
@@ -336,6 +358,7 @@ class Command(BaseCommand):
         song: Song,
         backend: LocalStorageBackend,
         days_ago: int,
+        replacement_assets: list[tuple[LocalStorageBackend, str, UUID]],
     ) -> SingingSession:
         session_id = uuid5(NAMESPACE_URL, f"{DEMO_NAMESPACE}{key}")
         session = SingingSession.objects.select_for_update().filter(pk=session_id).first()
@@ -504,77 +527,70 @@ class Command(BaseCommand):
             ) as stream:
                 legacy_video_shape = stream.read() == legacy_video_content
         if legacy_video_shape:
-            replacement = None
-            try:
-                replacement = self._publish_asset(
-                    owner_type=MediaAsset.OwnerType.PATIENT,
-                    owner_id=patient.id,
-                    media_type="singing_video",
-                    mime="video/mp4",
-                    content=_demo_mp4(),
-                    backend=backend,
+            replacement = self._publish_asset(
+                owner_type=MediaAsset.OwnerType.PATIENT,
+                owner_id=patient.id,
+                media_type="singing_video",
+                mime="video/mp4",
+                content=_demo_mp4(),
+                backend=backend,
+            )
+            # _publish_asset 负责返回前失败；成功返回后由命令级事务台账唯一负责。
+            replacement_assets.append((backend, replacement.object_key, replacement.id))
+            old_asset_id = video_asset.id
+            old_object_key = video_asset.object_key
+            video_binding.asset = replacement
+            video_binding.save(update_fields=["asset"])
+            face_task.source_asset = replacement
+            face_task.input_snapshot = _task_snapshot(
+                session=session,
+                asset=replacement,
+                generation=session.analysis_generation,
+            )
+            face_task.status = AnalysisTask.Status.PENDING
+            face_task.attempt = 0
+            face_task.claim_token = None
+            face_task.lease_expires_at = None
+            face_task.heartbeat_at = None
+            face_task.next_dispatch_at = None
+            face_task.error_code = ""
+            face_task.error_summary = ""
+            face_task.started_at = None
+            face_task.completed_at = None
+            face_task.save()
+            session.status = SingingSession.Status.PROCESSING
+            session.completed_at = None
+            session.save(update_fields=["status", "completed_at", "updated_at"])
+            video_asset.delete()
+            run_analysis(face_task.id)
+            session.refresh_from_db()
+            bindings = list(session.media_bindings.select_related("asset"))
+            generation_tasks = AnalysisTask.objects.filter(
+                target_type=AnalysisTask.TargetType.SINGING_SESSION,
+                target_id=session.id,
+                generation=session.analysis_generation,
+            )
+            binding_types = {binding.media_type for binding in bindings}
+            task_types = set(generation_tasks.values_list("task_type", flat=True))
+            result_types = set(
+                AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
+                    "task__task_type", flat=True,
                 )
-                old_asset_id = video_asset.id
-                old_object_key = video_asset.object_key
-                video_binding.asset = replacement
-                video_binding.save(update_fields=["asset"])
-                face_task.source_asset = replacement
-                face_task.input_snapshot = _task_snapshot(
-                    session=session,
-                    asset=replacement,
-                    generation=session.analysis_generation,
+            )
+            if (
+                session.status != SingingSession.Status.COMPLETED
+                or not session.is_mock
+                or binding_types != required_media
+                or any(
+                    not binding.confirmed_at
+                    or binding.asset.status != MediaAsset.Status.READY
+                    for binding in bindings
                 )
-                face_task.status = AnalysisTask.Status.PENDING
-                face_task.attempt = 0
-                face_task.claim_token = None
-                face_task.lease_expires_at = None
-                face_task.heartbeat_at = None
-                face_task.next_dispatch_at = None
-                face_task.error_code = ""
-                face_task.error_summary = ""
-                face_task.started_at = None
-                face_task.completed_at = None
-                face_task.save()
-                session.status = SingingSession.Status.PROCESSING
-                session.completed_at = None
-                session.save(update_fields=["status", "completed_at", "updated_at"])
-                video_asset.delete()
-                run_analysis(face_task.id)
-                session.refresh_from_db()
-                bindings = list(session.media_bindings.select_related("asset"))
-                generation_tasks = AnalysisTask.objects.filter(
-                    target_type=AnalysisTask.TargetType.SINGING_SESSION,
-                    target_id=session.id,
-                    generation=session.analysis_generation,
-                )
-                binding_types = {binding.media_type for binding in bindings}
-                task_types = set(generation_tasks.values_list("task_type", flat=True))
-                result_types = set(
-                    AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
-                        "task__task_type", flat=True,
-                    )
-                )
-                if (
-                    session.status != SingingSession.Status.COMPLETED
-                    or not session.is_mock
-                    or binding_types != required_media
-                    or any(
-                        not binding.confirmed_at
-                        or binding.asset.status != MediaAsset.Status.READY
-                        for binding in bindings
-                    )
-                    or task_types != required_tasks
-                    or result_types != required_tasks
-                    or generation_tasks.exclude(status=AnalysisTask.Status.SUCCEEDED).exists()
-                ):
-                    raise ValueError(f"演示演唱 {key} 录像升级不完整")
-            except Exception:
-                if replacement is not None:
-                    backend.purge_for_qa(
-                        replacement.object_key,
-                        asset_id=replacement.id,
-                    )
-                raise
+                or task_types != required_tasks
+                or result_types != required_tasks
+                or generation_tasks.exclude(status=AnalysisTask.Status.SUCCEEDED).exists()
+            ):
+                raise ValueError(f"演示演唱 {key} 录像升级不完整")
             transaction.on_commit(
                 lambda object_key=old_object_key, asset_id=old_asset_id: backend.purge_for_qa(
                     object_key,

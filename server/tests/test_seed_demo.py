@@ -476,6 +476,110 @@ def test_seed_demo_removes_replacement_files_when_video_upgrade_rolls_back(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_seed_demo_removes_earlier_replacement_when_later_session_fails(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    call_command("seed_demo", stdout=StringIO())
+    session = SingingSession.objects.get(
+        id="8ce19dd3-433a-5bf1-8329-1017a53b323f",
+        created_source="seed_demo",
+        patient__medical_record_no="PDEMO001",
+    )
+    backend = storage_backend_for("local")
+    binding, face_task, _face_result, legacy_asset, legacy_content = (
+        _install_fix_base_header_only_video(session=session, backend=backend)
+    )
+    private_url = backend.create_private_url(
+        legacy_asset.object_key,
+        ttl_seconds=60,
+        asset_id=legacy_asset.id,
+        expected_generation=legacy_asset.manifest_generation,
+    )
+    baseline_asset_count = MediaAsset.objects.count()
+    baseline_manifests, baseline_blobs = _local_storage_paths(tmp_path)
+    legacy_manifest_path, legacy_blob_path = _asset_storage_paths(
+        tmp_path, legacy_asset
+    )
+    from apps.accounts.management.commands import seed_demo
+
+    original_upsert = seed_demo.Command._upsert_completed_session
+    published_replacements = []
+
+    def fail_in_later_session(
+        command,
+        *,
+        key,
+        patient,
+        song,
+        backend,
+        days_ago,
+        **upsert_options,
+    ):
+        if key == "session-2":
+            raise RuntimeError("injected later session failure")
+        completed = original_upsert(
+            command,
+            key=key,
+            patient=patient,
+            song=song,
+            backend=backend,
+            days_ago=days_ago,
+            **upsert_options,
+        )
+        if key == "session-1":
+            replacement = SessionMedia.objects.get(
+                session=completed,
+                media_type="singing_video",
+            ).asset
+            assert replacement.id != legacy_asset.id
+            manifest_path, blob_path = _asset_storage_paths(tmp_path, replacement)
+            published_replacements.append((replacement.id, manifest_path, blob_path))
+        return completed
+
+    monkeypatch.setattr(
+        seed_demo.Command,
+        "_upsert_completed_session",
+        fail_in_later_session,
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="injected later session failure"):
+            call_command("seed_demo", stdout=StringIO())
+
+    binding.refresh_from_db()
+    face_task.refresh_from_db()
+    legacy_asset.refresh_from_db()
+    replacement_ids = [
+        asset_id for asset_id, _manifest, _blob in published_replacements
+    ]
+    assert len(replacement_ids) == len(set(replacement_ids)) == 2
+    assert binding.asset_id == legacy_asset.id
+    assert face_task.source_asset_id == legacy_asset.id
+    assert MediaAsset.objects.count() == baseline_asset_count
+    assert not MediaAsset.objects.filter(pk__in=replacement_ids).exists()
+    current_manifests, current_blobs = _local_storage_paths(tmp_path)
+    assert current_manifests == baseline_manifests
+    assert current_blobs == baseline_blobs
+    assert all(
+        not manifest_path.exists() and not blob_path.exists()
+        for _asset_id, manifest_path, blob_path in published_replacements
+    )
+    assert legacy_manifest_path.exists()
+    assert legacy_blob_path.exists()
+    with backend.open_authorized_private(
+        private_url.token,
+        legacy_asset.object_key,
+        asset_id=legacy_asset.id,
+        expected_generation=legacy_asset.manifest_generation,
+    ) as stream:
+        assert stream.read() == legacy_content
+
+
+@pytest.mark.django_db(transaction=True)
 def test_seed_demo_rejects_a_fixed_login_owned_by_another_role(tmp_path, settings):
     settings.MEDIA_BACKEND = "local"
     settings.MEDIA_LOCAL_ROOT = str(tmp_path)
