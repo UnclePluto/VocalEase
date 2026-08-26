@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.analysis.models import AnalysisTask
@@ -13,6 +14,18 @@ from .serializers import (
     SingingSessionReadSerializer,
     SingingSessionSummarySerializer,
 )
+
+
+@extend_schema_field(
+    {
+        "type": "string",
+        "enum": [value for value, _label in SingingSession.Status.choices],
+    },
+    component_name="SingingSessionStatus",
+)
+class SingingSessionStatusField(serializers.ChoiceField):
+    def __init__(self, **kwargs):
+        super().__init__(choices=SingingSession.Status.choices, **kwargs)
 
 
 class PatientPrimaryDoctorSerializer(serializers.Serializer):
@@ -85,7 +98,7 @@ class SingingAnalysisResultSerializer(serializers.Serializer):
 
 
 class PatientSingingSessionReadSerializer(SingingSessionReadSerializer):
-    status = serializers.CharField(read_only=True)
+    status = SingingSessionStatusField(read_only=True)
     analysis_task_ids = serializers.ListField(
         child=serializers.UUIDField(), read_only=True,
     )
@@ -93,7 +106,7 @@ class PatientSingingSessionReadSerializer(SingingSessionReadSerializer):
 
 
 class PatientSingingSessionSummarySerializer(SingingSessionSummarySerializer):
-    status = serializers.CharField(read_only=True)
+    status = SingingSessionStatusField(read_only=True)
 
 
 class SingingSessionPageDataSerializer(PaginationDataSerializer):
@@ -137,7 +150,7 @@ class PatientMediaUploadGrantEnvelopeSerializer(ApiEnvelopeSerializer):
 
 class SessionMutationDataSerializer(serializers.Serializer):
     session_id = serializers.UUIDField()
-    status = serializers.ChoiceField(choices=SingingSession.Status.choices)
+    status = SingingSessionStatusField()
     analysis_task_ids = serializers.ListField(child=serializers.UUIDField())
 
 
