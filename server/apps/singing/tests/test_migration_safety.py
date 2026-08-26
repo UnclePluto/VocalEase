@@ -31,12 +31,10 @@ def test_creation_idempotency_migration_is_reversible_and_enforces_patient_scope
             "treatment_plan_snapshot": existing.treatment_plan_snapshot,
             "created_source": existing.created_source,
         }
-        SingingSession.objects.filter(pk=existing.id).update(
-            creation_idempotency_key="migration-create-001",
-        )
+        assert SingingSession.objects.get(pk=existing.id).creation_idempotency_key == ""
         keyed_session = SingingSession.objects.create(
             patient_id=patient.id,
-            creation_idempotency_key="migration-create-002",
+            creation_idempotency_key="migration-create-001",
             **session_values,
         )
         with pytest.raises(IntegrityError), transaction.atomic():
