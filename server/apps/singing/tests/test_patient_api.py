@@ -226,6 +226,7 @@ def test_create_session_requires_current_available_song_and_keeps_snapshots(pati
 
     response = client.post(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+        HTTP_IDEMPOTENCY_KEY="create-snapshot-1",
     )
 
     assert response.status_code == 201
@@ -239,7 +240,40 @@ def test_create_session_requires_current_available_song_and_keeps_snapshots(pati
     assert detail.json()["data"]["song"]["title"] == "初始歌名"
     assert client.post(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+        HTTP_IDEMPOTENCY_KEY="create-unavailable-song-1",
     ).status_code == 400
+
+
+@pytest.mark.django_db
+def test_create_session_exposes_idempotency_as_http_contract(patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings, title="幂等歌曲")
+    other_song = ready_song(tmp_path, settings, title="冲突歌曲")
+    client = APIClient()
+    client.force_authenticate(patient.user)
+    url = "/api/v1/patient/singing-sessions/"
+    payload = {"song_id": str(song.id)}
+
+    first = client.post(
+        url, payload, format="json", HTTP_IDEMPOTENCY_KEY="create-http-1",
+    )
+    replay = client.post(
+        url, payload, format="json", HTTP_IDEMPOTENCY_KEY="create-http-1",
+    )
+    missing = client.post(url, payload, format="json")
+    conflict = client.post(
+        url,
+        {"song_id": str(other_song.id)},
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="create-http-1",
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 200
+    assert replay.json()["data"]["id"] == first.json()["data"]["id"]
+    assert missing.status_code == 400
+    assert missing.json()["code"] == "validation_error"
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "singing_creation_conflict"
 
 
 @pytest.mark.django_db
@@ -341,6 +375,7 @@ def test_create_session_preserves_temporary_storage_error_for_mobile_retry(patie
 
     response = client.post(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+        HTTP_IDEMPOTENCY_KEY="create-temporary-source-error-1",
     )
 
     assert response.status_code == 503

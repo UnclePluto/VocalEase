@@ -133,6 +133,7 @@ def test_patient_upload_analysis_to_admin_detail_flow(tmp_path, settings):
         "/api/v1/patient/singing-sessions/",
         {"song_id": str(song.id)},
         format="json",
+        HTTP_IDEMPOTENCY_KEY="full-flow-create",
     )
     assert created.status_code == 201
     session_id = created.json()["data"]["id"]

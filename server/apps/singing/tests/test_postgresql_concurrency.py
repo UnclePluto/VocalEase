@@ -8,16 +8,16 @@ from apps.analysis.models import AnalysisResult, AnalysisTask
 from apps.analysis.services import run_analysis
 from apps.singing.executors import mock_singing_result
 from apps.singing.models import SessionMedia, SingingSession
-from apps.singing.services import SingingMediaConflict
+from apps.singing.services import SingingCreationConflict, SingingMediaConflict
 
 from .test_analysis_execution import _add_ready_video
 from .test_submission_idempotency import uploaded_session
 
 
-def _session_lock_wrapper(barrier, entered):
+def _session_lock_wrapper(barrier, entered, *, lock_table="singing_singingsession"):
     def wrapper(execute, sql, params, many, context):
         lowered = sql.lower()
-        if not entered[0] and "singing_singingsession" in lowered and "for update" in lowered:
+        if not entered[0] and lock_table in lowered and "for update" in lowered:
             entered[0] = True
             barrier.wait(timeout=5)
         return execute(sql, params, many, context)
@@ -29,6 +29,73 @@ def _disable_external_dispatch(monkeypatch):
     from apps.analysis.tasks import run_analysis_task
 
     monkeypatch.setattr(run_analysis_task, "delay", lambda task_id: None)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.postgresql
+def test_postgresql_concurrent_session_creation_serializes_same_and_conflicting_keys(
+    tmp_path,
+    settings,
+):
+    if connection.vendor != "postgresql":
+        pytest.skip("会话创建并发由真实 PostgreSQL 患者行锁测试证明")
+    from apps.singing.services import create_session
+    from .test_patient_api import ready_song
+
+    patient, existing_session = uploaded_session()
+    same_song = ready_song(tmp_path, settings, title="并发同键歌曲")
+    other_song = ready_song(tmp_path, settings, title="并发冲突歌曲")
+
+    def create(song_id, key, barrier):
+        connections.close_all()
+        entered = [False]
+        try:
+            with connections["default"].execute_wrapper(
+                _session_lock_wrapper(
+                    barrier,
+                    entered,
+                    lock_table="patients_patientprofile",
+                ),
+            ):
+                result = create_session(
+                    patient_id=patient.id,
+                    song_id=song_id,
+                    idempotency_key=key,
+                )
+            return "ok", result.created, result.session.id
+        except SingingCreationConflict as exc:
+            return "conflict", exc.default_code, None
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        same_barrier = Barrier(2)
+        same = list(pool.map(
+            lambda _index: create(same_song.id, "parallel-create-same", same_barrier),
+            range(2),
+        ))
+
+    assert sorted(row[1] for row in same) == [False, True]
+    assert same[0][2] == same[1][2]
+    assert SingingSession.objects.filter(
+        patient=patient,
+        creation_idempotency_key="parallel-create-same",
+    ).count() == 1
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        conflict_barrier = Barrier(2)
+        conflicting = list(pool.map(
+            lambda song_id: create(song_id, "parallel-create-conflict", conflict_barrier),
+            (existing_session.song_id, other_song.id),
+        ))
+
+    assert sorted(row[0] for row in conflicting) == ["conflict", "ok"]
+    conflict = next(row for row in conflicting if row[0] == "conflict")
+    assert conflict[1] == "singing_creation_conflict"
+    assert SingingSession.objects.filter(
+        patient=patient,
+        creation_idempotency_key="parallel-create-conflict",
+    ).count() == 1
 
 
 @pytest.mark.django_db(transaction=True)

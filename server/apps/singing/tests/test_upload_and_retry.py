@@ -35,6 +35,7 @@ def test_confirm_upload_ignores_client_ready_claim_and_requires_trusted_receipt(
     client.force_authenticate(patient.user)
     session = client.post(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+        HTTP_IDEMPOTENCY_KEY="confirm-receipt-create",
     ).json()["data"]
     grant = client.post(
         f"/api/v1/patient/singing-sessions/{session['id']}/upload-grants/",
@@ -149,6 +150,7 @@ def test_upload_grant_same_key_reuses_one_bound_asset(patient, tmp_path, setting
     client.force_authenticate(patient.user)
     session_id = client.post(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+        HTTP_IDEMPOTENCY_KEY="upload-reuse-create",
     ).json()["data"]["id"]
     url = f"/api/v1/patient/singing-sessions/{session_id}/upload-grants/"
     payload = {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}
@@ -209,6 +211,7 @@ def test_upload_grant_rejects_overlong_idempotency_key_with_stable_validation(pa
     client.force_authenticate(patient.user)
     session_id = client.post(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
+        HTTP_IDEMPOTENCY_KEY="overlong-grant-create",
     ).json()["data"]["id"]
 
     response = client.post(
@@ -268,6 +271,7 @@ def test_same_upload_key_cannot_reissue_in_session_state_that_disallows_upload(
         "/api/v1/patient/singing-sessions/",
         {"song_id": str(song.id)},
         format="json",
+        HTTP_IDEMPOTENCY_KEY=f"state-bound-create-{session_status}",
     ).json()["data"]["id"]
     url = f"/api/v1/patient/singing-sessions/{session_id}/upload-grants/"
     payload = {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}
@@ -334,6 +338,7 @@ def test_ready_bound_asset_repeats_as_confirmation_without_new_upload_signature(
         "/api/v1/patient/singing-sessions/",
         {"song_id": str(song.id)},
         format="json",
+        HTTP_IDEMPOTENCY_KEY="ready-grant-create",
     ).json()["data"]["id"]
     url = f"/api/v1/patient/singing-sessions/{session_id}/upload-grants/"
     payload = {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}

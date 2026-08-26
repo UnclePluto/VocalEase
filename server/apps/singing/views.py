@@ -1,5 +1,3 @@
-from uuid import uuid4
-
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -95,17 +93,30 @@ class PatientSessionListView(APIView):
         data["results"] = SingingSessionSummarySerializer(data["results"], many=True).data
         return api_response(data=data, request_id=request.request_id)
 
-    @extend_schema(request=CreateSessionSerializer, responses={201: ApiEnvelopeSerializer})
+    @extend_schema(
+        request=CreateSessionSerializer,
+        responses={200: ApiEnvelopeSerializer, 201: ApiEnvelopeSerializer},
+    )
     def post(self, request):
         patient = patient_for_request(request)
         serializer = CreateSessionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        try:
+            idempotency_key = request.headers["Idempotency-Key"]
+        except KeyError as exc:
+            raise ValidationError(
+                {"idempotency_key": "必须提供 Idempotency-Key 请求头"},
+            ) from exc
         result = create_session(
             patient_id=patient.id,
-            idempotency_key=request.headers.get("Idempotency-Key", uuid4().hex),
+            idempotency_key=idempotency_key,
             **serializer.validated_data,
         )
-        return api_response(data=SingingSessionReadSerializer(result.session).data, request_id=request.request_id, status_code=status.HTTP_201_CREATED)
+        return api_response(
+            data=SingingSessionReadSerializer(result.session).data,
+            request_id=request.request_id,
+            status_code=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK,
+        )
 
 
 class PatientSessionMixin:

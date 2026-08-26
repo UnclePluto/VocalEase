@@ -44,7 +44,7 @@ def test_openapi_schema_and_docs_are_publicly_available():
         ("/api/v1/patient/media/{asset_id}/complete/", "post"): (False, {"200"}),
         ("/api/v1/patient/media/{asset_id}/private-url/", "post"): (False, {"200"}),
         ("/api/v1/patient/media/upload-grants/", "post"): (True, {"201"}),
-        ("/api/v1/patient/singing-sessions/", "post"): (True, {"201"}),
+        ("/api/v1/patient/singing-sessions/", "post"): (True, {"200", "201"}),
         ("/api/v1/patient/singing-sessions/{session_id}/cancel/", "post"): (False, {"200"}),
         ("/api/v1/patient/singing-sessions/{session_id}/confirm-upload/", "post"): (True, {"200"}),
         ("/api/v1/patient/singing-sessions/{session_id}/retry/", "post"): (False, {"200", "202"}),
