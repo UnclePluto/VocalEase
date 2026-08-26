@@ -1,6 +1,7 @@
 package com.vocaease.patient.core.network
 
 import com.vocaease.patient.BuildConfig
+import com.vocaease.patient.core.security.TokenVault
 import java.io.IOException
 import java.util.logging.Logger
 import kotlinx.serialization.SerialName
@@ -99,6 +100,14 @@ object NetworkModule {
     fun createHttpClient(
         diagnosticSink: (NetworkDiagnostic) -> Unit = DefaultDiagnosticSink::accept,
     ): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(SafeNetworkDiagnosticInterceptor(diagnosticSink))
+        .build()
+
+    fun createAuthenticatedHttpClient(
+        tokenVault: TokenVault,
+        diagnosticSink: (NetworkDiagnostic) -> Unit = DefaultDiagnosticSink::accept,
+    ): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(AuthInterceptor(tokenVault))
         .addInterceptor(SafeNetworkDiagnosticInterceptor(diagnosticSink))
         .build()
 }

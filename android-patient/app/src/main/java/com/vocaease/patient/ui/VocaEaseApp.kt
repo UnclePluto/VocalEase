@@ -27,6 +27,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.vocaease.patient.AppContainer
 import com.vocaease.patient.LocalAppContainer
+import com.vocaease.patient.feature.auth.AuthFlow
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.MinimumTouchTargetSize
 import com.vocaease.patient.ui.theme.VocaEaseTheme
@@ -34,30 +35,41 @@ import com.vocaease.patient.ui.theme.VocaEaseTheme
 @Composable
 fun VocaEaseApp(
     container: AppContainer,
-    initialRoute: AppRoute = AppRoute.Catalog,
+    initialRoute: AppRoute? = null,
 ) {
     VocaEaseTheme {
         CompositionLocalProvider(LocalAppContainer provides container) {
-            val navController = rememberNavController()
-            val backStackEntry by navController.currentBackStackEntryAsState()
-            val destination = backStackEntry?.destination
-            val showBottomBar = destination?.isMainDestination()
-                ?: (initialRoute == AppRoute.Catalog || initialRoute == AppRoute.Profile)
-
-            Scaffold(
-                bottomBar = {
-                    if (showBottomBar) {
-                        MainNavigationBar(navController, destination)
-                    }
-                },
-            ) { padding ->
-                AppNavHost(
-                    navController = navController,
-                    initialRoute = initialRoute,
-                    padding = padding,
-                )
+            if (initialRoute == null) {
+                AuthFlow(repository = container.authRepository) {
+                    AuthenticatedApp(initialRoute = AppRoute.Catalog)
+                }
+            } else {
+                AuthenticatedApp(initialRoute)
             }
         }
+    }
+}
+
+@Composable
+private fun AuthenticatedApp(initialRoute: AppRoute) {
+    val navController = rememberNavController()
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val destination = backStackEntry?.destination
+    val showBottomBar = destination?.isMainDestination()
+        ?: (initialRoute == AppRoute.Catalog || initialRoute == AppRoute.Profile)
+
+    Scaffold(
+        bottomBar = {
+            if (showBottomBar) {
+                MainNavigationBar(navController, destination)
+            }
+        },
+    ) { padding ->
+        AppNavHost(
+            navController = navController,
+            initialRoute = initialRoute,
+            padding = padding,
+        )
     }
 }
 
