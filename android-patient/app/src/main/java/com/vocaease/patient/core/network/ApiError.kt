@@ -1,6 +1,7 @@
 package com.vocaease.patient.core.network
 
 import java.io.IOException
+import java.util.concurrent.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
@@ -65,6 +66,7 @@ object ApiErrorMapper {
         error: Throwable,
         endpoint: ApiEndpoint,
     ): ApiFailure = when (error) {
+        is CancellationException -> throw error
         is HttpException -> mapHttp(error, endpoint)
         is IOException -> ApiFailure.Transport(
             diagnostic(
@@ -82,14 +84,7 @@ object ApiErrorMapper {
                 requestId = "",
             ),
         )
-        else -> ApiFailure.Malformed(
-            diagnostic(
-                endpoint = endpoint,
-                status = null,
-                code = "unexpected_network_failure",
-                requestId = "",
-            ),
-        )
+        else -> throw error
     }
 
     fun map(

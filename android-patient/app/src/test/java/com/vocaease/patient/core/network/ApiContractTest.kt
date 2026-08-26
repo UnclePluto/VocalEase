@@ -303,6 +303,7 @@ class ApiContractTest {
                 assertEquals("POST", request.method)
                 assertEquals("/api/v1/patient/songs/$SONG_ID/preview/", request.path)
                 assertNull(request.getHeader("Idempotency-Key"))
+                assertEquals(0L, request.bodySize)
             }
         }
     }

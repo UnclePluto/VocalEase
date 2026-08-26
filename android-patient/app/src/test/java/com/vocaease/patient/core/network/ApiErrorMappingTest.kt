@@ -3,6 +3,8 @@ package com.vocaease.patient.core.network
 import com.vocaease.patient.core.network.dto.ClientKind
 import com.vocaease.patient.core.network.dto.LoginRequestDto
 import java.io.IOException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerializationException
 import okhttp3.MediaType
@@ -14,7 +16,9 @@ import okio.BufferedSource
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import retrofit2.HttpException
@@ -107,6 +111,44 @@ class ApiErrorMappingTest {
             ApiErrorMapper.map(SerializationException("private-url"), ApiEndpoint.SESSION_DETAIL)
                 is ApiFailure.Malformed,
         )
+    }
+
+    @Test
+    fun `并发任务中的协程取消异常保持同一对象向上传播`() {
+        val cancellation = CancellationException("用户取消请求")
+
+        val thrown = CompletableFuture.supplyAsync<Throwable> {
+            try {
+                ApiErrorMapper.map(cancellation, ApiEndpoint.SESSION_DETAIL)
+                AssertionError("取消异常未传播")
+            } catch (error: Throwable) {
+                error
+            }
+        }.get()
+
+        assertSame(cancellation, thrown)
+    }
+
+    @Test
+    fun `未知 RuntimeException 保持同一对象向上传播`() {
+        val unknown = IllegalStateException("unexpected runtime")
+
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            ApiErrorMapper.map(unknown, ApiEndpoint.SESSION_DETAIL)
+        }
+
+        assertSame(unknown, thrown)
+    }
+
+    @Test
+    fun `Error 保持同一对象向上传播`() {
+        val fatal = AssertionError("fatal")
+
+        val thrown = assertThrows(AssertionError::class.java) {
+            ApiErrorMapper.map(fatal, ApiEndpoint.SESSION_DETAIL)
+        }
+
+        assertSame(fatal, thrown)
     }
 
     @Test
