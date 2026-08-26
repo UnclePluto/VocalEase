@@ -2,39 +2,14 @@ import uuid
 
 import pytest
 from django.db import IntegrityError, transaction
-from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.analysis.models import AnalysisResult, AnalysisTask
 from apps.analysis.services import run_analysis
-from apps.media.models import MediaAsset
 from apps.singing.executors import mock_face_result, mock_singing_result
-from apps.singing.models import AnalysisTimeSeries, SessionMedia, SingingSession
+from apps.singing.models import AnalysisTimeSeries, SingingSession
 
 from .test_submission_idempotency import uploaded_session
-
-
-def _add_ready_video(patient, session):
-    video = MediaAsset.objects.create(
-        patient_owner=patient,
-        owner_type="patient",
-        owner_id=patient.id,
-        media_type="singing_video",
-        backend="qiniu",
-        object_key=f"test/singing_video/{uuid.uuid4().hex}",
-        mime="video/mp4",
-        size=8192,
-        etag="video-ready",
-        status="ready",
-        upload_expires_at=timezone.now(),
-    )
-    SessionMedia.objects.create(
-        session=session,
-        asset=video,
-        media_type="singing_video",
-        confirmed_at=timezone.now(),
-    )
-    return video
 
 
 @pytest.mark.django_db
@@ -56,12 +31,24 @@ def test_audio_mock_is_deterministic_and_face_result_has_no_invented_findings():
 
 
 @pytest.mark.django_db
-def test_running_audio_analysis_atomically_completes_session_and_time_series():
+def test_running_generation_atomically_completes_session_and_time_series():
     patient, session = uploaded_session()
     from apps.singing.services import submit_session
     result = submit_session(session_id=session.id, patient_id=patient.id, idempotency_key="run-audio")
 
-    task = run_analysis(result.task_ids[0])
+    assert len(result.task_ids) == 2
+    audio_task = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+    )
+    face_task = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+    )
+    task = run_analysis(audio_task.id)
+    session.refresh_from_db()
+    assert session.status == "processing"
+    run_analysis(face_task.id)
 
     task.refresh_from_db()
     session.refresh_from_db()
@@ -80,17 +67,6 @@ def test_running_audio_analysis_atomically_completes_session_and_time_series():
 @pytest.mark.django_db
 def test_face_analysis_returns_empty_landmarks_and_only_last_task_completes_session():
     patient, session = uploaded_session()
-    from apps.media.models import MediaAsset
-    from apps.singing.models import SessionMedia
-    from django.utils import timezone
-    video = MediaAsset.objects.create(
-        patient_owner=patient, owner_type="patient", owner_id=patient.id,
-        media_type="singing_video", backend="qiniu", object_key=f"test/singing_video/{uuid.uuid4().hex}",
-        mime="video/mp4", size=1024, etag="video-ready", status="ready", upload_expires_at=timezone.now(),
-    )
-    SessionMedia.objects.create(
-        session=session, asset=video, media_type="singing_video", confirmed_at=timezone.now(),
-    )
     from apps.singing.services import submit_session
     submit_session(session_id=session.id, patient_id=patient.id, idempotency_key="run-two")
     audio_task = AnalysisTask.objects.get(target_id=session.id, task_type="singing_audio_metrics")
@@ -113,9 +89,14 @@ def test_invalid_singing_result_fails_without_partial_result(monkeypatch):
     patient, session = uploaded_session()
     from apps.singing import executors
     from apps.singing.services import submit_session
-    task_id = submit_session(
+    submitted = submit_session(
         session_id=session.id, patient_id=patient.id, idempotency_key="invalid-result",
-    ).task_ids[0]
+    )
+    assert len(submitted.task_ids) == 2
+    task_id = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+    ).id
     monkeypatch.setattr(
         executors.MockSingingAudioExecutor,
         "execute",
@@ -210,7 +191,6 @@ def test_result_and_time_series_have_no_writable_generation_second_truth():
 @pytest.mark.django_db
 def test_one_failed_task_atomically_hides_and_clears_successful_generation(monkeypatch):
     patient, session = uploaded_session()
-    _add_ready_video(patient, session)
     from apps.singing import executors
     from apps.singing.services import submit_session
 
@@ -243,7 +223,6 @@ def test_one_failed_task_atomically_hides_and_clears_successful_generation(monke
 @pytest.mark.django_db
 def test_retry_creates_fresh_generation_and_fences_late_previous_worker(monkeypatch):
     patient, session = uploaded_session()
-    _add_ready_video(patient, session)
     from apps.singing import executors
     from apps.singing.services import (
         claim_singing_analysis_task,
@@ -322,11 +301,16 @@ def test_worker_rejects_any_tampered_expected_input_snapshot(path, value):
     patient, session = uploaded_session()
     from apps.singing.services import submit_session
 
-    task_id = submit_session(
+    submitted = submit_session(
         session_id=session.id,
         patient_id=patient.id,
         idempotency_key=f"tampered-{'-'.join(path)}",
-    ).task_ids[0]
+    )
+    assert len(submitted.task_ids) == 2
+    task_id = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+    ).id
     task = AnalysisTask.objects.get(pk=task_id)
     snapshot = task.input_snapshot
     target = snapshot

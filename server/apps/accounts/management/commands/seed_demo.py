@@ -49,6 +49,14 @@ def _demo_wav(label: str, duration_ms: int = 90_000) -> bytes:
     return output.getvalue()
 
 
+def _demo_mp4(label: str) -> bytes:
+    """生成带标准 ftyp 盒的最小 MP4 演示占位媒体。"""
+    ftyp = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+    payload = label.encode("utf-8")
+    free = (len(payload) + 8).to_bytes(4, "big") + b"free" + payload
+    return ftyp + free
+
+
 class Command(BaseCommand):
     help = "创建或更新 VocaEase 本地演示数据"
 
@@ -342,6 +350,21 @@ class Command(BaseCommand):
                 asset=audio,
                 media_type="singing_audio",
                 grant_idempotency_key=f"seed-demo:grant:{key}",
+                confirmed_at=timezone.now(),
+            )
+            video = self._publish_asset(
+                owner_type=MediaAsset.OwnerType.PATIENT,
+                owner_id=patient.id,
+                media_type="singing_video",
+                mime="video/mp4",
+                content=_demo_mp4(f"demo-video-{key}"),
+                backend=backend,
+            )
+            SessionMedia.objects.create(
+                session=session,
+                asset=video,
+                media_type="singing_video",
+                grant_idempotency_key=f"seed-demo:video-grant:{key}",
                 confirmed_at=timezone.now(),
             )
             session.status = SingingSession.Status.UPLOADED

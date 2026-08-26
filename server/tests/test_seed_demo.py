@@ -68,9 +68,9 @@ def test_seed_demo_is_idempotent_and_outputs_no_sensitive_values(tmp_path, setti
         "plans": 2,
         "songs": 2,
         "sessions": 6,
-        "assets": 8,
-        "tasks": 6,
-        "results": 6,
+        "assets": 14,
+        "tasks": 12,
+        "results": 12,
     }
     assert User.objects.filter(
         login_id__in=DEMO_LOGIN_IDS,
@@ -92,7 +92,6 @@ def test_seed_demo_is_idempotent_and_outputs_no_sensitive_values(tmp_path, setti
         Q(source_songs__title__startswith="VocaEase 演示歌曲")
         | Q(singing_session_binding__session__created_source="seed_demo")
     ).distinct():
-        assert asset.mime == "audio/wav"
         private_url = backend.create_private_url(
             asset.object_key,
             ttl_seconds=60,
@@ -106,10 +105,15 @@ def test_seed_demo_is_idempotent_and_outputs_no_sensitive_values(tmp_path, setti
             expected_generation=asset.manifest_generation,
         ) as stream:
             content = stream.read()
-        header = content[:12]
-        assert header[:4] == b"RIFF" and header[8:] == b"WAVE"
-        with wave.open(BytesIO(content), "rb") as wav_file:
-            assert wav_file.getnframes() / wav_file.getframerate() == 90
+        if asset.media_type == "singing_video":
+            assert asset.mime == "video/mp4"
+            assert content[4:8] == b"ftyp"
+        else:
+            assert asset.mime == "audio/wav"
+            header = content[:12]
+            assert header[:4] == b"RIFF" and header[8:] == b"WAVE"
+            with wave.open(BytesIO(content), "rb") as wav_file:
+                assert wav_file.getnframes() / wav_file.getframerate() == 90
 
 
 @pytest.mark.django_db(transaction=True)

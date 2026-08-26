@@ -14,6 +14,7 @@ from apps.patients.services import create_patient, transition_treatment_plan_sta
 from apps.singing.models import SessionMedia, SingingSession
 from apps.singing.services import (
     SingingCreationConflict,
+    SingingMediaConflict,
     SingingSubmissionConflict,
     create_session,
     submit_session,
@@ -21,7 +22,7 @@ from apps.singing.services import (
 from apps.songs.models import Song
 
 
-def uploaded_session(session_model=SingingSession):
+def session_with_only_ready_audio(session_model=SingingSession):
     SequenceCounter.objects.bulk_create(
         [SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True,
     )
@@ -86,6 +87,20 @@ def uploaded_session(session_model=SingingSession):
     return patient, session
 
 
+def uploaded_session(session_model=SingingSession):
+    patient, session = session_with_only_ready_audio(session_model)
+    video = MediaAsset.objects.create(
+        patient_owner=patient, owner_type="patient", owner_id=patient.id,
+        media_type="singing_video", backend="qiniu", object_key=f"test/singing_video/{uuid.uuid4().hex}",
+        mime="video/mp4", size=8192, etag="video-etag", status="ready",
+        upload_expires_at=timezone.now(),
+    )
+    SessionMedia.objects.create(
+        session_id=session.id, asset=video, media_type="singing_video", confirmed_at=timezone.now(),
+    )
+    return patient, session
+
+
 @pytest.mark.django_db
 def test_submit_session_same_key_returns_same_task_and_different_key_conflicts():
     patient, session = uploaded_session()
@@ -102,21 +117,12 @@ def test_submit_session_same_key_returns_same_task_and_different_key_conflicts()
     assert first.json()["data"]["analysis_task_ids"] == second.json()["data"]["analysis_task_ids"]
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "singing_submission_conflict"
-    assert AnalysisTask.objects.filter(target_type="singing_session", target_id=session.id).count() == 1
+    assert AnalysisTask.objects.filter(target_type="singing_session", target_id=session.id).count() == 2
 
 
 @pytest.mark.django_db
 def test_submit_creates_audio_and_empty_face_tasks_when_video_is_ready():
     patient, session = uploaded_session()
-    video = MediaAsset.objects.create(
-        patient_owner=patient, owner_type="patient", owner_id=patient.id,
-        media_type="singing_video", backend="qiniu", object_key=f"test/singing_video/{uuid.uuid4().hex}",
-        mime="video/mp4", size=8192, etag="video-etag", status="ready",
-        upload_expires_at=timezone.now(),
-    )
-    SessionMedia.objects.create(
-        session=session, asset=video, media_type="singing_video", confirmed_at=timezone.now(),
-    )
 
     result = submit_session(session_id=session.id, patient_id=patient.id, idempotency_key="two-tasks")
 
@@ -129,20 +135,23 @@ def test_submit_creates_audio_and_empty_face_tasks_when_video_is_ready():
 @pytest.mark.django_db
 def test_video_submit_retry_returns_task_ids_in_the_same_order():
     patient, session = uploaded_session()
-    video = MediaAsset.objects.create(
-        patient_owner=patient, owner_type="patient", owner_id=patient.id,
-        media_type="singing_video", backend="qiniu", object_key=f"test/singing_video/{uuid.uuid4().hex}",
-        mime="video/mp4", size=8192, etag="video-etag", status="ready",
-        upload_expires_at=timezone.now(),
-    )
-    SessionMedia.objects.create(
-        session=session, asset=video, media_type="singing_video", confirmed_at=timezone.now(),
-    )
 
     first = submit_session(session_id=session.id, patient_id=patient.id, idempotency_key="stable-order")
     second = submit_session(session_id=session.id, patient_id=patient.id, idempotency_key="stable-order")
 
     assert first.task_ids == second.task_ids
+
+
+@pytest.mark.django_db
+def test_submit_rejects_uploaded_session_with_only_ready_audio_when_video_is_missing():
+    patient, session = session_with_only_ready_audio()
+
+    with pytest.raises(SingingMediaConflict, match="演唱录像"):
+        submit_session(
+            session_id=session.id,
+            patient_id=patient.id,
+            idempotency_key="missing-video",
+        )
 
 
 @pytest.mark.django_db

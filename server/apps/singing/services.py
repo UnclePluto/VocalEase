@@ -243,9 +243,15 @@ def confirm_session_media(*, session_id: UUID, patient_id: UUID, asset_id: UUID 
             binding.confirmed_at = timezone.now()
             binding.save(update_fields=["confirmed_at"])
         bindings = list(SessionMedia.objects.select_related("asset").filter(session=session))
-        audio_ready = any(item.media_type == "singing_audio" and item.confirmed_at and item.asset.status == MediaAsset.Status.READY for item in bindings)
-        all_ready = all(item.confirmed_at and item.asset.status == MediaAsset.Status.READY for item in bindings)
-        if audio_ready and all_ready and session.status != SingingSession.Status.UPLOADED:
+        by_type = {item.media_type: item for item in bindings}
+        required_types = {"singing_audio", "singing_video"}
+        all_required_ready = all(
+            media_type in by_type
+            and by_type[media_type].confirmed_at
+            and by_type[media_type].asset.status == MediaAsset.Status.READY
+            for media_type in required_types
+        )
+        if all_required_ready and session.status != SingingSession.Status.UPLOADED:
             session.status = SingingSession.Status.UPLOADED
             session.save(update_fields=["status", "updated_at"])
         return session, binding
@@ -295,6 +301,9 @@ def _locked_ready_bindings(session: SingingSession) -> dict[str, SessionMedia]:
     audio = by_type.get("singing_audio")
     if not audio or not audio.confirmed_at or audio.asset.status != MediaAsset.Status.READY:
         raise SingingMediaConflict("演唱音频尚未通过可信回执确认")
+    video = by_type.get("singing_video")
+    if not video or not video.confirmed_at or video.asset.status != MediaAsset.Status.READY:
+        raise SingingMediaConflict("演唱录像尚未通过可信回执确认")
     if any(not item.confirmed_at or item.asset.status != MediaAsset.Status.READY for item in bindings):
         raise SingingMediaConflict("存在尚未确认完成的演唱媒体")
     return by_type
@@ -302,10 +311,10 @@ def _locked_ready_bindings(session: SingingSession) -> dict[str, SessionMedia]:
 
 def _create_generation_tasks_locked(*, session: SingingSession, generation: int) -> list[AnalysisTask]:
     by_type = _locked_ready_bindings(session)
-    task_specs = [(AnalysisTask.TaskType.SINGING_AUDIO_METRICS, by_type["singing_audio"].asset)]
-    video = by_type.get("singing_video")
-    if video:
-        task_specs.append((AnalysisTask.TaskType.FACE_LANDMARKS, video.asset))
+    task_specs = [
+        (AnalysisTask.TaskType.SINGING_AUDIO_METRICS, by_type["singing_audio"].asset),
+        (AnalysisTask.TaskType.FACE_LANDMARKS, by_type["singing_video"].asset),
+    ]
     tasks = []
     for task_type, asset in task_specs:
         defaults = {

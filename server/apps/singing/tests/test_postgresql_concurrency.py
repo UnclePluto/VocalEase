@@ -10,7 +10,6 @@ from apps.singing.executors import mock_singing_result
 from apps.singing.models import SessionMedia, SingingSession
 from apps.singing.services import SingingCreationConflict, SingingMediaConflict
 
-from .test_analysis_execution import _add_ready_video
 from .test_submission_idempotency import uploaded_session
 
 
@@ -155,7 +154,7 @@ def test_postgresql_concurrent_same_key_submit_waits_on_real_session_row_lock(mo
         target_type="singing_session",
         target_id=session.id,
         generation=0,
-    ).count() == 1
+    ).count() == 2
 
 
 def _created_session_without_media():
@@ -222,7 +221,6 @@ def test_postgresql_failure_retry_interleaving_fences_old_generation(monkeypatch
     if connection.vendor != "postgresql":
         pytest.skip("失败重试交错由真实 PostgreSQL 行锁测试证明")
     patient, session = uploaded_session()
-    _add_ready_video(patient, session)
     from apps.singing import services
     _disable_external_dispatch(monkeypatch)
 

@@ -360,14 +360,24 @@ def test_history_filters_dates_and_detail_exposes_versioned_result_series(patien
     SessionMedia.objects.create(
         session=session, asset=audio, media_type="singing_audio", confirmed_at=timezone.now(),
     )
+    video = MediaAsset.objects.create(
+        patient_owner=patient, owner_type="patient", owner_id=patient.id,
+        media_type="singing_video", backend="qiniu", object_key=f"test/singing_video/{uuid.uuid4().hex}",
+        mime="video/mp4", size=1024, etag="history-video", status="ready", upload_expires_at=timezone.now(),
+    )
+    SessionMedia.objects.create(
+        session=session, asset=video, media_type="singing_video", confirmed_at=timezone.now(),
+    )
     session.status = "uploaded"
     session.save(update_fields=["status", "updated_at"])
     from apps.analysis.services import run_analysis
     from apps.singing.services import submit_session
-    task_id = submit_session(
+    submitted = submit_session(
         session_id=session.id, patient_id=patient.id, idempotency_key="history-result",
-    ).task_ids[0]
-    run_analysis(task_id)
+    )
+    assert len(submitted.task_ids) == 2
+    for task_id in submitted.task_ids:
+        run_analysis(task_id)
     client = APIClient()
     client.force_authenticate(patient.user)
 
@@ -377,7 +387,10 @@ def test_history_filters_dates_and_detail_exposes_versioned_result_series(patien
 
     assert included.status_code == 200 and included.json()["data"]["count"] == 1
     assert excluded.status_code == 200 and excluded.json()["data"]["count"] == 0
-    result = detail.json()["data"]["analysis_results"][0]
+    result = next(
+        row for row in detail.json()["data"]["analysis_results"]
+        if row["task_type"] == "singing_audio_metrics"
+    )
     assert result["task_type"] == "singing_audio_metrics"
     assert result["protocol_version"] == "1.0" and result["is_mock"] is True
     assert set(result["time_series"]) == {"volume", "pitch_hz", "snr_db"}

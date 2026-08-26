@@ -37,39 +37,55 @@ def test_confirm_upload_ignores_client_ready_claim_and_requires_trusted_receipt(
         "/api/v1/patient/singing-sessions/", {"song_id": str(song.id)}, format="json",
         HTTP_IDEMPOTENCY_KEY="confirm-receipt-create",
     ).json()["data"]
-    grant = client.post(
+    audio_grant = client.post(
         f"/api/v1/patient/singing-sessions/{session['id']}/upload-grants/",
         {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}, format="json",
     ).json()["data"]
-
     forged = client.post(
         f"/api/v1/patient/singing-sessions/{session['id']}/confirm-upload/",
-        {"asset_id": grant["asset_id"], "status": "ready"}, format="json",
+        {"asset_id": audio_grant["asset_id"], "status": "ready"}, format="json",
     )
 
     assert forged.status_code == 409
-    binding = SessionMedia.objects.get(asset_id=grant["asset_id"])
+    binding = SessionMedia.objects.get(asset_id=audio_grant["asset_id"])
     assert binding.confirmed_at is None and binding.asset.status == "uploading"
 
-    assert client.put(grant["upload_url"], b"source", content_type="audio/mpeg").status_code == 204
-    confirmed = client.post(
+    assert client.put(audio_grant["upload_url"], b"source", content_type="audio/mpeg").status_code == 204
+    audio_confirmed = client.post(
         f"/api/v1/patient/singing-sessions/{session['id']}/confirm-upload/",
-        {"object_key": grant["object_key"]}, format="json",
+        {"object_key": audio_grant["object_key"]}, format="json",
     )
     duplicate = client.post(
         f"/api/v1/patient/singing-sessions/{session['id']}/confirm-upload/",
-        {"asset_id": grant["asset_id"]}, format="json",
+        {"asset_id": audio_grant["asset_id"]}, format="json",
     )
-    assert confirmed.status_code == duplicate.status_code == 200
-    assert duplicate.json()["data"]["status"] == "uploaded"
+    assert audio_confirmed.status_code == duplicate.status_code == 200
+    assert duplicate.json()["data"]["status"] == "awaiting_upload"
+
+    video_grant = client.post(
+        f"/api/v1/patient/singing-sessions/{session['id']}/upload-grants/",
+        {"media_type": "singing_video", "mime": "video/mp4", "size": 6}, format="json",
+    ).json()["data"]
+    assert client.put(video_grant["upload_url"], b"video!", content_type="video/mp4").status_code == 204
+    video_confirmed = client.post(
+        f"/api/v1/patient/singing-sessions/{session['id']}/confirm-upload/",
+        {"asset_id": video_grant["asset_id"]}, format="json",
+    )
+    assert video_confirmed.status_code == 200
+    assert video_confirmed.json()["data"]["status"] == "uploaded"
 
 
 @pytest.mark.django_db
 def test_retry_endpoint_only_accepts_failed_session_and_is_idempotent(monkeypatch):
     patient, session = uploaded_session()
-    task_id = submit_session(
+    submitted = submit_session(
         session_id=session.id, patient_id=patient.id, idempotency_key="submit-before-retry",
-    ).task_ids[0]
+    )
+    assert len(submitted.task_ids) == 2
+    task_id = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+    ).id
     monkeypatch.setattr(
         executors.MockSingingAudioExecutor,
         "execute",
@@ -227,9 +243,18 @@ def test_upload_grant_rejects_overlong_idempotency_key_with_stable_validation(pa
 @pytest.mark.django_db
 def test_transient_failure_retries_without_partial_session_and_recovery_completes(monkeypatch):
     patient, session = uploaded_session()
-    task_id = submit_session(
+    submitted = submit_session(
         session_id=session.id, patient_id=patient.id, idempotency_key="transient",
-    ).task_ids[0]
+    )
+    assert len(submitted.task_ids) == 2
+    task_id = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+    ).id
+    face_task = AnalysisTask.objects.get(
+        target_id=session.id,
+        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+    )
     monkeypatch.setattr(
         executors.MockSingingAudioExecutor,
         "execute",
@@ -251,9 +276,11 @@ def test_transient_failure_retries_without_partial_session_and_recovery_complete
     outcome = recover_analysis_tasks()
 
     task.refresh_from_db()
+    face_task.refresh_from_db()
     session.refresh_from_db()
-    assert outcome["dispatched"] == 1
-    assert task.status == "succeeded" and session.status == "completed"
+    assert outcome["dispatched"] == 2
+    assert task.status == face_task.status == "succeeded"
+    assert session.status == "completed"
 
 
 @pytest.mark.parametrize("session_status", ["uploaded", "processing", "failed", "cancelled"])
