@@ -1,14 +1,20 @@
 from django.db.models import (
     Case,
+    Count,
     IntegerField,
     OuterRef,
     Prefetch,
     Q,
+    Sum,
     Subquery,
     Value,
     When,
 )
+from django.db.models.functions import Coalesce
+from django.utils import timezone
 
+from apps.analytics.calculations import calculate_treatment_progress
+from apps.singing.models import SingingSession
 from .models import PatientProfile, TreatmentPlan
 
 
@@ -61,3 +67,40 @@ def patients_for_list(
     if status:
         queryset = queryset.filter(current_treatment_status=status)
     return queryset
+
+
+def patient_treatment_progress(*, patient: PatientProfile, today=None):
+    today = today or timezone.localdate()
+    plan = TreatmentPlan.objects.filter(
+        patient=patient,
+        status=TreatmentPlan.Status.ACTIVE,
+        deleted_at__isnull=True,
+    ).first()
+    if plan is None:
+        return None
+    completed = SingingSession.objects.filter(
+        patient=patient,
+        treatment_plan=plan,
+        status=SingingSession.Status.COMPLETED,
+        completed_at__isnull=False,
+    ).count()
+    elapsed_week = ((today - plan.start_date).days // 7) + 1
+    current_week = min(max(elapsed_week, 1), plan.cycle_weeks)
+    progress = calculate_treatment_progress(completed, plan.target_session_count)
+    return {
+        "completed_session_count": completed,
+        "target_session_count": plan.target_session_count,
+        "progress_percent": format(progress, "f") if progress is not None else None,
+        "current_week": current_week,
+    }
+
+
+def patient_singing_summary(*, patient: PatientProfile):
+    return SingingSession.objects.filter(
+        patient=patient,
+        status=SingingSession.Status.COMPLETED,
+        completed_at__isnull=False,
+    ).aggregate(
+        completed_session_count=Count("id"),
+        total_duration_seconds=Coalesce(Sum("duration_seconds"), 0),
+    )

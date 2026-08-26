@@ -40,6 +40,20 @@ class AdminSessionListQuerySerializer(SessionListQuerySerializer):
     patient_id = serializers.UUIDField(required=False, allow_null=True, default=None)
 
 
+class PatientTreatmentProgressSerializer(serializers.Serializer):
+    completed_session_count = serializers.IntegerField(min_value=0)
+    target_session_count = serializers.IntegerField(min_value=0)
+    progress_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, allow_null=True,
+    )
+    current_week = serializers.IntegerField(min_value=1)
+
+
+class PatientSingingSummarySerializer(serializers.Serializer):
+    completed_session_count = serializers.IntegerField(min_value=0)
+    total_duration_seconds = serializers.IntegerField(min_value=0)
+
+
 class SessionMediaReadSerializer(serializers.ModelSerializer):
     asset_id = serializers.UUIDField(read_only=True)
     status = serializers.CharField(source="asset.status", read_only=True)

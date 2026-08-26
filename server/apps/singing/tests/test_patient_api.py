@@ -1,5 +1,6 @@
 import io
 import uuid
+from datetime import date
 
 import pytest
 from django.db import connection
@@ -12,6 +13,8 @@ from apps.doctors.services import create_doctor
 from apps.media.models import MediaAsset
 from apps.media.services import claim_local_upload, complete_local_asset, create_upload_grant, get_storage_backend, publish_local_upload
 from apps.patients.services import create_patient, transition_treatment_plan_status
+from apps.patients.selectors import patient_singing_summary, patient_treatment_progress
+from apps.patients.models import TreatmentPlan
 from apps.singing.models import SingingSession
 from apps.songs.models import Song
 
@@ -78,6 +81,89 @@ def ready_song(tmp_path, settings, *, title="治疗歌曲"):
     return song
 
 
+def complete_session(session, *, duration_seconds):
+    SingingSession.objects.filter(pk=session.id).update(
+        status=SingingSession.Status.COMPLETED,
+        score=80,
+        burp_count=2,
+        duration_seconds=duration_seconds,
+        is_mock=True,
+        completed_at=timezone.now(),
+    )
+    session.refresh_from_db()
+    return session
+
+
+@pytest.mark.django_db
+def test_patient_treatment_progress_only_counts_completed_sessions_in_active_plan(patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings)
+    active_plan = patient.treatment_plans.get(status=TreatmentPlan.Status.ACTIVE)
+    first = complete_session(
+        SingingSession.objects.create_from_snapshots(patient=patient, song=song),
+        duration_seconds=120,
+    )
+    second = complete_session(
+        SingingSession.objects.create_from_snapshots(patient=patient, song=song),
+        duration_seconds=180,
+    )
+    previous_plan = TreatmentPlan.objects.create(
+        patient=patient,
+        start_date=date(2026, 7, 1),
+        cycle_weeks=4,
+        target_session_count=12,
+        status=TreatmentPlan.Status.COMPLETED,
+    )
+    complete_session(SingingSession.objects.create(
+        patient=patient,
+        song=song,
+        treatment_plan=previous_plan,
+        patient_snapshot=first.patient_snapshot,
+        song_snapshot=first.song_snapshot,
+        treatment_plan_snapshot={"id": str(previous_plan.id)},
+        status=SingingSession.Status.CREATED,
+    ), duration_seconds=300)
+    SingingSession.objects.create(
+        patient=patient,
+        song=song,
+        treatment_plan=active_plan,
+        patient_snapshot=first.patient_snapshot,
+        song_snapshot=first.song_snapshot,
+        treatment_plan_snapshot=first.treatment_plan_snapshot,
+        status=SingingSession.Status.PROCESSING,
+    )
+
+    snapshot = patient_treatment_progress(patient=patient, today=date(2026, 8, 17))
+
+    assert snapshot == {
+        "completed_session_count": 2,
+        "target_session_count": active_plan.target_session_count,
+        "progress_percent": "16.67",
+        "current_week": 3,
+    }
+    assert patient_singing_summary(patient=patient) == {
+        "completed_session_count": 3,
+        "total_duration_seconds": 600,
+    }
+
+
+@pytest.mark.django_db
+def test_patient_treatment_progress_is_none_without_active_plan_but_summary_remains(patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings)
+    session = complete_session(
+        SingingSession.objects.create_from_snapshots(patient=patient, song=song),
+        duration_seconds=120,
+    )
+    TreatmentPlan.objects.filter(pk=session.treatment_plan_id).update(
+        status=TreatmentPlan.Status.COMPLETED,
+    )
+
+    assert patient_treatment_progress(patient=patient, today=date(2026, 8, 17)) is None
+    assert patient_singing_summary(patient=patient) == {
+        "completed_session_count": 1,
+        "total_duration_seconds": 120,
+    }
+
+
 @pytest.mark.django_db
 def test_patient_reads_profile_active_plan_and_only_own_sessions(patient, other_patient, tmp_path, settings):
     song = ready_song(tmp_path, settings)
@@ -92,9 +178,44 @@ def test_patient_reads_profile_active_plan_and_only_own_sessions(patient, other_
     assert me.status_code == 200
     assert me.json()["data"]["id"] == str(patient.id)
     assert me.json()["data"]["active_treatment_plan"]["status"] == "active"
+    progress = me.json()["data"]["treatment_progress"]
+    assert set(progress) == {
+        "completed_session_count", "target_session_count", "progress_percent", "current_week",
+    }
+    assert progress["completed_session_count"] == 0
+    assert progress["target_session_count"] == patient.treatment_plans.get().target_session_count
+    assert progress["progress_percent"] == "0.00"
+    assert me.json()["data"]["singing_summary"] == {
+        "completed_session_count": 0,
+        "total_duration_seconds": 0,
+    }
     assert sessions.status_code == 200
     assert [row["id"] for row in sessions.json()["data"]["results"]] == [str(own.id)]
     assert client.get(f"/api/v1/patient/singing-sessions/{other.id}/").status_code == 404
+
+
+@pytest.mark.django_db
+def test_patient_me_keeps_history_summary_without_active_plan(patient, tmp_path, settings):
+    song = ready_song(tmp_path, settings)
+    session = complete_session(
+        SingingSession.objects.create_from_snapshots(patient=patient, song=song),
+        duration_seconds=120,
+    )
+    TreatmentPlan.objects.filter(pk=session.treatment_plan_id).update(
+        status=TreatmentPlan.Status.COMPLETED,
+    )
+    client = APIClient()
+    client.force_authenticate(patient.user)
+
+    response = client.get("/api/v1/patient/me/")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["active_treatment_plan"] is None
+    assert response.json()["data"]["treatment_progress"] is None
+    assert response.json()["data"]["singing_summary"] == {
+        "completed_session_count": 1,
+        "total_duration_seconds": 120,
+    }
 
 
 @pytest.mark.django_db

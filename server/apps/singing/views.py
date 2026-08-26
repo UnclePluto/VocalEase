@@ -11,6 +11,7 @@ from apps.accounts.models import Role
 from apps.accounts.views import api_response
 from apps.audit.services import record
 from apps.patients.models import PatientProfile, TreatmentPlan
+from apps.patients.selectors import patient_singing_summary, patient_treatment_progress
 from apps.patients.serializers import TreatmentPlanReadSerializer
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
@@ -19,6 +20,7 @@ from common.api.schema import ApiEnvelopeSerializer
 from .selectors import attach_analysis_details, sessions_for_admin, sessions_for_patient
 from .serializers import (
     AdminSessionListQuerySerializer, ConfirmSessionMediaSerializer, CreateSessionSerializer,
+    PatientSingingSummarySerializer, PatientTreatmentProgressSerializer,
     SessionListQuerySerializer, SessionUploadGrantSerializer, SingingSessionReadSerializer,
     SingingSessionSummarySerializer,
 )
@@ -59,12 +61,19 @@ class PatientMeView(APIView):
         plan = TreatmentPlan.objects.filter(
             patient=patient, status=TreatmentPlan.Status.ACTIVE, deleted_at__isnull=True,
         ).first()
+        treatment_progress = patient_treatment_progress(patient=patient)
+        singing_summary = patient_singing_summary(patient=patient)
         data = {
             "id": str(patient.id), "medical_record_no": patient.medical_record_no,
             "name": patient.name, "gender": patient.gender, "enrollment_age": patient.enrollment_age,
             "phone": patient.phone, "notes": patient.notes,
             "primary_doctor": {"id": str(patient.primary_doctor_id), "name": patient.primary_doctor.name},
             "active_treatment_plan": TreatmentPlanReadSerializer(plan).data if plan else None,
+            "treatment_progress": (
+                PatientTreatmentProgressSerializer(treatment_progress).data
+                if treatment_progress else None
+            ),
+            "singing_summary": PatientSingingSummarySerializer(singing_summary).data,
         }
         return api_response(data=data, request_id=request.request_id)
 
