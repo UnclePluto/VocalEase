@@ -18,6 +18,11 @@ from apps.audit.services import record
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 from common.api.schema import ApiEnvelopeSerializer
+from apps.singing.schema import (
+    PatientSongEnvelopeSerializer,
+    PatientSongPageEnvelopeSerializer,
+    PrivateUrlEnvelopeSerializer,
+)
 
 from .models import Song
 from .selectors import songs_for_admin, songs_for_patient
@@ -173,6 +178,7 @@ class AdminSongAnalysisStatusView(APIView):
 class PatientSongListView(APIView):
     permission_classes = [PatientCatalogPermission, MustChangePasswordPermission]
 
+    @extend_schema(responses={200: PatientSongPageEnvelopeSerializer})
     def get(self, request):
         query = _validated_song_query(request, PatientSongListQuerySerializer)
         queryset = songs_for_patient(keyword=query["keyword"], ordering=query["sort"])
@@ -200,6 +206,7 @@ class PatientSongDetailView(APIView):
             raise Http404
         return song
 
+    @extend_schema(responses={200: PatientSongEnvelopeSerializer})
     def get(self, request, song_id):
         return api_response(data=PatientSongReadSerializer(self.get_object(song_id)).data, request_id=request.request_id)
 
@@ -207,7 +214,7 @@ class PatientSongDetailView(APIView):
 class PatientSongPreviewView(APIView):
     permission_classes = [PatientCatalogPermission, MustChangePasswordPermission]
 
-    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
+    @extend_schema(request=None, responses={200: PrivateUrlEnvelopeSerializer})
     def post(self, request, song_id):
         private_url = preview_source(actor=request.user, request_id=request.request_id, song=PatientSongDetailView().get_object(song_id))
         return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)

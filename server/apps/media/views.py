@@ -24,6 +24,10 @@ from apps.media.contracts import PATIENT_MEDIA_TYPES, StorageValidationError
 from apps.media.models import MediaAsset
 from apps.media.services import backend_for_asset, claim_local_upload, complete_local_asset, complete_qiniu_callback, create_upload_grant, ensure_local_asset_layout, publish_local_upload, release_local_upload, storage_backend_for
 from apps.patients.models import PatientProfile
+from apps.singing.schema import (
+    PatientMediaUploadGrantEnvelopeSerializer,
+    PrivateUrlEnvelopeSerializer,
+)
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 from common.api.schema import (
     ApiEnvelopeSerializer,
@@ -65,7 +69,10 @@ class PatientUploadGrantView(GrantMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
-    @extend_schema(request=MediaUploadGrantRequestSerializer, responses={201: ApiEnvelopeSerializer})
+    @extend_schema(
+        request=MediaUploadGrantRequestSerializer,
+        responses={201: PatientMediaUploadGrantEnvelopeSerializer},
+    )
     def post(self, request):
         patient = _patient_for_user(request.user)
         if str(request.data.get("owner_id")) != str(patient.id):
@@ -162,7 +169,7 @@ class AdminCompleteView(AdminAssetMixin, APIView):
 
 
 class PatientPrivateUrlView(PatientAssetMixin, APIView):
-    @extend_schema(request=None, responses=ApiEnvelopeSerializer)
+    @extend_schema(request=None, responses={200: PrivateUrlEnvelopeSerializer})
     def post(self, request, asset_id):
         return _private_url_response(request, self.asset(request, asset_id))
 

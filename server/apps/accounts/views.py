@@ -32,6 +32,7 @@ from .serializers import (
     RefreshSerializer,
 )
 from .models import Role, User
+from .schema import LoginEnvelopeSerializer, RefreshEnvelopeSerializer
 from .services import change_password, login, reset_password
 from .tokens import ActiveUserJWTAuthentication, revoke_refresh_token, rotate_refresh_token
 from common.api.schema import ApiEnvelopeSerializer
@@ -126,7 +127,7 @@ class LoginView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_login"
 
-    @extend_schema(request=LoginSerializer, responses=ApiEnvelopeSerializer)
+    @extend_schema(request=LoginSerializer, responses={200: LoginEnvelopeSerializer})
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -165,7 +166,7 @@ class RefreshView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth_refresh"
 
-    @extend_schema(request=RefreshSerializer, responses=ApiEnvelopeSerializer)
+    @extend_schema(request=RefreshSerializer, responses={200: RefreshEnvelopeSerializer})
     def post(self, request):
         serializer = RefreshSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

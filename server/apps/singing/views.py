@@ -1,5 +1,5 @@
 from django.shortcuts import get_object_or_404
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import BasePermission
@@ -17,6 +17,13 @@ from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 from common.api.schema import ApiEnvelopeSerializer
 
+from .schema import (
+    PatientMeEnvelopeSerializer,
+    SessionMutationEnvelopeSerializer,
+    SessionUploadGrantEnvelopeSerializer,
+    SingingSessionEnvelopeSerializer,
+    SingingSessionPageEnvelopeSerializer,
+)
 from .selectors import attach_analysis_details, sessions_for_admin, sessions_for_patient
 from .serializers import (
     AdminSessionListQuerySerializer, ConfirmSessionMediaSerializer, CreateSessionSerializer,
@@ -56,6 +63,7 @@ def patient_for_request(request):
 class PatientMeView(APIView):
     permission_classes = [IsPatientUser, MustChangePasswordPermission]
 
+    @extend_schema(responses={200: PatientMeEnvelopeSerializer})
     def get(self, request):
         patient = patient_for_request(request)
         plan = TreatmentPlan.objects.filter(
@@ -81,6 +89,7 @@ class PatientMeView(APIView):
 class PatientSessionListView(APIView):
     permission_classes = [IsPatientUser, MustChangePasswordPermission]
 
+    @extend_schema(responses={200: SingingSessionPageEnvelopeSerializer})
     def get(self, request):
         patient = patient_for_request(request)
         query = _validated_session_query(request, SessionListQuerySerializer)
@@ -95,7 +104,15 @@ class PatientSessionListView(APIView):
 
     @extend_schema(
         request=CreateSessionSerializer,
-        responses={200: ApiEnvelopeSerializer, 201: ApiEnvelopeSerializer},
+        parameters=[
+            OpenApiParameter(
+                name="Idempotency-Key",
+                location=OpenApiParameter.HEADER,
+                required=True,
+                type=str,
+            ),
+        ],
+        responses={200: SingingSessionEnvelopeSerializer, 201: SingingSessionEnvelopeSerializer},
     )
     def post(self, request):
         patient = patient_for_request(request)
@@ -132,6 +149,7 @@ class PatientSessionMixin:
 
 
 class PatientSessionDetailView(PatientSessionMixin, APIView):
+    @extend_schema(responses={200: SingingSessionEnvelopeSerializer})
     def get(self, request, session_id):
         return api_response(
             data=SingingSessionReadSerializer(
@@ -147,7 +165,18 @@ class PatientSessionUploadGrantView(PatientSessionMixin, APIView):
 
     @extend_schema(
         request=SessionUploadGrantSerializer,
-        responses={200: ApiEnvelopeSerializer, 201: ApiEnvelopeSerializer},
+        parameters=[
+            OpenApiParameter(
+                name="Idempotency-Key",
+                location=OpenApiParameter.HEADER,
+                required=False,
+                type=str,
+            ),
+        ],
+        responses={
+            200: SessionUploadGrantEnvelopeSerializer,
+            201: SessionUploadGrantEnvelopeSerializer,
+        },
     )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
@@ -181,7 +210,10 @@ class PatientSessionConfirmUploadView(PatientSessionMixin, APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "credential_upload"
 
-    @extend_schema(request=ConfirmSessionMediaSerializer, responses={200: ApiEnvelopeSerializer})
+    @extend_schema(
+        request=ConfirmSessionMediaSerializer,
+        responses={200: SingingSessionEnvelopeSerializer},
+    )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         serializer = ConfirmSessionMediaSerializer(data=request.data)
@@ -195,7 +227,18 @@ class PatientSessionConfirmUploadView(PatientSessionMixin, APIView):
 class PatientSessionSubmitView(PatientSessionMixin, APIView):
     @extend_schema(
         request=None,
-        responses={200: ApiEnvelopeSerializer, 202: ApiEnvelopeSerializer},
+        parameters=[
+            OpenApiParameter(
+                name="Idempotency-Key",
+                location=OpenApiParameter.HEADER,
+                required=True,
+                type=str,
+            ),
+        ],
+        responses={
+            200: SessionMutationEnvelopeSerializer,
+            202: SessionMutationEnvelopeSerializer,
+        },
     )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
@@ -211,7 +254,7 @@ class PatientSessionSubmitView(PatientSessionMixin, APIView):
 
 
 class PatientSessionCancelView(PatientSessionMixin, APIView):
-    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
+    @extend_schema(request=None, responses={200: SingingSessionEnvelopeSerializer})
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
         session = cancel_session(session_id=session.id, patient_id=session.patient_id)
@@ -221,7 +264,18 @@ class PatientSessionCancelView(PatientSessionMixin, APIView):
 class PatientSessionRetryView(PatientSessionMixin, APIView):
     @extend_schema(
         request=None,
-        responses={200: ApiEnvelopeSerializer, 202: ApiEnvelopeSerializer},
+        parameters=[
+            OpenApiParameter(
+                name="Idempotency-Key",
+                location=OpenApiParameter.HEADER,
+                required=True,
+                type=str,
+            ),
+        ],
+        responses={
+            200: SessionMutationEnvelopeSerializer,
+            202: SessionMutationEnvelopeSerializer,
+        },
     )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
