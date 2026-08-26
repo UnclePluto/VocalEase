@@ -1,4 +1,5 @@
 from io import BytesIO, StringIO
+import hashlib
 import wave
 
 import pytest
@@ -11,12 +12,59 @@ from apps.analysis.models import AnalysisResult, AnalysisTask
 from apps.doctors.models import DoctorProfile
 from apps.media.models import MediaAsset
 from apps.patients.models import PatientProfile, TreatmentPlan
-from apps.singing.models import SingingSession
+from apps.singing.models import SessionMedia, SingingSession
 from apps.songs.models import Song
 from apps.media.services import storage_backend_for
 
 
 DEMO_LOGIN_IDS = {"demo-admin", "DDEMO001", "PDEMO001", "PDEMO002"}
+
+
+def _mp4_boxes(content):
+    offset = 0
+    while offset < len(content):
+        assert len(content) - offset >= 8
+        size = int.from_bytes(content[offset:offset + 4], "big")
+        box_type = content[offset + 4:offset + 8]
+        header_size = 8
+        if size == 1:
+            assert len(content) - offset >= 16
+            size = int.from_bytes(content[offset + 8:offset + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = len(content) - offset
+        assert size >= header_size
+        end = offset + size
+        assert end <= len(content)
+        yield box_type, content[offset + header_size:end]
+        offset = end
+    assert offset == len(content)
+
+
+def _assert_parseable_video_mp4(content):
+    top_level = list(_mp4_boxes(content))
+    top_types = [box_type for box_type, _payload in top_level]
+    assert b"ftyp" in top_types
+    assert b"moov" in top_types
+    assert any(box_type == b"mdat" and payload for box_type, payload in top_level)
+
+    moov = next(payload for box_type, payload in top_level if box_type == b"moov")
+    tracks = [payload for box_type, payload in _mp4_boxes(moov) if box_type == b"trak"]
+    handlers = []
+    for track in tracks:
+        mdia = next(
+            (payload for box_type, payload in _mp4_boxes(track) if box_type == b"mdia"),
+            None,
+        )
+        if mdia is None:
+            continue
+        hdlr = next(
+            (payload for box_type, payload in _mp4_boxes(mdia) if box_type == b"hdlr"),
+            None,
+        )
+        if hdlr is not None and len(hdlr) >= 12:
+            handlers.append(hdlr[8:12])
+    assert b"vide" in handlers
 
 
 def _demo_counts():
@@ -105,9 +153,11 @@ def test_seed_demo_is_idempotent_and_outputs_no_sensitive_values(tmp_path, setti
             expected_generation=asset.manifest_generation,
         ) as stream:
             content = stream.read()
+        assert asset.size == len(content)
+        assert asset.sha256 == hashlib.sha256(content).hexdigest()
         if asset.media_type == "singing_video":
             assert asset.mime == "video/mp4"
-            assert content[4:8] == b"ftyp"
+            _assert_parseable_video_mp4(content)
         else:
             assert asset.mime == "audio/wav"
             header = content[:12]
@@ -135,6 +185,76 @@ def test_seed_demo_restores_soft_deleted_demo_records_without_duplicates(tmp_pat
     assert patient.deleted_at is None
     assert patient.user.deleted_at is None and patient.user.is_active is True
     assert _demo_counts()["patients"] == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_seed_demo_upgrades_legacy_audio_only_session_in_place(tmp_path, settings):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    call_command("seed_demo", stdout=StringIO())
+    session = SingingSession.objects.filter(created_source="seed_demo").order_by("id").first()
+    session_id = session.id
+    video_binding = SessionMedia.objects.get(session=session, media_type="singing_video")
+    video_asset_id = video_binding.asset_id
+    face_task = AnalysisTask.objects.get(
+        target_type="singing_session",
+        target_id=session.id,
+        generation=session.analysis_generation,
+        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+    )
+    AnalysisResult.objects.filter(task=face_task).delete()
+    face_task.delete()
+    video_binding.delete()
+    MediaAsset.objects.filter(pk=video_asset_id).delete()
+
+    assert set(session.media_bindings.values_list("media_type", flat=True)) == {"singing_audio"}
+    assert AnalysisTask.objects.filter(target_id=session.id).count() == 1
+    assert AnalysisResult.objects.filter(task__target_id=session.id).count() == 1
+
+    call_command("seed_demo", stdout=StringIO())
+
+    session.refresh_from_db()
+    assert session.id == session_id
+    assert session.status == SingingSession.Status.COMPLETED and session.is_mock is True
+    bindings = list(session.media_bindings.select_related("asset").order_by("media_type"))
+    assert {binding.media_type for binding in bindings} == {"singing_audio", "singing_video"}
+    assert all(binding.confirmed_at and binding.asset.status == MediaAsset.Status.READY for binding in bindings)
+    video_asset = next(binding.asset for binding in bindings if binding.media_type == "singing_video")
+    backend = storage_backend_for("local")
+    private_url = backend.create_private_url(
+        video_asset.object_key,
+        ttl_seconds=60,
+        asset_id=video_asset.id,
+        expected_generation=video_asset.manifest_generation,
+    )
+    with backend.open_authorized_private(
+        private_url.token,
+        video_asset.object_key,
+        asset_id=video_asset.id,
+        expected_generation=video_asset.manifest_generation,
+    ) as stream:
+        video_content = stream.read()
+    assert video_asset.mime == "video/mp4"
+    assert video_asset.size == len(video_content)
+    assert video_asset.sha256 == hashlib.sha256(video_content).hexdigest()
+    _assert_parseable_video_mp4(video_content)
+    tasks = AnalysisTask.objects.filter(
+        target_type="singing_session",
+        target_id=session.id,
+        generation=session.analysis_generation,
+    )
+    assert set(tasks.values_list("task_type", flat=True)) == {
+        AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+        AnalysisTask.TaskType.FACE_LANDMARKS,
+    }
+    assert AnalysisResult.objects.filter(task__in=tasks).count() == 2
+    stable_binding_ids = tuple(bindings_item.id for bindings_item in bindings)
+    stable_task_ids = tuple(tasks.order_by("task_type").values_list("id", flat=True))
+
+    call_command("seed_demo", stdout=StringIO())
+
+    assert tuple(session.media_bindings.order_by("media_type").values_list("id", flat=True)) == stable_binding_ids
+    assert tuple(tasks.order_by("task_type").values_list("id", flat=True)) == stable_task_ids
 
 
 @pytest.mark.django_db(transaction=True)

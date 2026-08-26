@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import timedelta
 from io import BytesIO
 import os
@@ -12,6 +13,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.accounts.models import Role, User
+from apps.analysis.models import AnalysisResult, AnalysisTask
 from apps.analysis.services import run_analysis
 from apps.doctors.models import DoctorProfile
 from apps.media.backends.local import LocalStorageBackend
@@ -25,13 +27,28 @@ from apps.media.services import (
 )
 from apps.patients.models import PatientProfile, TreatmentPlan
 from apps.singing.models import SessionMedia, SingingSession
-from apps.singing.services import submit_session
+from apps.singing.services import _create_generation_tasks_locked, submit_session
 from apps.songs.models import Song
 from apps.songs.services import validate_source_asset
 
 
 DEMO_PASSWORD = "888888"
 DEMO_NAMESPACE = "https://vocaease.local/demo/"
+DEMO_MP4_BASE64 = (
+    b"AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAA0Ftb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAD6AABAAAB"
+    b"AAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC"
+    b"AAACa3RyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAD6AAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAE"
+    b"AAAAAAAAAAAAAAAAAAEAAAAAAEAAAABAAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAA+gAAAAAAAEAAAAAAeNtZGlhAAAA"
+    b"IG1kaGQAAAAAAAAAAAAAAAAAAEAAAABAAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcg"
+    b"AAAAGObWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABTnN0YmwA"
+    b"AADqc3RzZAAAAAAAAAABAAAA2m1wNHYAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAEAAQAEgAAABIAAAAAAAAAAETTGF2YzYyLj"
+    b"I4LjEwMSBtcGVnNAAAAAAAAAAAAAAAAAAY//8AAABgZXNkcwAAAAADgICATwABAASAgIBBIBEAAAAAAw1AAAAAiAWAgIAvAAAB"
+    b"sAEAAAG1iRMAAAEAAAABIADEjYgADQCEAhRjAAABskxhdmM2Mi4yOC4xMDEGgICAAQIAAAAQcGFzcAAAAAEAAAABAAAAFGJ0"
+    b"cnQAAAAAAAMNQAAAAIgAAAAYc3R0cwAAAAAAAAABAAAAAQAAQAAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAFHN0c3"
+    b"oAAAAAAAAAEQAAAAEAAAAUc3RjbwAAAAAAAAABAAADbQAAAGJ1ZHRhAAAAWm1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJh"
+    b"cHBsAAAAAAAAAAAAAAAALWlsc3QAAAAlqXRvbwAAAB1kYXRhAAAAAQAAAABMYXZmNjIuMTIuMTAxAAAACGZyZWUAAAAZbWRhd"
+    b"AAAAbMAEAcAAAG2FgUYI9t+"
+)
 
 
 def _demo_wav(label: str, duration_ms: int = 90_000) -> bytes:
@@ -49,12 +66,9 @@ def _demo_wav(label: str, duration_ms: int = 90_000) -> bytes:
     return output.getvalue()
 
 
-def _demo_mp4(label: str) -> bytes:
-    """生成带标准 ftyp 盒的最小 MP4 演示占位媒体。"""
-    ftyp = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
-    payload = label.encode("utf-8")
-    free = (len(payload) + 8).to_bytes(4, "big") + b"free" + payload
-    return ftyp + free
+def _demo_mp4() -> bytes:
+    """返回可解码的 16×16 单帧 MPEG-4 演示录像。"""
+    return base64.b64decode(DEMO_MP4_BASE64, validate=True)
 
 
 class Command(BaseCommand):
@@ -306,7 +320,7 @@ class Command(BaseCommand):
         days_ago: int,
     ) -> SingingSession:
         session_id = uuid5(NAMESPACE_URL, f"{DEMO_NAMESPACE}{key}")
-        session = SingingSession.objects.filter(pk=session_id).first()
+        session = SingingSession.objects.select_for_update().filter(pk=session_id).first()
         if session is None:
             plan = patient.treatment_plans.get(
                 status=TreatmentPlan.Status.ACTIVE,
@@ -357,7 +371,7 @@ class Command(BaseCommand):
                 owner_id=patient.id,
                 media_type="singing_video",
                 mime="video/mp4",
-                content=_demo_mp4(f"demo-video-{key}"),
+                content=_demo_mp4(),
                 backend=backend,
             )
             SessionMedia.objects.create(
@@ -381,6 +395,92 @@ class Command(BaseCommand):
             session.refresh_from_db()
         if session.created_source != "seed_demo" or session.patient_id != patient.id:
             raise ValueError(f"演示演唱 {key} 的固定标识已被其他数据占用")
+        bindings = list(session.media_bindings.select_related("asset"))
+        generation_tasks = AnalysisTask.objects.filter(
+            target_type=AnalysisTask.TargetType.SINGING_SESSION,
+            target_id=session.id,
+            generation=session.analysis_generation,
+        )
+        binding_types = {binding.media_type for binding in bindings}
+        task_types = set(generation_tasks.values_list("task_type", flat=True))
+        result_types = set(
+            AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
+                "task__task_type", flat=True,
+            )
+        )
+        audio_binding = next(
+            (binding for binding in bindings if binding.media_type == "singing_audio"),
+            None,
+        )
+        legacy_audio_only = bool(
+            session.status == SingingSession.Status.COMPLETED
+            and session.is_mock
+            and binding_types == {"singing_audio"}
+            and audio_binding
+            and audio_binding.confirmed_at
+            and audio_binding.asset.status == MediaAsset.Status.READY
+            and task_types == {AnalysisTask.TaskType.SINGING_AUDIO_METRICS}
+            and result_types == {AnalysisTask.TaskType.SINGING_AUDIO_METRICS}
+            and generation_tasks.get().status == AnalysisTask.Status.SUCCEEDED
+        )
+        if legacy_audio_only:
+            video = self._publish_asset(
+                owner_type=MediaAsset.OwnerType.PATIENT,
+                owner_id=patient.id,
+                media_type="singing_video",
+                mime="video/mp4",
+                content=_demo_mp4(),
+                backend=backend,
+            )
+            SessionMedia.objects.create(
+                session=session,
+                asset=video,
+                media_type="singing_video",
+                grant_idempotency_key=f"seed-demo:video-grant:{key}",
+                confirmed_at=timezone.now(),
+            )
+            session.status = SingingSession.Status.PROCESSING
+            session.completed_at = None
+            session.save(update_fields=["status", "completed_at", "updated_at"])
+            tasks = _create_generation_tasks_locked(
+                session=session,
+                generation=session.analysis_generation,
+            )
+            face_task = next(
+                task for task in tasks
+                if task.task_type == AnalysisTask.TaskType.FACE_LANDMARKS
+            )
+            run_analysis(face_task.id)
+            session.refresh_from_db()
+            bindings = list(session.media_bindings.select_related("asset"))
+            generation_tasks = AnalysisTask.objects.filter(
+                target_type=AnalysisTask.TargetType.SINGING_SESSION,
+                target_id=session.id,
+                generation=session.analysis_generation,
+            )
+            binding_types = {binding.media_type for binding in bindings}
+            task_types = set(generation_tasks.values_list("task_type", flat=True))
+            result_types = set(
+                AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
+                    "task__task_type", flat=True,
+                )
+            )
         if session.status != SingingSession.Status.COMPLETED or not session.is_mock:
             raise ValueError(f"演示演唱 {key} 状态不完整，拒绝静默覆盖")
+        required_media = {"singing_audio", "singing_video"}
+        required_tasks = {
+            AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
+            AnalysisTask.TaskType.FACE_LANDMARKS,
+        }
+        if (
+            binding_types != required_media
+            or any(
+                not binding.confirmed_at or binding.asset.status != MediaAsset.Status.READY
+                for binding in bindings
+            )
+            or task_types != required_tasks
+            or result_types != required_tasks
+            or generation_tasks.exclude(status=AnalysisTask.Status.SUCCEEDED).exists()
+        ):
+            raise ValueError(f"演示演唱 {key} 媒体或分析结果不完整，拒绝静默覆盖")
         return session
