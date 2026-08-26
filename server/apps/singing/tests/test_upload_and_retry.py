@@ -17,6 +17,7 @@ from apps.singing.services import submit_session
 from apps.media.backends.local import LocalStorageBackend
 from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import StorageValidationError
+from apps.media.models import MediaAsset
 from apps.media.services import (
     MediaConflict,
     STORAGE_BACKEND_FACTORIES,
@@ -177,7 +178,116 @@ def test_upload_grant_same_key_reuses_one_bound_asset(patient, tmp_path, setting
     assert first.status_code == 201 and second.status_code == 200, second.json()
     assert first.json()["data"]["asset_id"] == second.json()["data"]["asset_id"]
     assert first.json()["data"]["object_key"] == second.json()["data"]["object_key"]
+    assert first.json()["data"]["expires_at"] == second.json()["data"]["expires_at"]
     assert SessionMedia.objects.filter(session_id=session_id, media_type="singing_audio").count() == 1
+
+
+@pytest.mark.django_db
+def test_expired_upload_grant_reuses_one_bound_asset_with_a_new_deadline(
+    patient,
+    tmp_path,
+    settings,
+):
+    settings.MEDIA_UPLOAD_GRANT_TTL_SECONDS = 120
+    song = ready_song(tmp_path, settings)
+    client = APIClient()
+    client.force_authenticate(patient.user)
+    session_id = client.post(
+        "/api/v1/patient/singing-sessions/",
+        {"song_id": str(song.id)},
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="grant-expired-create",
+    ).json()["data"]["id"]
+    url = f"/api/v1/patient/singing-sessions/{session_id}/upload-grants/"
+    payload = {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}
+    first = client.post(
+        url,
+        payload,
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="grant-expired",
+    )
+    asset = MediaAsset.objects.get(pk=first.json()["data"]["asset_id"])
+    original_identity = (
+        asset.id,
+        asset.object_key,
+        asset.mime,
+        asset.size,
+        asset.owner_type,
+        asset.owner_id,
+        asset.patient_owner_id,
+        asset.manifest_generation,
+    )
+    MediaAsset.objects.filter(pk=asset.id).update(
+        upload_expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    renewal_started = timezone.now()
+
+    renewed = client.post(
+        url,
+        payload,
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="grant-expired",
+    )
+    renewal_finished = timezone.now()
+
+    assert renewed.status_code == 200, renewed.json()
+    assert renewed.json()["data"]["asset_id"] == str(asset.id)
+    assert renewed.json()["data"]["object_key"] == asset.object_key
+    renewed_deadline = datetime.fromisoformat(renewed.json()["data"]["expires_at"])
+    assert renewal_started + timedelta(seconds=120) <= renewed_deadline
+    assert renewed_deadline <= renewal_finished + timedelta(seconds=120)
+    asset.refresh_from_db()
+    assert (
+        asset.id,
+        asset.object_key,
+        asset.mime,
+        asset.size,
+        asset.owner_type,
+        asset.owner_id,
+        asset.patient_owner_id,
+        asset.manifest_generation,
+    ) == original_identity
+    assert SessionMedia.objects.filter(
+        session_id=session_id,
+        media_type="singing_audio",
+    ).count() == 1
+
+
+@pytest.mark.django_db
+def test_old_local_upload_url_cannot_bypass_current_asset_state(
+    patient,
+    tmp_path,
+    settings,
+):
+    song = ready_song(tmp_path, settings)
+    client = APIClient()
+    client.force_authenticate(patient.user)
+    session_id = client.post(
+        "/api/v1/patient/singing-sessions/",
+        {"song_id": str(song.id)},
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="old-upload-url-create",
+    ).json()["data"]["id"]
+    url = f"/api/v1/patient/singing-sessions/{session_id}/upload-grants/"
+    payload = {"media_type": "singing_audio", "mime": "audio/mpeg", "size": 6}
+    first = client.post(
+        url,
+        payload,
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="old-upload-url",
+    ).json()["data"]
+    assert client.post(
+        url,
+        payload,
+        format="json",
+        HTTP_IDEMPOTENCY_KEY="old-upload-url",
+    ).status_code == 200
+    MediaAsset.objects.filter(pk=first["asset_id"]).update(status=MediaAsset.Status.FAILED)
+
+    rejected = client.put(first["upload_url"], b"source", content_type="audio/mpeg")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "media_upload_in_progress"
 
 
 @pytest.mark.django_db
@@ -218,6 +328,62 @@ def test_qiniu_idempotent_reissue_keeps_object_deadline_and_insert_only_policy(m
     assert policy["fsizeLimit"] == 6
     assert policy["mimeLimit"] == "audio/mpeg"
     assert policy["deadline"] == int(asset.upload_expires_at.timestamp())
+
+    MediaAsset.objects.filter(pk=asset.id).update(
+        upload_expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    renewed_after = timezone.now()
+    renewed = reissue_upload_grant(asset=asset)
+    asset.refresh_from_db()
+
+    assert renewed.object_key == first.object_key == asset.object_key
+    assert renewed.expires_at == asset.upload_expires_at
+    assert renewed.expires_at > renewed_after
+    policy = auth.signed_policies[-1]
+    assert policy["scope"] == f"private:{asset.object_key}"
+    assert policy["insertOnly"] == 1
+    assert policy["fsizeLimit"] == asset.size
+    assert policy["mimeLimit"] == asset.mime
+    assert policy["callbackUrl"] == "https://api.test/callback"
+    assert policy["callbackBodyType"] == "application/x-www-form-urlencoded"
+    assert policy["callbackBody"] == "key=$(key)&hash=$(etag)&fsize=$(fsize)&mime=$(mimeType)"
+    assert policy["deadline"] == int(asset.upload_expires_at.timestamp())
+
+
+@pytest.mark.django_db
+def test_expired_upload_grant_backend_failure_keeps_database_deadline(
+    patient,
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    backend = LocalStorageBackend(
+        root=tmp_path,
+        signing_secret=settings.SECRET_KEY,
+        environment=settings.MEDIA_ENVIRONMENT,
+    )
+    monkeypatch.setitem(STORAGE_BACKEND_FACTORIES, "local", lambda: backend)
+    asset, _grant = create_upload_grant(
+        owner=patient,
+        media_type="singing_audio",
+        mime="audio/mpeg",
+        size=6,
+        backend=backend,
+    )
+    expired_deadline = timezone.now() - timedelta(minutes=1)
+    MediaAsset.objects.filter(pk=asset.id).update(upload_expires_at=expired_deadline)
+    monkeypatch.setattr(
+        backend,
+        "reissue_upload_grant",
+        lambda **_kwargs: (_ for _ in ()).throw(StorageValidationError("signing failed")),
+    )
+
+    with pytest.raises(MediaConflict):
+        reissue_upload_grant(asset=asset)
+
+    asset.refresh_from_db()
+    assert asset.upload_expires_at == expired_deadline
 
 
 @pytest.mark.django_db
@@ -350,6 +516,28 @@ def test_only_uploading_asset_can_reissue_upload_credential(
 
     with pytest.raises(MediaConflict):
         reissue_upload_grant(asset=asset)
+
+
+@pytest.mark.django_db
+def test_deleted_uploading_asset_cannot_reissue_upload_credential(
+    patient,
+    tmp_path,
+    settings,
+):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    asset, _grant = create_upload_grant(
+        owner=patient,
+        media_type="singing_audio",
+        mime="audio/mpeg",
+        size=6,
+    )
+    MediaAsset.objects.filter(pk=asset.id).update(deleted_at=timezone.now())
+
+    with pytest.raises(MediaConflict) as exc_info:
+        reissue_upload_grant(asset=asset)
+
+    assert exc_info.value.get_codes() == "media_grant_expired"
 
 
 @pytest.mark.django_db

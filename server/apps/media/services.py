@@ -76,18 +76,28 @@ def create_upload_grant(*, owner: PatientProfile | None = None, owner_type: str 
 
 
 def reissue_upload_grant(*, asset: MediaAsset) -> UploadGrant:
-    if asset.deleted_at is not None or asset.upload_expires_at <= timezone.now():
-        raise MediaConflict("上传凭证已过期或不可用", code="media_grant_expired")
-    if asset.status != MediaAsset.Status.UPLOADING:
-        raise MediaConflict("媒体当前状态不允许重签上传凭证", code="media_grant_not_reissuable")
-    backend = backend_for_asset(asset)
-    try:
-        return backend.reissue_upload_grant(
-            object_key=asset.object_key, owner_id=asset.owner_id, media_type=asset.media_type,
-            mime=asset.mime, size=asset.size, expires_at=asset.upload_expires_at,
-        )
-    except StorageValidationError as exc:
-        raise MediaConflict(str(exc), code="media_grant_expired") from exc
+    with transaction.atomic():
+        locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+        if locked.deleted_at is not None:
+            raise MediaConflict("上传凭证已过期或不可用", code="media_grant_expired")
+        if locked.status != MediaAsset.Status.UPLOADING:
+            raise MediaConflict("媒体当前状态不允许重签上传凭证", code="media_grant_not_reissuable")
+        now = timezone.now()
+        expires_at = locked.upload_expires_at
+        if expires_at <= now:
+            expires_at = now + timedelta(seconds=settings.MEDIA_UPLOAD_GRANT_TTL_SECONDS)
+        backend = backend_for_asset(locked)
+        try:
+            grant = backend.reissue_upload_grant(
+                object_key=locked.object_key, owner_id=locked.owner_id, media_type=locked.media_type,
+                mime=locked.mime, size=locked.size, expires_at=expires_at,
+            )
+        except StorageValidationError as exc:
+            raise MediaConflict(str(exc), code="media_grant_expired") from exc
+        if locked.upload_expires_at != grant.expires_at:
+            locked.upload_expires_at = grant.expires_at
+            locked.save(update_fields=["upload_expires_at", "updated_at"])
+        return grant
 
 
 def _check_receipt(asset: MediaAsset, receipt: UploadReceipt) -> None:
