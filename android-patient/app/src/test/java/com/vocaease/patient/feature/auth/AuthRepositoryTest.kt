@@ -10,9 +10,12 @@ import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshResult
 import com.vocaease.patient.core.security.RefreshTokenLease
+import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
+import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
+import com.vocaease.patient.core.security.VaultInvalidatedException
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -186,10 +189,34 @@ class AuthRepositoryTest {
     }
 
     @Test
+    fun `fake解密自失效携带明确epoch且不再clear或重复广播`() = runBlocking {
+        val vault = FakeTokenVault(
+            accessToken = "expired",
+            refreshToken = "stored-refresh",
+            readFailure = IllegalArgumentException("cipher damaged"),
+        )
+        val coordinator = RefreshCoordinator(vault, FakeAuthRemote())
+        val eventCount = AtomicInteger()
+        val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+            coordinator.events.collect { eventCount.incrementAndGet() }
+        }
+        val failedEpoch = vault.sessionSnapshot().epoch
+
+        assertTrue(coordinator.refreshAfterUnauthorized(failedEpoch) is RefreshResult.Failed)
+        assertTrue(coordinator.refreshAfterUnauthorized(failedEpoch) is RefreshResult.Failed)
+        yield()
+
+        assertEquals(failedEpoch + 1, vault.sessionSnapshot().epoch)
+        assertEquals(0, vault.clearCalls.get())
+        assertEquals(1, eventCount.get())
+        collector.cancel()
+    }
+
+    @Test
     fun `旧代请求收到 401 时复用已更新 token 不二次刷新`() = runBlocking {
         val vault = FakeTokenVault(accessToken = "old", refreshToken = "refresh")
         val failedGeneration = vault.sessionSnapshot().epoch
-        vault.replaceTokens(failedGeneration, "already-new", "rotated")
+        vault.replaceTokens(failedGeneration, "already-new", "rotated", "manual-replacement")
         val remote = FakeAuthRemote()
         val coordinator = RefreshCoordinator(vault, remote)
 
@@ -197,6 +224,27 @@ class AuthRepositoryTest {
 
         assertEquals(0, remote.refreshCalls.get())
         assertEquals("already-new", (result as RefreshResult.Success).accessToken)
+    }
+
+    @Test
+    fun `旧epoch失败后新登录获胜时迟到旧401复用新token`() = runBlocking {
+        val vault = FakeTokenVault(accessToken = "expired", refreshToken = "stored-refresh")
+        val remote = FakeAuthRemote(
+            loginResult = session(access = "login-access", refresh = "login-refresh"),
+            refreshFailure = java.io.IOException("offline"),
+        )
+        val coordinator = RefreshCoordinator(vault, remote)
+        val repository = AuthRepository(vault, remote, coordinator)
+        val oldEpoch = vault.sessionSnapshot().epoch
+
+        assertTrue(coordinator.refreshAfterUnauthorized(oldEpoch) is RefreshResult.Failed)
+        repository.login("patient-001", "password")
+        val lateResult = coordinator.refreshAfterUnauthorized(oldEpoch)
+
+        assertTrue(lateResult is RefreshResult.Success)
+        assertEquals("login-access", (lateResult as RefreshResult.Success).accessToken)
+        assertEquals("login-access", vault.sessionSnapshot().accessToken)
+        assertEquals(1, remote.refreshCalls.get())
     }
 
     @Test
@@ -354,6 +402,7 @@ class AuthRepositoryTest {
 private class FakeTokenVault(
     accessToken: String? = null,
     refreshToken: String? = null,
+    private val readFailure: Throwable? = null,
     private val replaceFailure: Throwable? = null,
     private val replaceFailureAfterApply: Throwable? = null,
 ) : TokenVault {
@@ -363,20 +412,39 @@ private class FakeTokenVault(
 
     override fun sessionSnapshot(): SessionSnapshot = synchronized(this) { access }
 
-    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = synchronized(this) {
-        if (access.epoch == expectedEpoch) refresh?.let { RefreshTokenLease(it, expectedEpoch) } else null
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenRead = synchronized(this) {
+        if (access.epoch == expectedEpoch && refresh != null) {
+            readFailure?.let { failure ->
+                val invalidation = SessionInvalidation(access.epoch, access.epoch + 1)
+                refresh = null
+                access = SessionSnapshot(null, invalidation.toEpoch)
+                return@synchronized RefreshTokenRead.Invalidated(invalidation, failure)
+            }
+            RefreshTokenRead.Available(RefreshTokenLease(requireNotNull(refresh), expectedEpoch))
+        } else {
+            RefreshTokenRead.Missing(access.epoch)
+        }
     }
 
     override suspend fun replaceTokens(
         expectedEpoch: Long,
         accessToken: String,
         refreshToken: String,
+        replacementId: String,
     ): SessionMutation {
-        replaceFailure?.let { throw it }
+        replaceFailure?.let { failure ->
+            synchronized(this) {
+                if (access.epoch != expectedEpoch) return SessionMutation(false, access)
+                val invalidation = SessionInvalidation(access.epoch, access.epoch + 1)
+                refresh = null
+                access = SessionSnapshot(null, invalidation.toEpoch)
+                throw VaultInvalidatedException(invalidation, failure)
+            }
+        }
         val mutation = synchronized(this) {
             if (access.epoch != expectedEpoch) return@synchronized SessionMutation(false, access)
             refresh = refreshToken
-            access = SessionSnapshot(accessToken, access.epoch + 1)
+            access = SessionSnapshot(accessToken, access.epoch + 1, replacementId)
             SessionMutation(true, access)
         }
         if (mutation.applied) replaceFailureAfterApply?.let { throw it }
@@ -394,7 +462,8 @@ private class FakeTokenVault(
         }
     }
 
-    suspend fun refreshValue(): String? = readRefreshToken(sessionSnapshot().epoch)?.value
+    suspend fun refreshValue(): String? =
+        (readRefreshToken(sessionSnapshot().epoch) as? RefreshTokenRead.Available)?.lease?.value
 }
 
 private class FakeAuthRemote(

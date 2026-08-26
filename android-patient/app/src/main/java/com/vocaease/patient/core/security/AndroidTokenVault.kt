@@ -3,13 +3,18 @@ package com.vocaease.patient.core.security
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.system.ErrnoException
 import android.system.Os
 import android.util.AtomicFile
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
+import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.ProviderException
+import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -39,16 +44,19 @@ class AndroidTokenVault(
 
     override fun sessionSnapshot(): SessionSnapshot = session.get()
 
-    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = serialized {
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenRead = serialized {
         val current = session.get()
-        if (current.epoch != expectedEpoch || !fileStore.exists()) return@serialized null
+        if (current.epoch != expectedEpoch || !fileStore.exists()) {
+            return@serialized RefreshTokenRead.Missing(current.epoch)
+        }
         try {
             val token = decrypt(fileStore.readFully())
             require(token.isNotBlank()) { "refresh token 为空" }
-            RefreshTokenLease(token, current.epoch)
-        } catch (_: Exception) {
-            invalidateLocked(current)
-            null
+            RefreshTokenRead.Available(RefreshTokenLease(token, current.epoch))
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            RefreshTokenRead.Invalidated(invalidateLocked(current), error)
         }
     }
 
@@ -56,6 +64,7 @@ class AndroidTokenVault(
         expectedEpoch: Long,
         accessToken: String,
         refreshToken: String,
+        replacementId: String,
     ): SessionMutation {
         require(accessToken.isNotBlank()) { "access token 不能为空" }
         require(refreshToken.isNotBlank()) { "refresh token 不能为空" }
@@ -66,11 +75,16 @@ class AndroidTokenVault(
             }
             try {
                 fileStore.writeAtomically(encrypt(refreshToken))
-                val updated = SessionSnapshot(accessToken, current.epoch + 1)
+                val updated = SessionSnapshot(accessToken, current.epoch + 1, replacementId)
                 session.set(updated)
                 SessionMutation(applied = true, updated)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
-                invalidateLocked(current)
+                val invalidation = invalidateLocked(current)
+                if (error.isExpectedVaultFailure()) {
+                    throw VaultInvalidatedException(invalidation, error)
+                }
                 throw error
             }
         }
@@ -81,10 +95,20 @@ class AndroidTokenVault(
         if (expectedEpoch != null && current.epoch != expectedEpoch) {
             return@serialized SessionMutation(applied = false, current)
         }
-        val cleared = SessionSnapshot(accessToken = null, epoch = current.epoch + 1)
+        val cleared = SessionSnapshot(accessToken = null, epoch = current.epoch + 1, replacementId = null)
         session.set(cleared)
-        fileStore.delete()
-        SessionMutation(applied = true, cleared)
+        try {
+            fileStore.delete()
+            SessionMutation(applied = true, cleared)
+        } catch (error: Exception) {
+            if (error.isExpectedVaultFailure()) {
+                throw VaultInvalidatedException(
+                    SessionInvalidation(current.epoch, cleared.epoch),
+                    error,
+                )
+            }
+            throw error
+        }
     }
 
     private suspend fun <T> serialized(block: () -> T): T =
@@ -92,10 +116,18 @@ class AndroidTokenVault(
             storageMutex.withLock { block() }
         }
 
-    private fun invalidateLocked(current: SessionSnapshot) {
-        session.set(SessionSnapshot(accessToken = null, epoch = current.epoch + 1))
+    private fun invalidateLocked(current: SessionSnapshot): SessionInvalidation {
+        val invalidation = SessionInvalidation(current.epoch, current.epoch + 1)
+        session.set(SessionSnapshot(accessToken = null, epoch = invalidation.toEpoch, replacementId = null))
         runCatching { fileStore.delete() }
+        return invalidation
     }
+
+    private fun Throwable.isExpectedVaultFailure(): Boolean =
+        this is IOException ||
+            this is GeneralSecurityException ||
+            this is ProviderException ||
+            this is ErrnoException
 
     private fun encrypt(refreshToken: String): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)

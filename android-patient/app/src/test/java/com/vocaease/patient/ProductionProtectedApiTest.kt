@@ -3,6 +3,7 @@ package com.vocaease.patient
 import com.vocaease.patient.core.network.SessionExpiredException
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.RefreshTokenLease
+import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
@@ -135,14 +136,23 @@ private class ProductionTokenVault(
     private var snapshot = SessionSnapshot(accessToken, 1)
 
     override fun sessionSnapshot(): SessionSnapshot = synchronized(this) { snapshot }
-    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = synchronized(this) {
-        if (snapshot.epoch == expectedEpoch) refreshToken?.let { RefreshTokenLease(it, expectedEpoch) } else null
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenRead = synchronized(this) {
+        if (snapshot.epoch == expectedEpoch && refreshToken != null) {
+            RefreshTokenRead.Available(RefreshTokenLease(requireNotNull(refreshToken), expectedEpoch))
+        } else {
+            RefreshTokenRead.Missing(snapshot.epoch)
+        }
     }
-    override suspend fun replaceTokens(expectedEpoch: Long, accessToken: String, refreshToken: String): SessionMutation =
+    override suspend fun replaceTokens(
+        expectedEpoch: Long,
+        accessToken: String,
+        refreshToken: String,
+        replacementId: String,
+    ): SessionMutation =
         synchronized(this) {
             if (snapshot.epoch != expectedEpoch) return@synchronized SessionMutation(false, snapshot)
             this.refreshToken = refreshToken
-            snapshot = SessionSnapshot(accessToken, snapshot.epoch + 1)
+            snapshot = SessionSnapshot(accessToken, snapshot.epoch + 1, replacementId)
             SessionMutation(true, snapshot)
         }
     override suspend fun clear(expectedEpoch: Long?): SessionMutation = synchronized(this) {

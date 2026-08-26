@@ -18,7 +18,9 @@ import com.vocaease.patient.core.network.dto.LoginRequestDto
 import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.security.AndroidTokenVault
+import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.VaultFileStore
+import com.vocaease.patient.core.security.VaultInvalidatedException
 import java.io.DataOutputStream
 import java.io.IOException
 import java.security.KeyStore
@@ -56,13 +58,14 @@ class AuthFlowTest {
     fun refreshToken使用Keystore密文且文件仅应用可读写() = runBlocking {
         val vault = AndroidTokenVault(context)
 
-        vault.replaceTokens(vault.sessionSnapshot().epoch, "memory-access", "refresh-plain-secret")
+        vault.replaceTokens(vault.sessionSnapshot().epoch, "memory-access", "refresh-plain-secret", "keystore-test")
 
         val file = context.getFileStreamPath(AndroidTokenVault.FILE_NAME)
         val bytes = file.readBytes()
         assertFalse(bytes.toString(Charsets.ISO_8859_1).contains("refresh-plain-secret"))
         assertEquals(AndroidTokenVault.FILE_VERSION, bytes.readIntAtStart())
-        assertEquals("refresh-plain-secret", vault.readRefreshToken(vault.sessionSnapshot().epoch)?.value)
+        val read = vault.readRefreshToken(vault.sessionSnapshot().epoch) as RefreshTokenRead.Available
+        assertEquals("refresh-plain-secret", read.lease.value)
         assertEquals("memory-access", vault.sessionSnapshot().accessToken)
         assertEquals(384, Os.stat(file.absolutePath).st_mode and 511)
 
@@ -75,11 +78,11 @@ class AuthFlowTest {
     @Test
     fun 密文篡改后立即删除文件并清空内存会话() = runBlocking {
         val vault = AndroidTokenVault(context)
-        vault.replaceTokens(vault.sessionSnapshot().epoch, "memory-access", "refresh-secret")
+        vault.replaceTokens(vault.sessionSnapshot().epoch, "memory-access", "refresh-secret", "tamper-test")
         val file = context.getFileStreamPath(AndroidTokenVault.FILE_NAME)
         file.writeBytes(file.readBytes().also { it[it.lastIndex] = (it.last() + 1).toByte() })
 
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertTrue(vault.readRefreshToken(vault.sessionSnapshot().epoch) is RefreshTokenRead.Invalidated)
 
         assertFalse(file.exists())
         assertNull(vault.sessionSnapshot().accessToken)
@@ -95,12 +98,12 @@ class AuthFlowTest {
             output.writeInt(17)
             output.write(ByteArray(29))
         }
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertTrue(vault.readRefreshToken(vault.sessionSnapshot().epoch) is RefreshTokenRead.Invalidated)
         assertFalse(file.exists())
 
-        vault.replaceTokens(vault.sessionSnapshot().epoch, "memory-access", "refresh-secret")
+        vault.replaceTokens(vault.sessionSnapshot().epoch, "memory-access", "refresh-secret", "alias-test")
         androidKeyStore().deleteEntry(AndroidTokenVault.KEY_ALIAS)
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertTrue(vault.readRefreshToken(vault.sessionSnapshot().epoch) is RefreshTokenRead.Invalidated)
         assertFalse(file.exists())
         assertNull(vault.sessionSnapshot().accessToken)
     }
@@ -111,12 +114,18 @@ class AuthFlowTest {
         val vault = AndroidTokenVault(context, fileStore = store)
         val initialEpoch = vault.sessionSnapshot().epoch
 
-        assertThrows(IOException::class.java) {
+        val failure = assertThrows(VaultInvalidatedException::class.java) {
             runBlocking {
-                vault.replaceTokens(initialEpoch, "must-not-survive", "refresh-must-not-survive")
+                vault.replaceTokens(
+                    initialEpoch,
+                    "must-not-survive",
+                    "refresh-must-not-survive",
+                    "write-failure-test",
+                )
             }
         }
 
+        assertTrue(failure.cause is IOException)
         assertFalse(store.exists())
         assertEquals(1, store.deleteCalls)
         assertNull(vault.sessionSnapshot().accessToken)
@@ -131,7 +140,7 @@ class AuthFlowTest {
         val replacements = coroutineScope {
             List(20) { index ->
                 async(Dispatchers.Default) {
-                    vault.replaceTokens(initialEpoch, "access-$index", "refresh-$index")
+                    vault.replaceTokens(initialEpoch, "access-$index", "refresh-$index", "concurrent-$index")
                 }
             }.awaitAll()
         }
@@ -232,15 +241,26 @@ private class UiTokenVault : com.vocaease.patient.core.security.TokenVault {
     override fun sessionSnapshot() = access
     override suspend fun readRefreshToken(expectedEpoch: Long) =
         if (access.epoch == expectedEpoch) refresh?.let {
-            com.vocaease.patient.core.security.RefreshTokenLease(it, expectedEpoch)
-        } else null
-    override suspend fun replaceTokens(expectedEpoch: Long, accessToken: String, refreshToken: String):
+            RefreshTokenRead.Available(
+                com.vocaease.patient.core.security.RefreshTokenLease(it, expectedEpoch),
+            )
+        } ?: RefreshTokenRead.Missing(access.epoch) else RefreshTokenRead.Missing(access.epoch)
+    override suspend fun replaceTokens(
+        expectedEpoch: Long,
+        accessToken: String,
+        refreshToken: String,
+        replacementId: String,
+    ):
         com.vocaease.patient.core.security.SessionMutation {
         if (access.epoch != expectedEpoch) {
             return com.vocaease.patient.core.security.SessionMutation(false, access)
         }
         refresh = refreshToken
-        access = com.vocaease.patient.core.security.SessionSnapshot(accessToken, access.epoch + 1)
+        access = com.vocaease.patient.core.security.SessionSnapshot(
+            accessToken,
+            access.epoch + 1,
+            replacementId,
+        )
         return com.vocaease.patient.core.security.SessionMutation(true, access)
     }
     override suspend fun clear(expectedEpoch: Long?): com.vocaease.patient.core.security.SessionMutation {

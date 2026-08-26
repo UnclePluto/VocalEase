@@ -11,6 +11,7 @@ import com.vocaease.patient.core.security.TokenVault
 import com.vocaease.patient.feature.auth.AuthRepository
 import com.vocaease.patient.feature.auth.VocaEaseAuthRemoteDataSource
 import kotlinx.coroutines.flow.SharedFlow
+import okhttp3.OkHttpClient
 
 internal class ProductionSessionGraph(
     val authRepository: AuthRepository,
@@ -22,8 +23,10 @@ internal fun createProductionSessionGraph(
     baseUrl: String,
     tokenVault: TokenVault,
     diagnosticSink: ((NetworkDiagnostic) -> Unit)? = null,
+    clientOverride: OkHttpClient? = null,
 ): ProductionSessionGraph {
-    val client = diagnosticSink?.let { NetworkModule.createAuthenticatedHttpClient(tokenVault, it) }
+    val client = clientOverride
+        ?: diagnosticSink?.let { NetworkModule.createAuthenticatedHttpClient(tokenVault, it) }
         ?: NetworkModule.createAuthenticatedHttpClient(tokenVault)
     val rawApi = NetworkModule.createApi(baseUrl, client)
     val authRemote = VocaEaseAuthRemoteDataSource(RawAuthApi(rawApi))

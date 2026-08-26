@@ -1,6 +1,6 @@
 package com.vocaease.patient.core.network
 
-import com.vocaease.patient.core.security.RefreshTokenLease
+import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
@@ -93,8 +93,14 @@ private class InterceptorTokenVault(
 ) : TokenVault {
     private val snapshot = SessionSnapshot(token, generation)
     override fun sessionSnapshot() = snapshot
-    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = null
-    override suspend fun replaceTokens(expectedEpoch: Long, accessToken: String, refreshToken: String) =
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenRead =
+        RefreshTokenRead.Missing(snapshot.epoch)
+    override suspend fun replaceTokens(
+        expectedEpoch: Long,
+        accessToken: String,
+        refreshToken: String,
+        replacementId: String,
+    ) =
         SessionMutation(false, snapshot)
     override suspend fun clear(expectedEpoch: Long?) = SessionMutation(false, snapshot)
 }

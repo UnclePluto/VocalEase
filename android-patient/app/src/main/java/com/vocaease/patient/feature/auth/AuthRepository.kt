@@ -17,11 +17,14 @@ import com.vocaease.patient.core.network.dto.LoginRequestDto
 import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.dto.toDomain
+import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.TokenVault
+import com.vocaease.patient.core.security.VaultInvalidatedException
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.ProviderException
+import java.util.UUID
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
@@ -100,9 +103,17 @@ class AuthRepository(
             mutableState.value = AuthState.Authenticated
             return
         }
-        if (tokenVault.readRefreshToken(current.epoch) == null) {
-            mutableState.value = AuthState.LoggedOut
-            return
+        when (val read = tokenVault.readRefreshToken(current.epoch)) {
+            is RefreshTokenRead.Missing -> {
+                mutableState.value = AuthState.LoggedOut
+                return
+            }
+            is RefreshTokenRead.Invalidated -> {
+                refreshCoordinator.recordVaultInvalidation(read.invalidation, read.cause)
+                mutableState.value = AuthState.LoggedOut
+                return
+            }
+            is RefreshTokenRead.Available -> Unit
         }
         when (val result = refreshCoordinator.refreshAfterUnauthorized(current.epoch)) {
             is RefreshResult.Success -> result.session?.let(::routeFor) ?: run {
@@ -119,6 +130,7 @@ class AuthRepository(
         }
         mutableOperation.value = AuthOperationState.Loading
         val attemptEpoch = secureClear().snapshot.epoch
+        val replacementId = UUID.randomUUID().toString()
         mutableState.value = AuthState.LoggedOut
         try {
             val session = remote.login(
@@ -131,13 +143,18 @@ class AuthRepository(
             )
             if (session.role != AccountRole.PATIENT) throw AuthContractException("仅支持患者账号登录")
             val refresh = session.refresh ?: throw AuthContractException("安卓登录响应缺少 refresh token")
-            val mutation = tokenVault.replaceTokens(attemptEpoch, session.access, refresh)
+            val mutation = tokenVault.replaceTokens(
+                expectedEpoch = attemptEpoch,
+                accessToken = session.access,
+                refreshToken = refresh,
+                replacementId = replacementId,
+            )
             if (mutation.applied) routeFor(session)
         } catch (error: CancellationException) {
-            applyLoginAttemptCleanup(attemptEpoch)
+            applyLoginAttemptCleanup(attemptEpoch, replacementId)
             throw error
         } catch (error: Throwable) {
-            applyLoginAttemptCleanup(attemptEpoch)
+            applyLoginAttemptCleanup(attemptEpoch, replacementId)
             mutableOperation.value = AuthOperationState.Error(error.userMessage(ApiEndpoint.AUTH_LOGIN))
         } finally {
             finishOperation()
@@ -150,40 +167,49 @@ class AuthRepository(
             return
         }
         mutableOperation.value = AuthOperationState.Loading
+        var passwordChanged = false
+        var refreshRead: RefreshTokenRead? = null
         try {
-            remote.changePassword(ChangePasswordRequestDto(oldPassword, newPassword))
-        } catch (error: CancellationException) {
-            applyLoggedOutCleanup(expectedEpoch = null)
-            throw error
-        } catch (error: Throwable) {
-            mutableOperation.value = AuthOperationState.Error(error.userMessage(ApiEndpoint.AUTH_CHANGE_PASSWORD))
-            return
-        } finally {
-            finishOperation()
-        }
+            try {
+                remote.changePassword(ChangePasswordRequestDto(oldPassword, newPassword))
+            } catch (error: CancellationException) {
+                applyLoggedOutCleanup(expectedEpoch = null)
+                throw error
+            } catch (error: Throwable) {
+                mutableOperation.value = AuthOperationState.Error(error.userMessage(ApiEndpoint.AUTH_CHANGE_PASSWORD))
+                return
+            }
+            passwordChanged = true
 
-        val beforeLogout = tokenVault.sessionSnapshot()
-        val refresh = tokenVault.readRefreshToken(beforeLogout.epoch)?.value
-        withContext(NonCancellable) {
-            tokenVault.clear()
-            mutableState.value = AuthState.LoggedOut
-            eventChannel.trySend(AuthEvent.PasswordChanged)
-        }
-        try {
-            remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            // 改密已成功，本地会话已经在线性化点销毁。
+            val beforeLogout = tokenVault.sessionSnapshot()
+            refreshRead = tokenVault.readRefreshToken(beforeLogout.epoch)
+            val refresh = (refreshRead as? RefreshTokenRead.Available)?.lease?.value
+            try {
+                remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // 改密已成功；远端登出失败不能阻止 finally 清理本地凭据。
+            }
+        } finally {
+            if (passwordChanged) {
+                withContext(NonCancellable) {
+                    if (refreshRead !is RefreshTokenRead.Invalidated) secureClear()
+                    mutableState.value = AuthState.LoggedOut
+                    eventChannel.trySend(AuthEvent.PasswordChanged)
+                }
+            }
+            finishOperation()
         }
     }
 
     suspend fun logout() {
         mutableOperation.value = AuthOperationState.Loading
         val beforeLogout = tokenVault.sessionSnapshot()
-        val refresh = tokenVault.readRefreshToken(beforeLogout.epoch)?.value
+        val refreshRead = tokenVault.readRefreshToken(beforeLogout.epoch)
+        val refresh = (refreshRead as? RefreshTokenRead.Available)?.lease?.value
         withContext(NonCancellable) {
-            tokenVault.clear()
+            if (refreshRead !is RefreshTokenRead.Invalidated) secureClear()
             mutableState.value = AuthState.LoggedOut
             mutableOperation.value = AuthOperationState.Idle
         }
@@ -213,11 +239,11 @@ class AuthRepository(
         if (mutation.snapshot.accessToken == null) mutableState.value = AuthState.LoggedOut
     }
 
-    private suspend fun applyLoginAttemptCleanup(attemptEpoch: Long) {
+    private suspend fun applyLoginAttemptCleanup(attemptEpoch: Long, replacementId: String) {
         val current = tokenVault.sessionSnapshot()
         val cleanupEpoch = when {
             current.epoch == attemptEpoch -> attemptEpoch
-            current.epoch == attemptEpoch + 1 && current.accessToken != null -> current.epoch
+            current.replacementId == replacementId -> current.epoch
             else -> null
         }
         val mutation = cleanupEpoch?.let { secureClear(it) }
@@ -230,9 +256,8 @@ class AuthRepository(
         withContext(NonCancellable) {
             try {
                 tokenVault.clear(expectedEpoch)
-            } catch (_: Exception) {
-                val current = tokenVault.sessionSnapshot()
-                SessionMutation(applied = current.epoch != expectedEpoch, snapshot = current)
+            } catch (error: VaultInvalidatedException) {
+                SessionMutation(applied = true, snapshot = tokenVault.sessionSnapshot())
             }
         }
 
@@ -250,6 +275,7 @@ class AuthRepository(
             else -> failure.userMessage
         }
         is AuthContractException, is NetworkContractException -> "服务返回的登录信息不完整，请稍后重试"
+        is VaultInvalidatedException -> "安全会话保存失败，请重新登录"
         is GeneralSecurityException, is ProviderException, is ErrnoException -> "安全会话保存失败，请重新登录"
         else -> throw this
     }

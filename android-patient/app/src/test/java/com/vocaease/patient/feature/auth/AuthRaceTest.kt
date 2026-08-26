@@ -9,6 +9,7 @@ import com.vocaease.patient.core.network.dto.LoginRequestDto
 import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.security.RefreshTokenLease
+import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
@@ -42,7 +43,7 @@ class AuthRaceTest {
 
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertNull(vault.sessionSnapshot().accessToken)
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertNull(vault.refreshValue())
     }
 
     @Test
@@ -88,7 +89,7 @@ class AuthRaceTest {
         assertTrue(result is RefreshResult.Success)
         assertEquals("login-access", (result as RefreshResult.Success).accessToken)
         assertEquals("login-access", vault.sessionSnapshot().accessToken)
-        assertEquals("login-refresh", vault.readRefreshToken(vault.sessionSnapshot().epoch)?.value)
+        assertEquals("login-refresh", vault.refreshValue())
     }
 
     @Test
@@ -106,7 +107,7 @@ class AuthRaceTest {
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertEquals(AuthOperationState.Idle, repository.operation.value)
         assertNull(vault.sessionSnapshot().accessToken)
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertNull(vault.refreshValue())
     }
 
     @Test
@@ -118,6 +119,7 @@ class AuthRaceTest {
 
         val change = async { repository.changePassword("old-password", "new-password") }
         remote.logoutStarted.await()
+        assertEquals(AuthOperationState.Loading, repository.operation.value)
         change.cancel(CancellationException("cancel logout after change"))
         val cancellation = runCatching { change.await() }.exceptionOrNull()
 
@@ -126,7 +128,7 @@ class AuthRaceTest {
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertEquals(AuthOperationState.Idle, repository.operation.value)
         assertNull(vault.sessionSnapshot().accessToken)
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertNull(vault.refreshValue())
     }
 
     @Test
@@ -144,7 +146,7 @@ class AuthRaceTest {
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertEquals(AuthOperationState.Idle, repository.operation.value)
         assertNull(vault.sessionSnapshot().accessToken)
-        assertNull(vault.readRefreshToken(vault.sessionSnapshot().epoch))
+        assertNull(vault.refreshValue())
     }
 }
 
@@ -157,20 +159,25 @@ private class LinearTokenVault(
 
     override fun sessionSnapshot(): SessionSnapshot = synchronized(this) { snapshot }
 
-    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenLease? = synchronized(this) {
-        if (snapshot.epoch != expectedEpoch) null else refresh?.let { RefreshTokenLease(it, expectedEpoch) }
+    override suspend fun readRefreshToken(expectedEpoch: Long): RefreshTokenRead = synchronized(this) {
+        if (snapshot.epoch == expectedEpoch && refresh != null) {
+            RefreshTokenRead.Available(RefreshTokenLease(requireNotNull(refresh), expectedEpoch))
+        } else {
+            RefreshTokenRead.Missing(snapshot.epoch)
+        }
     }
 
     override suspend fun replaceTokens(
         expectedEpoch: Long,
         accessToken: String,
         refreshToken: String,
+        replacementId: String,
     ): SessionMutation = synchronized(this) {
         if (snapshot.epoch != expectedEpoch) {
             SessionMutation(applied = false, snapshot)
         } else {
             refresh = refreshToken
-            snapshot = SessionSnapshot(accessToken, snapshot.epoch + 1)
+            snapshot = SessionSnapshot(accessToken, snapshot.epoch + 1, replacementId)
             SessionMutation(applied = true, snapshot)
         }
     }
@@ -185,6 +192,9 @@ private class LinearTokenVault(
         }
     }
 }
+
+private suspend fun TokenVault.refreshValue(): String? =
+    (readRefreshToken(sessionSnapshot().epoch) as? RefreshTokenRead.Available)?.lease?.value
 
 private class GatedAuthRemote(
     private val loginResult: AuthSession = authSession("access", "refresh"),
