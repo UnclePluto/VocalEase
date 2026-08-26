@@ -94,6 +94,16 @@ def complete_session(session, *, duration_seconds):
     return session
 
 
+def active_treatment_plan_selects(captured_queries):
+    return [
+        query["sql"]
+        for query in captured_queries
+        if query["sql"].lstrip().upper().startswith("SELECT")
+        and "patients_treatmentplan" in query["sql"]
+        and "status" in query["sql"]
+    ]
+
+
 @pytest.mark.django_db
 def test_patient_treatment_progress_only_counts_completed_sessions_in_active_plan(patient, tmp_path, settings):
     song = ready_song(tmp_path, settings)
@@ -172,10 +182,13 @@ def test_patient_reads_profile_active_plan_and_only_own_sessions(patient, other_
     client = APIClient()
     client.force_authenticate(patient.user)
 
-    me = client.get("/api/v1/patient/me/")
+    with CaptureQueriesContext(connection) as me_queries:
+        me = client.get("/api/v1/patient/me/")
+    captured_me_queries = list(me_queries.captured_queries)
     sessions = client.get("/api/v1/patient/singing-sessions/")
 
     assert me.status_code == 200
+    assert len(active_treatment_plan_selects(captured_me_queries)) == 1
     assert me.json()["data"]["id"] == str(patient.id)
     assert me.json()["data"]["active_treatment_plan"]["status"] == "active"
     progress = me.json()["data"]["treatment_progress"]
@@ -207,9 +220,11 @@ def test_patient_me_keeps_history_summary_without_active_plan(patient, tmp_path,
     client = APIClient()
     client.force_authenticate(patient.user)
 
-    response = client.get("/api/v1/patient/me/")
+    with CaptureQueriesContext(connection) as me_queries:
+        response = client.get("/api/v1/patient/me/")
 
     assert response.status_code == 200
+    assert len(active_treatment_plan_selects(me_queries.captured_queries)) == 1
     assert response.json()["data"]["active_treatment_plan"] is None
     assert response.json()["data"]["treatment_progress"] is None
     assert response.json()["data"]["singing_summary"] == {

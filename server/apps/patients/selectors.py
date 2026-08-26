@@ -18,6 +18,9 @@ from apps.singing.models import SingingSession
 from .models import PatientProfile, TreatmentPlan
 
 
+_ACTIVE_TREATMENT_PLAN_UNSET = object()
+
+
 def visible_treatment_plans():
     return TreatmentPlan.objects.filter(deleted_at__isnull=True).order_by(
         Case(
@@ -69,13 +72,23 @@ def patients_for_list(
     return queryset
 
 
-def patient_treatment_progress(*, patient: PatientProfile, today=None):
-    today = today or timezone.localdate()
-    plan = TreatmentPlan.objects.filter(
+def active_treatment_plan(*, patient: PatientProfile):
+    return TreatmentPlan.objects.filter(
         patient=patient,
         status=TreatmentPlan.Status.ACTIVE,
         deleted_at__isnull=True,
     ).first()
+
+
+def patient_treatment_progress(
+    *,
+    patient: PatientProfile,
+    plan=_ACTIVE_TREATMENT_PLAN_UNSET,
+    today=None,
+):
+    today = today or timezone.localdate()
+    if plan is _ACTIVE_TREATMENT_PLAN_UNSET:
+        plan = active_treatment_plan(patient=patient)
     if plan is None:
         return None
     completed = SingingSession.objects.filter(

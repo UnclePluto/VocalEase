@@ -32,6 +32,7 @@ from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermi
 from common.api.schema import (
     ApiEnvelopeSerializer,
     MediaUploadGrantRequestSerializer,
+    PatientMediaUploadGrantRequestSerializer,
     QiniuCallbackRequestSerializer,
 )
 
@@ -51,9 +52,10 @@ def _asset_data(asset):
 
 
 class GrantMixin:
-    def issue(self, request, *, owner_type, owner_id):
+    def issue(self, request, *, owner_type, owner_id, validated_data=None):
+        payload = request.data if validated_data is None else validated_data
         try:
-            media_type, mime, size = str(request.data["media_type"]), str(request.data["mime"]), int(request.data["size"])
+            media_type, mime, size = str(payload["media_type"]), str(payload["mime"]), int(payload["size"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValidationError({"media": "media_type、mime、size 均为必填项"}) from exc
         asset, grant = create_upload_grant(owner_type=owner_type, owner_id=owner_id, media_type=media_type, mime=mime, size=size)
@@ -70,16 +72,24 @@ class PatientUploadGrantView(GrantMixin, APIView):
     throttle_scope = "credential_upload"
 
     @extend_schema(
-        request=MediaUploadGrantRequestSerializer,
+        request=PatientMediaUploadGrantRequestSerializer,
         responses={201: PatientMediaUploadGrantEnvelopeSerializer},
     )
     def post(self, request):
         patient = _patient_for_user(request.user)
-        if str(request.data.get("owner_id")) != str(patient.id):
+        serializer = PatientMediaUploadGrantRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+        if payload["owner_id"] != patient.id:
             raise PermissionDenied("患者只能为本人申请上传凭证", code="media_owner_forbidden")
-        if request.data.get("media_type") not in PATIENT_MEDIA_TYPES:
+        if payload["media_type"] not in PATIENT_MEDIA_TYPES:
             raise PermissionDenied("患者仅可上传演唱音频或录像", code="media_type_forbidden")
-        return self.issue(request, owner_type="patient", owner_id=patient.id)
+        return self.issue(
+            request,
+            owner_type="patient",
+            owner_id=patient.id,
+            validated_data=payload,
+        )
 
 
 class AdminUploadGrantView(GrantMixin, APIView):

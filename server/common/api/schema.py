@@ -21,6 +21,13 @@ class MediaUploadGrantRequestSerializer(serializers.Serializer):
     size = serializers.IntegerField(min_value=1)
 
 
+class PatientMediaUploadGrantRequestSerializer(serializers.Serializer):
+    owner_id = serializers.UUIDField()
+    media_type = serializers.CharField()
+    mime = serializers.CharField()
+    size = serializers.IntegerField(min_value=1)
+
+
 class QiniuCallbackRequestSerializer(serializers.Serializer):
     key = serializers.CharField()
     hash = serializers.CharField()

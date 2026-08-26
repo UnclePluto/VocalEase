@@ -10,8 +10,12 @@ from rest_framework.views import APIView
 from apps.accounts.models import Role
 from apps.accounts.views import api_response
 from apps.audit.services import record
-from apps.patients.models import PatientProfile, TreatmentPlan
-from apps.patients.selectors import patient_singing_summary, patient_treatment_progress
+from apps.patients.models import PatientProfile
+from apps.patients.selectors import (
+    active_treatment_plan,
+    patient_singing_summary,
+    patient_treatment_progress,
+)
 from apps.patients.serializers import TreatmentPlanReadSerializer
 from common.api.pagination import paginated_data, validated_query
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
@@ -66,10 +70,8 @@ class PatientMeView(APIView):
     @extend_schema(responses={200: PatientMeEnvelopeSerializer})
     def get(self, request):
         patient = patient_for_request(request)
-        plan = TreatmentPlan.objects.filter(
-            patient=patient, status=TreatmentPlan.Status.ACTIVE, deleted_at__isnull=True,
-        ).first()
-        treatment_progress = patient_treatment_progress(patient=patient)
+        plan = active_treatment_plan(patient=patient)
+        treatment_progress = patient_treatment_progress(patient=patient, plan=plan)
         singing_summary = patient_singing_summary(patient=patient)
         data = {
             "id": str(patient.id), "medical_record_no": patient.medical_record_no,

@@ -87,16 +87,16 @@ class Command(BaseCommand):
     help = "创建或更新 VocaEase 本地演示数据"
 
     def handle(self, *args, **options):
-        replacement_assets: list[tuple[LocalStorageBackend, str, UUID]] = []
+        new_assets: list[tuple[LocalStorageBackend, str, UUID]] = []
         try:
             return self._handle_atomic(
                 *args,
-                replacement_assets=replacement_assets,
+                new_assets=new_assets,
                 **options,
             )
         except Exception:
-            # 此时原子装饰器已经完成数据库回滚，只补偿本次命令发布的新替换对象。
-            for backend, object_key, asset_id in reversed(replacement_assets):
+            # 此时原子装饰器已经完成数据库回滚，只补偿本次命令真正新发布的对象。
+            for backend, object_key, asset_id in reversed(new_assets):
                 backend.purge_for_qa(object_key, asset_id=asset_id)
             raise
 
@@ -104,11 +104,11 @@ class Command(BaseCommand):
     def _handle_atomic(
         self,
         *args,
-        replacement_assets: list[tuple[LocalStorageBackend, str, UUID]],
+        new_assets: list[tuple[LocalStorageBackend, str, UUID]],
         **options,
     ):
-        # 提交回调按登记顺序执行：先解除替换对象补偿，再清理各旧对象。
-        transaction.on_commit(replacement_assets.clear)
+        # 提交回调按登记顺序执行：先解除新对象补偿，再清理各旧对象。
+        transaction.on_commit(new_assets.clear)
         settings_module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
         if (
             settings_module
@@ -151,12 +151,14 @@ class Command(BaseCommand):
                 title="VocaEase 演示歌曲一",
                 artist="演示歌手甲",
                 backend=backend,
+                new_assets=new_assets,
             ),
             self._upsert_song(
                 key="song-2",
                 title="VocaEase 演示歌曲二",
                 artist="演示歌手乙",
                 backend=backend,
+                new_assets=new_assets,
             ),
         )
         for index in range(6):
@@ -166,7 +168,7 @@ class Command(BaseCommand):
                 song=songs[index % 2],
                 backend=backend,
                 days_ago=5 - index,
-                replacement_assets=replacement_assets,
+                new_assets=new_assets,
             )
 
         self.stdout.write(
@@ -271,6 +273,7 @@ class Command(BaseCommand):
         mime: str,
         content: bytes,
         backend: LocalStorageBackend,
+        new_assets: list[tuple[LocalStorageBackend, str, UUID]],
     ) -> MediaAsset:
         asset = None
         try:
@@ -296,7 +299,12 @@ class Command(BaseCommand):
                 prepared=prepared,
                 backend=backend,
             )
-            return complete_local_asset(asset=asset)
+            published_asset = complete_local_asset(asset=asset)
+            # 成功返回前即把补偿所有权移交给命令；append 失败仍落入本 helper 清理。
+            new_assets.append(
+                (backend, published_asset.object_key, published_asset.id)
+            )
+            return published_asset
         except Exception:
             if asset is not None:
                 backend.purge_for_qa(asset.object_key, asset_id=asset.id)
@@ -309,6 +317,7 @@ class Command(BaseCommand):
         title: str,
         artist: str,
         backend: LocalStorageBackend,
+        new_assets: list[tuple[LocalStorageBackend, str, UUID]],
     ) -> Song:
         song_id = uuid5(NAMESPACE_URL, f"{DEMO_NAMESPACE}{key}")
         song = Song.objects.filter(pk=song_id).first()
@@ -320,6 +329,7 @@ class Command(BaseCommand):
                 mime="audio/wav",
                 content=_demo_wav(f"demo-song-{key}"),
                 backend=backend,
+                new_assets=new_assets,
             )
             song = Song.objects.create(
                 id=song_id,
@@ -358,7 +368,7 @@ class Command(BaseCommand):
         song: Song,
         backend: LocalStorageBackend,
         days_ago: int,
-        replacement_assets: list[tuple[LocalStorageBackend, str, UUID]],
+        new_assets: list[tuple[LocalStorageBackend, str, UUID]],
     ) -> SingingSession:
         session_id = uuid5(NAMESPACE_URL, f"{DEMO_NAMESPACE}{key}")
         session = SingingSession.objects.select_for_update().filter(pk=session_id).first()
@@ -399,6 +409,7 @@ class Command(BaseCommand):
                 mime="audio/wav",
                 content=_demo_wav(f"demo-audio-{key}"),
                 backend=backend,
+                new_assets=new_assets,
             )
             SessionMedia.objects.create(
                 session=session,
@@ -414,6 +425,7 @@ class Command(BaseCommand):
                 mime="video/mp4",
                 content=_demo_mp4(),
                 backend=backend,
+                new_assets=new_assets,
             )
             SessionMedia.objects.create(
                 session=session,
@@ -534,9 +546,8 @@ class Command(BaseCommand):
                 mime="video/mp4",
                 content=_demo_mp4(),
                 backend=backend,
+                new_assets=new_assets,
             )
-            # _publish_asset 负责返回前失败；成功返回后由命令级事务台账唯一负责。
-            replacement_assets.append((backend, replacement.object_key, replacement.id))
             old_asset_id = video_asset.id
             old_object_key = video_asset.object_key
             video_binding.asset = replacement
@@ -616,6 +627,7 @@ class Command(BaseCommand):
                 mime="video/mp4",
                 content=_demo_mp4(),
                 backend=backend,
+                new_assets=new_assets,
             )
             SessionMedia.objects.create(
                 session=session,

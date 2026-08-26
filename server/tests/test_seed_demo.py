@@ -185,6 +185,51 @@ def _demo_counts():
 
 
 @pytest.mark.django_db(transaction=True)
+def test_seed_demo_removes_fresh_files_when_outer_transaction_rolls_back(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    baseline_counts = _demo_counts()
+    baseline_asset_count = MediaAsset.objects.count()
+    baseline_manifests, baseline_blobs = _local_storage_paths(tmp_path)
+    from apps.accounts.management.commands import seed_demo
+
+    published_path_counts = []
+
+    def fail_after_song_assets_are_published(_command, **_options):
+        current_manifests, current_blobs = _local_storage_paths(tmp_path)
+        assert current_manifests > baseline_manifests
+        assert current_blobs > baseline_blobs
+        published_path_counts.append(
+            (
+                len(current_manifests - baseline_manifests),
+                len(current_blobs - baseline_blobs),
+            )
+        )
+        raise RuntimeError("injected fresh seed failure")
+
+    monkeypatch.setattr(
+        seed_demo.Command,
+        "_upsert_completed_session",
+        fail_after_song_assets_are_published,
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="injected fresh seed failure"):
+            call_command("seed_demo", stdout=StringIO())
+        assert _demo_counts() == baseline_counts
+        assert MediaAsset.objects.count() == baseline_asset_count
+
+    current_manifests, current_blobs = _local_storage_paths(tmp_path)
+    assert published_path_counts == [(2, 2), (2, 2)]
+    assert current_manifests == baseline_manifests
+    assert current_blobs == baseline_blobs
+
+
+@pytest.mark.django_db(transaction=True)
 def test_seed_demo_is_idempotent_and_outputs_no_sensitive_values(tmp_path, settings):
     settings.MEDIA_BACKEND = "local"
     settings.MEDIA_LOCAL_ROOT = str(tmp_path)
@@ -341,6 +386,125 @@ def test_seed_demo_upgrades_legacy_audio_only_session_in_place(tmp_path, setting
 
     assert tuple(session.media_bindings.order_by("media_type").values_list("id", flat=True)) == stable_binding_ids
     assert tuple(tasks.order_by("task_type").values_list("id", flat=True)) == stable_task_ids
+
+
+@pytest.mark.django_db(transaction=True)
+def test_seed_demo_removes_audio_only_upgrade_files_when_later_step_rolls_back(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    call_command("seed_demo", stdout=StringIO())
+    session = SingingSession.objects.get(
+        id="8ce19dd3-433a-5bf1-8329-1017a53b323f",
+        created_source="seed_demo",
+        patient__medical_record_no="PDEMO001",
+    )
+    backend = storage_backend_for("local")
+    video_binding = SessionMedia.objects.get(
+        session=session,
+        media_type="singing_video",
+    )
+    video_asset = video_binding.asset
+    face_task = AnalysisTask.objects.get(
+        target_type=AnalysisTask.TargetType.SINGING_SESSION,
+        target_id=session.id,
+        generation=session.analysis_generation,
+        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+    )
+    AnalysisResult.objects.filter(task=face_task).delete()
+    face_task.delete()
+    video_binding.delete()
+    MediaAsset.objects.filter(pk=video_asset.id).delete()
+    backend.purge_for_qa(video_asset.object_key, asset_id=video_asset.id)
+
+    audio_binding = SessionMedia.objects.select_related("asset").get(
+        session=session,
+        media_type="singing_audio",
+    )
+    audio_asset = audio_binding.asset
+    audio_private_url = backend.create_private_url(
+        audio_asset.object_key,
+        ttl_seconds=60,
+        asset_id=audio_asset.id,
+        expected_generation=audio_asset.manifest_generation,
+    )
+    with backend.open_authorized_private(
+        audio_private_url.token,
+        audio_asset.object_key,
+        asset_id=audio_asset.id,
+        expected_generation=audio_asset.manifest_generation,
+    ) as stream:
+        baseline_audio_content = stream.read()
+    baseline_counts = _demo_counts()
+    baseline_asset_ids = set(MediaAsset.objects.values_list("id", flat=True))
+    baseline_manifests, baseline_blobs = _local_storage_paths(tmp_path)
+    from apps.accounts.management.commands import seed_demo
+
+    original_upsert = seed_demo.Command._upsert_completed_session
+    published_upgrades = []
+    published_path_counts = []
+
+    def fail_after_audio_only_upgrade(command, *, key, **upsert_options):
+        completed = original_upsert(command, key=key, **upsert_options)
+        if key == "session-1":
+            upgraded_video = SessionMedia.objects.get(
+                session=completed,
+                media_type="singing_video",
+            ).asset
+            manifest_path, blob_path = _asset_storage_paths(tmp_path, upgraded_video)
+            published_upgrades.append(
+                (upgraded_video.id, manifest_path, blob_path)
+            )
+            current_manifests, current_blobs = _local_storage_paths(tmp_path)
+            published_path_counts.append(
+                (
+                    len(current_manifests - baseline_manifests),
+                    len(current_blobs - baseline_blobs),
+                )
+            )
+            raise RuntimeError("injected post audio-only upgrade failure")
+        return completed
+
+    monkeypatch.setattr(
+        seed_demo.Command,
+        "_upsert_completed_session",
+        fail_after_audio_only_upgrade,
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(
+            RuntimeError,
+            match="injected post audio-only upgrade failure",
+        ):
+            call_command("seed_demo", stdout=StringIO())
+        session.refresh_from_db()
+        assert set(
+            session.media_bindings.values_list("media_type", flat=True)
+        ) == {"singing_audio"}
+        assert _demo_counts() == baseline_counts
+        assert set(MediaAsset.objects.values_list("id", flat=True)) == baseline_asset_ids
+
+    current_manifests, current_blobs = _local_storage_paths(tmp_path)
+    assert len(published_upgrades) == 2
+    assert len({asset_id for asset_id, _manifest, _blob in published_upgrades}) == 2
+    assert published_path_counts == [(1, 1), (1, 1)]
+    assert current_manifests == baseline_manifests
+    assert current_blobs == baseline_blobs
+    assert all(
+        not manifest_path.exists() and not blob_path.exists()
+        for _asset_id, manifest_path, blob_path in published_upgrades
+    )
+    audio_asset.refresh_from_db()
+    with backend.open_authorized_private(
+        audio_private_url.token,
+        audio_asset.object_key,
+        asset_id=audio_asset.id,
+        expected_generation=audio_asset.manifest_generation,
+    ) as stream:
+        assert stream.read() == baseline_audio_content
 
 
 @pytest.mark.django_db(transaction=True)

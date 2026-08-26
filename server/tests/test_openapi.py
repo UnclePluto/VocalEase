@@ -366,9 +366,30 @@ def test_openapi_schema_and_docs_are_publicly_available():
     )
     assert {"id", "status"} <= set(cancelled_data["properties"])
 
+    patient_grant_operation = paths[
+        "/api/v1/patient/media/upload-grants/"
+    ]["post"]
+    patient_grant_request = resolve_schema(
+        document,
+        patient_grant_operation["requestBody"]["content"]["application/json"][
+            "schema"
+        ],
+    )
+    assert set(patient_grant_request["properties"]) == {
+        "owner_id",
+        "media_type",
+        "mime",
+        "size",
+    }
+    assert set(patient_grant_request["required"]) == {
+        "owner_id",
+        "media_type",
+        "mime",
+        "size",
+    }
     patient_grant_data = resolve_data_schema(
         document,
-        response_schema(paths["/api/v1/patient/media/upload-grants/"]["post"], "201"),
+        response_schema(patient_grant_operation, "201"),
     )
     assert {"asset_id", "object_key", "expires_at", "upload_url", "upload_token", "fields"} == set(
         patient_grant_data["properties"]

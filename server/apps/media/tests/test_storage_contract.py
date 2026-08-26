@@ -162,6 +162,67 @@ def test_patient_cannot_request_upload_for_other_patient(api_client, patient_pai
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "owner_id",
+    [None, "not-a-uuid"],
+)
+def test_patient_upload_grant_validates_required_owner_id(
+    api_client,
+    patient_pair,
+    owner_id,
+):
+    patient, _ = patient_pair
+    api_client.force_authenticate(patient.user)
+    payload = {
+        "media_type": "singing_audio",
+        "mime": "audio/mpeg",
+        "size": 1024,
+    }
+    if owner_id is not None:
+        payload["owner_id"] = owner_id
+
+    response = api_client.post(
+        "/api/v1/patient/media/upload-grants/",
+        payload,
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "owner_id" in str(response.json())
+    assert MediaAsset.objects.count() == 0
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_patient_upload_grant_keeps_ignoring_legacy_owner_type(
+    api_client,
+    patient_pair,
+    tmp_path,
+    settings,
+):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    patient, _ = patient_pair
+    api_client.force_authenticate(patient.user)
+
+    response = api_client.post(
+        "/api/v1/patient/media/upload-grants/",
+        {
+            "owner_type": "song",
+            "owner_id": str(patient.id),
+            "media_type": "singing_audio",
+            "mime": "audio/mpeg",
+            "size": 1024,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201
+    asset = MediaAsset.objects.get(pk=response.json()["data"]["asset_id"])
+    assert asset.owner_type == MediaAsset.OwnerType.PATIENT
+    assert asset.patient_owner_id == patient.id
+
+
+@pytest.mark.django_db
 def test_patient_required_to_change_password_cannot_request_media_upload_grant(api_client, patient_pair):
     patient, _ = patient_pair
     patient.user.must_change_password = True
