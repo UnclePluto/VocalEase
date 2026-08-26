@@ -1,5 +1,6 @@
 from io import BytesIO, StringIO
 import hashlib
+import json
 import wave
 
 import pytest
@@ -102,6 +103,54 @@ def _publish_local_patient_asset(*, patient, content, backend):
         backend=backend,
     )
     return complete_local_asset(asset=asset)
+
+
+def _install_fix_base_header_only_video(*, session, backend):
+    binding = SessionMedia.objects.get(session=session, media_type="singing_video")
+    face_task = AnalysisTask.objects.get(
+        target_type=AnalysisTask.TargetType.SINGING_SESSION,
+        target_id=session.id,
+        generation=session.analysis_generation,
+        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
+        status=AnalysisTask.Status.SUCCEEDED,
+    )
+    face_result = AnalysisResult.objects.get(task=face_task)
+    current_asset_id = binding.asset_id
+    legacy_content = _legacy_header_only_mp4("demo-video-session-1")
+    legacy_asset = _publish_local_patient_asset(
+        patient=session.patient,
+        content=legacy_content,
+        backend=backend,
+    )
+    binding.asset = legacy_asset
+    binding.save(update_fields=["asset"])
+    from apps.singing.services import _task_snapshot
+    face_task.source_asset = legacy_asset
+    face_task.input_snapshot = _task_snapshot(
+        session=session,
+        asset=legacy_asset,
+        generation=session.analysis_generation,
+    )
+    face_task.save(update_fields=["source_asset", "input_snapshot", "updated_at"])
+    MediaAsset.objects.filter(pk=current_asset_id).delete()
+    return binding, face_task, face_result, legacy_asset, legacy_content
+
+
+def _local_storage_paths(root):
+    return (
+        set((root / ".manifests").rglob("*.json")),
+        set((root / ".blobs").glob("*")),
+    )
+
+
+def _asset_storage_paths(root, asset):
+    matches = []
+    for manifest_path in (root / ".manifests").rglob("*.json"):
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if payload.get("asset_id") == str(asset.id):
+            matches.append((manifest_path, root / ".blobs" / payload["blob"]))
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _demo_counts():
@@ -304,35 +353,13 @@ def test_seed_demo_replaces_fix_base_header_only_video_in_place(tmp_path, settin
         created_source="seed_demo",
         patient__medical_record_no="PDEMO001",
     )
-    binding = SessionMedia.objects.get(session=session, media_type="singing_video")
-    face_task = AnalysisTask.objects.get(
-        target_type=AnalysisTask.TargetType.SINGING_SESSION,
-        target_id=session.id,
-        generation=session.analysis_generation,
-        task_type=AnalysisTask.TaskType.FACE_LANDMARKS,
-        status=AnalysisTask.Status.SUCCEEDED,
-    )
-    face_result = AnalysisResult.objects.get(task=face_task)
-    current_asset_id = binding.asset_id
     backend = storage_backend_for("local")
-    legacy_content = _legacy_header_only_mp4("demo-video-session-1")
-    legacy_asset = _publish_local_patient_asset(
-        patient=session.patient,
-        content=legacy_content,
-        backend=backend,
+    binding, face_task, face_result, legacy_asset, legacy_content = (
+        _install_fix_base_header_only_video(session=session, backend=backend)
     )
-    binding.asset = legacy_asset
-    binding.save(update_fields=["asset"])
-    from apps.singing.services import _task_snapshot
-    face_task.source_asset = legacy_asset
-    face_task.input_snapshot = _task_snapshot(
-        session=session,
-        asset=legacy_asset,
-        generation=session.analysis_generation,
-    )
-    face_task.save(update_fields=["source_asset", "input_snapshot", "updated_at"])
-    MediaAsset.objects.filter(pk=current_asset_id).delete()
     stable_ids = (session.id, binding.id, face_task.id, face_result.id)
+    before_manifests, before_blobs = _local_storage_paths(tmp_path)
+    legacy_manifest_path, legacy_blob_path = _asset_storage_paths(tmp_path, legacy_asset)
 
     assert legacy_asset.mime == "video/mp4"
     assert legacy_asset.size == len(legacy_content)
@@ -370,6 +397,13 @@ def test_seed_demo_replaces_fix_base_header_only_video_in_place(tmp_path, settin
     _assert_parseable_video_mp4(replacement_content)
     assert face_task.source_asset_id == replacement.id
     assert not MediaAsset.objects.filter(pk=legacy_asset.id).exists()
+    after_manifests, after_blobs = _local_storage_paths(tmp_path)
+    assert len(before_manifests - after_manifests) == 1
+    assert len(before_blobs - after_blobs) == 1
+    assert len(after_manifests - before_manifests) == 1
+    assert len(after_blobs - before_blobs) == 1
+    assert not legacy_manifest_path.exists()
+    assert not legacy_blob_path.exists()
     stable_asset_id = replacement.id
 
     call_command("seed_demo", stdout=StringIO())
@@ -381,6 +415,64 @@ def test_seed_demo_replaces_fix_base_header_only_video_in_place(tmp_path, settin
     assert (session.id, binding.id, face_task.id, face_result.id) == stable_ids
     assert binding.asset_id == stable_asset_id
     assert _demo_counts()["assets"] == 14
+
+
+@pytest.mark.django_db(transaction=True)
+def test_seed_demo_removes_replacement_files_when_video_upgrade_rolls_back(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    settings.MEDIA_BACKEND = "local"
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    call_command("seed_demo", stdout=StringIO())
+    session = SingingSession.objects.get(
+        id="8ce19dd3-433a-5bf1-8329-1017a53b323f",
+        created_source="seed_demo",
+        patient__medical_record_no="PDEMO001",
+    )
+    backend = storage_backend_for("local")
+    binding, _face_task, _face_result, legacy_asset, legacy_content = (
+        _install_fix_base_header_only_video(session=session, backend=backend)
+    )
+    private_url = backend.create_private_url(
+        legacy_asset.object_key,
+        ttl_seconds=60,
+        asset_id=legacy_asset.id,
+        expected_generation=legacy_asset.manifest_generation,
+    )
+    baseline_asset_count = MediaAsset.objects.count()
+    baseline_manifests, baseline_blobs = _local_storage_paths(tmp_path)
+    legacy_manifest_path, legacy_blob_path = _asset_storage_paths(tmp_path, legacy_asset)
+    from apps.accounts.management.commands import seed_demo
+    monkeypatch.setattr(
+        seed_demo,
+        "run_analysis",
+        lambda _task_id: (_ for _ in ()).throw(RuntimeError("injected upgrade failure")),
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="injected upgrade failure"):
+            call_command("seed_demo", stdout=StringIO())
+
+    binding.refresh_from_db()
+    legacy_asset.refresh_from_db()
+    assert binding.asset_id == legacy_asset.id
+    assert MediaAsset.objects.count() == baseline_asset_count
+    current_manifests, current_blobs = _local_storage_paths(tmp_path)
+    assert len(current_manifests - baseline_manifests) == 0
+    assert len(current_blobs - baseline_blobs) == 0
+    assert baseline_manifests <= current_manifests
+    assert baseline_blobs <= current_blobs
+    assert legacy_manifest_path.exists()
+    assert legacy_blob_path.exists()
+    with backend.open_authorized_private(
+        private_url.token,
+        legacy_asset.object_key,
+        asset_id=legacy_asset.id,
+        expected_generation=legacy_asset.manifest_generation,
+    ) as stream:
+        assert stream.read() == legacy_content
 
 
 @pytest.mark.django_db(transaction=True)

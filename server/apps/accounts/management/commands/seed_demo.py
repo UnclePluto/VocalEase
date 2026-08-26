@@ -250,29 +250,35 @@ class Command(BaseCommand):
         content: bytes,
         backend: LocalStorageBackend,
     ) -> MediaAsset:
-        asset, grant = create_upload_grant(
-            owner_type=owner_type,
-            owner_id=owner_id,
-            media_type=media_type,
-            mime=mime,
-            size=len(content),
-            backend=backend,
-        )
-        nonce = claim_local_upload(asset=asset)
-        prepared = backend.prepare_authorized_stream(
-            object_key=asset.object_key,
-            token=grant.upload_token,
-            stream=BytesIO(content),
-            mime=mime,
-            asset_id=asset.id,
-        )
-        publish_local_upload(
-            asset_id=asset.id,
-            nonce=nonce,
-            prepared=prepared,
-            backend=backend,
-        )
-        return complete_local_asset(asset=asset)
+        asset = None
+        try:
+            asset, grant = create_upload_grant(
+                owner_type=owner_type,
+                owner_id=owner_id,
+                media_type=media_type,
+                mime=mime,
+                size=len(content),
+                backend=backend,
+            )
+            nonce = claim_local_upload(asset=asset)
+            prepared = backend.prepare_authorized_stream(
+                object_key=asset.object_key,
+                token=grant.upload_token,
+                stream=BytesIO(content),
+                mime=mime,
+                asset_id=asset.id,
+            )
+            publish_local_upload(
+                asset_id=asset.id,
+                nonce=nonce,
+                prepared=prepared,
+                backend=backend,
+            )
+            return complete_local_asset(asset=asset)
+        except Exception:
+            if asset is not None:
+                backend.purge_for_qa(asset.object_key, asset_id=asset.id)
+            raise
 
     def _upsert_song(
         self,
@@ -436,6 +442,7 @@ class Command(BaseCommand):
             AnalysisTask.TaskType.SINGING_AUDIO_METRICS,
             AnalysisTask.TaskType.FACE_LANDMARKS,
         }
+        required_media = {"singing_audio", "singing_video"}
         legacy_video_content = _legacy_demo_mp4(f"demo-video-{key}")
         legacy_video_sha256 = hashlib.sha256(legacy_video_content).hexdigest()
         video_asset = video_binding.asset if video_binding else None
@@ -497,58 +504,81 @@ class Command(BaseCommand):
             ) as stream:
                 legacy_video_shape = stream.read() == legacy_video_content
         if legacy_video_shape:
-            replacement = self._publish_asset(
-                owner_type=MediaAsset.OwnerType.PATIENT,
-                owner_id=patient.id,
-                media_type="singing_video",
-                mime="video/mp4",
-                content=_demo_mp4(),
-                backend=backend,
-            )
-            old_asset_id = video_asset.id
-            old_object_key = video_asset.object_key
-            video_binding.asset = replacement
-            video_binding.save(update_fields=["asset"])
-            face_task.source_asset = replacement
-            face_task.input_snapshot = _task_snapshot(
-                session=session,
-                asset=replacement,
-                generation=session.analysis_generation,
-            )
-            face_task.status = AnalysisTask.Status.PENDING
-            face_task.attempt = 0
-            face_task.claim_token = None
-            face_task.lease_expires_at = None
-            face_task.heartbeat_at = None
-            face_task.next_dispatch_at = None
-            face_task.error_code = ""
-            face_task.error_summary = ""
-            face_task.started_at = None
-            face_task.completed_at = None
-            face_task.save()
-            session.status = SingingSession.Status.PROCESSING
-            session.completed_at = None
-            session.save(update_fields=["status", "completed_at", "updated_at"])
-            video_asset.delete()
+            replacement = None
+            try:
+                replacement = self._publish_asset(
+                    owner_type=MediaAsset.OwnerType.PATIENT,
+                    owner_id=patient.id,
+                    media_type="singing_video",
+                    mime="video/mp4",
+                    content=_demo_mp4(),
+                    backend=backend,
+                )
+                old_asset_id = video_asset.id
+                old_object_key = video_asset.object_key
+                video_binding.asset = replacement
+                video_binding.save(update_fields=["asset"])
+                face_task.source_asset = replacement
+                face_task.input_snapshot = _task_snapshot(
+                    session=session,
+                    asset=replacement,
+                    generation=session.analysis_generation,
+                )
+                face_task.status = AnalysisTask.Status.PENDING
+                face_task.attempt = 0
+                face_task.claim_token = None
+                face_task.lease_expires_at = None
+                face_task.heartbeat_at = None
+                face_task.next_dispatch_at = None
+                face_task.error_code = ""
+                face_task.error_summary = ""
+                face_task.started_at = None
+                face_task.completed_at = None
+                face_task.save()
+                session.status = SingingSession.Status.PROCESSING
+                session.completed_at = None
+                session.save(update_fields=["status", "completed_at", "updated_at"])
+                video_asset.delete()
+                run_analysis(face_task.id)
+                session.refresh_from_db()
+                bindings = list(session.media_bindings.select_related("asset"))
+                generation_tasks = AnalysisTask.objects.filter(
+                    target_type=AnalysisTask.TargetType.SINGING_SESSION,
+                    target_id=session.id,
+                    generation=session.analysis_generation,
+                )
+                binding_types = {binding.media_type for binding in bindings}
+                task_types = set(generation_tasks.values_list("task_type", flat=True))
+                result_types = set(
+                    AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
+                        "task__task_type", flat=True,
+                    )
+                )
+                if (
+                    session.status != SingingSession.Status.COMPLETED
+                    or not session.is_mock
+                    or binding_types != required_media
+                    or any(
+                        not binding.confirmed_at
+                        or binding.asset.status != MediaAsset.Status.READY
+                        for binding in bindings
+                    )
+                    or task_types != required_tasks
+                    or result_types != required_tasks
+                    or generation_tasks.exclude(status=AnalysisTask.Status.SUCCEEDED).exists()
+                ):
+                    raise ValueError(f"演示演唱 {key} 录像升级不完整")
+            except Exception:
+                if replacement is not None:
+                    backend.purge_for_qa(
+                        replacement.object_key,
+                        asset_id=replacement.id,
+                    )
+                raise
             transaction.on_commit(
                 lambda object_key=old_object_key, asset_id=old_asset_id: backend.purge_for_qa(
                     object_key,
                     asset_id=asset_id,
-                )
-            )
-            run_analysis(face_task.id)
-            session.refresh_from_db()
-            bindings = list(session.media_bindings.select_related("asset"))
-            generation_tasks = AnalysisTask.objects.filter(
-                target_type=AnalysisTask.TargetType.SINGING_SESSION,
-                target_id=session.id,
-                generation=session.analysis_generation,
-            )
-            binding_types = {binding.media_type for binding in bindings}
-            task_types = set(generation_tasks.values_list("task_type", flat=True))
-            result_types = set(
-                AnalysisResult.objects.filter(task__in=generation_tasks).values_list(
-                    "task__task_type", flat=True,
                 )
             )
         legacy_audio_only = bool(
@@ -606,7 +636,6 @@ class Command(BaseCommand):
             )
         if session.status != SingingSession.Status.COMPLETED or not session.is_mock:
             raise ValueError(f"演示演唱 {key} 状态不完整，拒绝静默覆盖")
-        required_media = {"singing_audio", "singing_video"}
         if (
             binding_types != required_media
             or any(
