@@ -9,6 +9,7 @@ import com.vocaease.patient.core.network.NetworkContractException
 import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshRemoteDataSource
 import com.vocaease.patient.core.network.RefreshResult
+import com.vocaease.patient.core.network.SessionLifecycleArbiter
 import com.vocaease.patient.core.network.dto.AccountRole
 import com.vocaease.patient.core.network.dto.AuthSession
 import com.vocaease.patient.core.network.dto.ChangePasswordRequestDto
@@ -75,10 +76,11 @@ class VocaEaseAuthRemoteDataSource(
 }
 
 class AuthRepository(
-    private val tokenVault: TokenVault,
+    tokenVault: TokenVault,
     private val remote: AuthRemoteDataSource,
     private val refreshCoordinator: RefreshCoordinator,
 ) {
+    private val sessionArbiter = refreshCoordinator.sessionArbiter
     private val mutableState = MutableStateFlow<AuthState>(AuthState.Restoring)
     private val mutableOperation = MutableStateFlow<AuthOperationState>(AuthOperationState.Idle)
     private val eventChannel = Channel<AuthEvent>(capacity = Channel.BUFFERED)
@@ -88,6 +90,7 @@ class AuthRepository(
     val events = eventChannel.receiveAsFlow()
 
     init {
+        refreshCoordinator.requireTokenVault(tokenVault)
         refreshCoordinator.addSessionExpiredListener {
             mutableState.value = AuthState.LoggedOut
             mutableOperation.value = AuthOperationState.Idle
@@ -98,28 +101,41 @@ class AuthRepository(
     suspend fun restoreSession() {
         if (mutableState.value != AuthState.Restoring) return
         mutableOperation.value = AuthOperationState.Idle
-        val current = tokenVault.sessionSnapshot()
+        val current = sessionArbiter.sessionSnapshot()
         if (current.accessToken != null) {
-            mutableState.value = AuthState.Authenticated
+            sessionArbiter.mutate {
+                if (sessionSnapshot() == current) mutableState.value = AuthState.Authenticated
+            }
             return
         }
-        when (val read = tokenVault.readRefreshToken(current.epoch)) {
+        when (val read = sessionArbiter.mutate { readRefreshToken(current.epoch) }) {
             is RefreshTokenRead.Missing -> {
-                mutableState.value = AuthState.LoggedOut
+                sessionArbiter.mutate {
+                    val observed = sessionSnapshot()
+                    if (observed.epoch == read.observedEpoch && observed.accessToken == null) {
+                        mutableState.value = AuthState.LoggedOut
+                    }
+                }
                 return
             }
             is RefreshTokenRead.Invalidated -> {
                 refreshCoordinator.recordVaultInvalidation(read.invalidation, read.cause)
-                mutableState.value = AuthState.LoggedOut
                 return
             }
             is RefreshTokenRead.Available -> Unit
         }
         when (val result = refreshCoordinator.refreshAfterUnauthorized(current.epoch)) {
-            is RefreshResult.Success -> result.session?.let(::routeFor) ?: run {
-                if (mutableState.value == AuthState.Restoring) mutableState.value = AuthState.Authenticated
+            is RefreshResult.Success -> sessionArbiter.mutate {
+                val observed = sessionSnapshot()
+                if (observed.epoch == result.epoch && observed.accessToken == result.accessToken) {
+                    result.session?.let(::routeFor) ?: run {
+                        if (mutableState.value == AuthState.Restoring) {
+                            mutableState.value = AuthState.Authenticated
+                        }
+                    }
+                }
             }
-            is RefreshResult.Failed -> mutableState.value = AuthState.LoggedOut
+            is RefreshResult.Failed -> Unit
         }
     }
 
@@ -129,9 +145,14 @@ class AuthRepository(
             return
         }
         mutableOperation.value = AuthOperationState.Loading
-        val attemptEpoch = secureClear().snapshot.epoch
+        val attemptEpoch = withContext(NonCancellable) {
+            sessionArbiter.mutate {
+                val mutation = prepareLoginAttemptLocked()
+                mutableState.value = AuthState.LoggedOut
+                mutation.snapshot.epoch
+            }
+        }
         val replacementId = UUID.randomUUID().toString()
-        mutableState.value = AuthState.LoggedOut
         try {
             val session = remote.login(
                 LoginRequestDto(
@@ -143,13 +164,17 @@ class AuthRepository(
             )
             if (session.role != AccountRole.PATIENT) throw AuthContractException("仅支持患者账号登录")
             val refresh = session.refresh ?: throw AuthContractException("安卓登录响应缺少 refresh token")
-            val mutation = tokenVault.replaceTokens(
-                expectedEpoch = attemptEpoch,
-                accessToken = session.access,
-                refreshToken = refresh,
-                replacementId = replacementId,
-            )
-            if (mutation.applied) routeFor(session)
+            sessionArbiter.mutate {
+                val mutation = replaceTokens(
+                    expectedEpoch = attemptEpoch,
+                    accessToken = session.access,
+                    refreshToken = refresh,
+                    replacementId = replacementId,
+                )
+                if (mutation.applied) {
+                    routeFor(session)
+                }
+            }
         } catch (error: CancellationException) {
             applyLoginAttemptCleanup(attemptEpoch, replacementId)
             throw error
@@ -181,8 +206,10 @@ class AuthRepository(
             }
             passwordChanged = true
 
-            val beforeLogout = tokenVault.sessionSnapshot()
-            refreshRead = tokenVault.readRefreshToken(beforeLogout.epoch)
+            refreshRead = sessionArbiter.mutate {
+                val beforeLogout = sessionSnapshot()
+                readRefreshToken(beforeLogout.epoch)
+            }
             val refresh = (refreshRead as? RefreshTokenRead.Available)?.lease?.value
             try {
                 remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
@@ -194,9 +221,11 @@ class AuthRepository(
         } finally {
             if (passwordChanged) {
                 withContext(NonCancellable) {
-                    if (refreshRead !is RefreshTokenRead.Invalidated) secureClear()
-                    mutableState.value = AuthState.LoggedOut
-                    eventChannel.trySend(AuthEvent.PasswordChanged)
+                    sessionArbiter.mutate {
+                        if (refreshRead !is RefreshTokenRead.Invalidated) secureClearLocked()
+                        mutableState.value = AuthState.LoggedOut
+                        eventChannel.trySend(AuthEvent.PasswordChanged)
+                    }
                 }
             }
             finishOperation()
@@ -205,13 +234,15 @@ class AuthRepository(
 
     suspend fun logout() {
         mutableOperation.value = AuthOperationState.Loading
-        val beforeLogout = tokenVault.sessionSnapshot()
-        val refreshRead = tokenVault.readRefreshToken(beforeLogout.epoch)
-        val refresh = (refreshRead as? RefreshTokenRead.Available)?.lease?.value
-        withContext(NonCancellable) {
-            if (refreshRead !is RefreshTokenRead.Invalidated) secureClear()
-            mutableState.value = AuthState.LoggedOut
-            mutableOperation.value = AuthOperationState.Idle
+        val refresh = withContext(NonCancellable) {
+            sessionArbiter.mutate {
+                val beforeLogout = sessionSnapshot()
+                val refreshRead = readRefreshToken(beforeLogout.epoch)
+                if (refreshRead !is RefreshTokenRead.Invalidated) secureClearLocked()
+                mutableState.value = AuthState.LoggedOut
+                mutableOperation.value = AuthOperationState.Idle
+                (refreshRead as? RefreshTokenRead.Available)?.lease?.value
+            }
         }
         try {
             remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
@@ -235,31 +266,48 @@ class AuthRepository(
     }
 
     private suspend fun applyLoggedOutCleanup(expectedEpoch: Long?) {
-        val mutation = secureClear(expectedEpoch)
-        if (mutation.snapshot.accessToken == null) mutableState.value = AuthState.LoggedOut
+        withContext(NonCancellable) {
+            sessionArbiter.mutate {
+                val mutation = secureClearLocked(expectedEpoch)
+                if (mutation.snapshot.accessToken == null) mutableState.value = AuthState.LoggedOut
+            }
+        }
     }
 
     private suspend fun applyLoginAttemptCleanup(attemptEpoch: Long, replacementId: String) {
-        val current = tokenVault.sessionSnapshot()
-        val cleanupEpoch = when {
-            current.epoch == attemptEpoch -> attemptEpoch
-            current.replacementId == replacementId -> current.epoch
-            else -> null
-        }
-        val mutation = cleanupEpoch?.let { secureClear(it) }
-        if ((mutation?.snapshot ?: current).accessToken == null) {
-            mutableState.value = AuthState.LoggedOut
+        withContext(NonCancellable) {
+            sessionArbiter.mutate {
+                val current = sessionSnapshot()
+                val cleanupEpoch = when {
+                    current.epoch == attemptEpoch -> attemptEpoch
+                    current.replacementId == replacementId -> current.epoch
+                    else -> null
+                }
+                val mutation = cleanupEpoch?.let { secureClearLocked(it) }
+                if ((mutation?.snapshot ?: current).accessToken == null) {
+                    mutableState.value = AuthState.LoggedOut
+                }
+            }
         }
     }
 
-    private suspend fun secureClear(expectedEpoch: Long? = null): SessionMutation =
-        withContext(NonCancellable) {
-            try {
-                tokenVault.clear(expectedEpoch)
-            } catch (error: VaultInvalidatedException) {
-                SessionMutation(applied = true, snapshot = tokenVault.sessionSnapshot())
-            }
+    private suspend fun SessionLifecycleArbiter.MutationScope.secureClearLocked(
+        expectedEpoch: Long? = null,
+    ): SessionMutation = try {
+        clear(expectedEpoch)
+    } catch (error: VaultInvalidatedException) {
+        SessionMutation(applied = true, snapshot = sessionSnapshot())
+    }
+
+    private suspend fun SessionLifecycleArbiter.MutationScope.prepareLoginAttemptLocked(): SessionMutation {
+        val current = sessionSnapshot()
+        if (current.accessToken != null) return secureClearLocked(current.epoch)
+        return when (readRefreshToken(current.epoch)) {
+            is RefreshTokenRead.Available -> secureClearLocked(current.epoch)
+            is RefreshTokenRead.Invalidated -> SessionMutation(applied = true, snapshot = sessionSnapshot())
+            is RefreshTokenRead.Missing -> SessionMutation(applied = false, snapshot = sessionSnapshot())
         }
+    }
 
     private fun routeFor(session: AuthSession) {
         mutableState.value = if (session.mustChangePassword) {

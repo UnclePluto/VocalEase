@@ -7,16 +7,21 @@ import com.vocaease.patient.core.network.NetworkModule
 import com.vocaease.patient.core.network.SessionExpiredException
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
+import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.VaultFileStore
+import com.vocaease.patient.feature.auth.AuthEvent
 import com.vocaease.patient.feature.auth.AuthState
 import java.io.IOException
 import java.security.KeyStore
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -87,6 +92,86 @@ class ProductionVaultInvalidationTest {
         assertFalse(store.exists())
     }
 
+    @Test
+    fun 旧失效通知暂停后新登录获胜不会污染新会话状态或事件() = runBlocking {
+        val vault = AndroidTokenVault(context)
+        seedExpiredSession(vault)
+        corruptCiphertext()
+        val gate = InvalidationPublishGate()
+        val transport = AuthTestTransport(refreshSucceeds = false)
+        val graph = productionGraph(vault, transport, gate)
+        graph.authRepository.restoreSession()
+        val authExpiredEvents = AtomicInteger()
+        val lifecycleExpiredEvents = AtomicInteger()
+        val authCollector = launch(start = CoroutineStart.UNDISPATCHED) {
+            graph.authRepository.events.collect { event ->
+                if (event == AuthEvent.SessionExpired) authExpiredEvents.incrementAndGet()
+            }
+        }
+        val lifecycleCollector = launch(start = CoroutineStart.UNDISPATCHED) {
+            graph.sessionEvents.collect { lifecycleExpiredEvents.incrementAndGet() }
+        }
+        val staleRequest = async { runCatching { graph.patientApi.patientMe() }.exceptionOrNull() }
+
+        try {
+            val invalidation = withTimeout(5_000) { gate.claimed.await() }
+            graph.authRepository.login("patient001", "password")
+            assertEquals(AuthState.Authenticated, graph.authRepository.state.value)
+            assertEquals("access-secret", vault.sessionSnapshot().accessToken)
+            assertEquals(invalidation.toEpoch + 1, vault.sessionSnapshot().epoch)
+        } finally {
+            gate.release.complete(Unit)
+        }
+        assertTrue(withTimeout(5_000) { staleRequest.await() } != null)
+        yield()
+
+        assertEquals("access-secret", vault.sessionSnapshot().accessToken)
+        assertEquals(AuthState.Authenticated, graph.authRepository.state.value)
+        assertEquals(0, authExpiredEvents.get())
+        assertEquals(0, lifecycleExpiredEvents.get())
+        authCollector.cancel()
+        lifecycleCollector.cancel()
+    }
+
+    @Test
+    fun 旧失效通知暂停后显式登出获胜不会暴露误导过期事件() = runBlocking {
+        val vault = AndroidTokenVault(context)
+        seedExpiredSession(vault)
+        corruptCiphertext()
+        val gate = InvalidationPublishGate()
+        val transport = AuthTestTransport(refreshSucceeds = false)
+        val graph = productionGraph(vault, transport, gate)
+        graph.authRepository.restoreSession()
+        val authExpiredEvents = AtomicInteger()
+        val lifecycleExpiredEvents = AtomicInteger()
+        val authCollector = launch(start = CoroutineStart.UNDISPATCHED) {
+            graph.authRepository.events.collect { event ->
+                if (event == AuthEvent.SessionExpired) authExpiredEvents.incrementAndGet()
+            }
+        }
+        val lifecycleCollector = launch(start = CoroutineStart.UNDISPATCHED) {
+            graph.sessionEvents.collect { lifecycleExpiredEvents.incrementAndGet() }
+        }
+        val staleRequest = async { runCatching { graph.patientApi.patientMe() }.exceptionOrNull() }
+
+        try {
+            withTimeout(5_000) { gate.claimed.await() }
+            graph.authRepository.logout()
+            assertEquals(AuthState.LoggedOut, graph.authRepository.state.value)
+            assertNull(vault.sessionSnapshot().accessToken)
+        } finally {
+            gate.release.complete(Unit)
+        }
+        assertTrue(withTimeout(5_000) { staleRequest.await() } != null)
+        yield()
+
+        assertEquals(AuthState.LoggedOut, graph.authRepository.state.value)
+        assertEquals(0, authExpiredEvents.get())
+        assertEquals(0, lifecycleExpiredEvents.get())
+        authCollector.cancel()
+        lifecycleCollector.cancel()
+    }
+
     private suspend fun seedExpiredSession(vault: AndroidTokenVault): Long {
         val mutation = vault.replaceTokens(
             expectedEpoch = vault.sessionSnapshot().epoch,
@@ -104,21 +189,13 @@ class ProductionVaultInvalidationTest {
         refreshSucceeds: Boolean,
     ) = coroutineScope {
         val transport = AuthTestTransport(refreshSucceeds)
-        val authenticatedClient = NetworkModule.createAuthenticatedHttpClient(vault)
-            .newBuilder()
-            .addInterceptor(transport)
-            .build()
-        val graph = createProductionSessionGraph(
-            baseUrl = "https://patient.test/",
-            tokenVault = vault,
-            clientOverride = authenticatedClient,
-        )
+        val graph = productionGraph(vault, transport)
         graph.authRepository.restoreSession()
         assertEquals(AuthState.Authenticated, graph.authRepository.state.value)
         val eventCount = AtomicInteger()
         val collector = launch(start = CoroutineStart.UNDISPATCHED) {
             graph.sessionEvents.collect { event ->
-                if (event == SessionLifecycleEvent.SessionExpired) eventCount.incrementAndGet()
+                if (event is SessionLifecycleEvent.SessionExpired) eventCount.incrementAndGet()
             }
         }
 
@@ -142,6 +219,30 @@ class ProductionVaultInvalidationTest {
         collector.cancel()
     }
 
+    private fun productionGraph(
+        vault: AndroidTokenVault,
+        transport: AuthTestTransport,
+        gate: InvalidationPublishGate? = null,
+    ): ProductionSessionGraph {
+        val authenticatedClient = NetworkModule.createAuthenticatedHttpClient(vault)
+            .newBuilder()
+            .addInterceptor(transport)
+            .build()
+        return createProductionSessionGraph(
+            baseUrl = "https://patient.test/",
+            tokenVault = vault,
+            clientOverride = authenticatedClient,
+            beforeInvalidationPublish = { invalidation -> gate?.pause(invalidation) },
+        )
+    }
+
+    private fun corruptCiphertext() {
+        val file = context.getFileStreamPath(AndroidTokenVault.FILE_NAME)
+        file.writeBytes(file.readBytes().also { bytes ->
+            bytes[bytes.lastIndex] = (bytes.last() + 1).toByte()
+        })
+    }
+
     private fun cleanVault() {
         context.getFileStreamPath(AndroidTokenVault.FILE_NAME).delete()
         context.getFileStreamPath(FailAfterRefreshWriteStore.FILE_NAME).delete()
@@ -159,18 +260,19 @@ private class AuthTestTransport(
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val body = when (request.url.encodedPath) {
+        val (code, body) = when (request.url.encodedPath) {
             "/api/v1/patient/me/" -> {
                 patientCalls.incrementAndGet()
-                unauthorized()
+                401 to unauthorized()
             }
             "/api/v1/auth/refresh/" -> {
                 refreshCalls.incrementAndGet()
-                if (refreshSucceeds) refreshSuccess() else unauthorized()
+                if (refreshSucceeds) 200 to refreshSuccess() else 401 to unauthorized()
             }
+            "/api/v1/auth/login/" -> 200 to loginSuccess()
+            "/api/v1/auth/logout/" -> 200 to emptySuccess("auth-logout-1")
             else -> error("未预期请求：${request.url.encodedPath}")
         }
-        val code = if (request.url.encodedPath.endsWith("/refresh/") && refreshSucceeds) 200 else 401
         return Response.Builder()
             .request(request)
             .protocol(Protocol.HTTP_1_1)
@@ -196,6 +298,33 @@ private class AuthTestTransport(
           "request_id":"auth-refresh-1"
         }
     """.trimIndent()
+
+    private fun loginSuccess(): String = """
+        {
+          "code":"ok",
+          "message":"",
+          "data":{
+            "access":"access-secret",
+            "refresh":"refresh-secret",
+            "refresh_expires_at":"2026-09-02T08:00:00Z",
+            "user":{"login_id":"patient001","role":"patient","must_change_password":false}
+          },
+          "request_id":"auth-login-1"
+        }
+    """.trimIndent()
+
+    private fun emptySuccess(requestId: String): String =
+        """{"code":"ok","message":"","data":{},"request_id":"$requestId"}"""
+}
+
+private class InvalidationPublishGate {
+    val claimed = CompletableDeferred<SessionInvalidation>()
+    val release = CompletableDeferred<Unit>()
+
+    suspend fun pause(invalidation: SessionInvalidation) {
+        claimed.complete(invalidation)
+        release.await()
+    }
 }
 
 private class FailAfterRefreshWriteStore(context: Context) : VaultFileStore {

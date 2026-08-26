@@ -7,16 +7,17 @@ import com.vocaease.patient.core.network.RawAuthApi
 import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshingPatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
+import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.TokenVault
 import com.vocaease.patient.feature.auth.AuthRepository
 import com.vocaease.patient.feature.auth.VocaEaseAuthRemoteDataSource
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.Flow
 import okhttp3.OkHttpClient
 
 internal class ProductionSessionGraph(
     val authRepository: AuthRepository,
     val patientApi: PatientApi,
-    val sessionEvents: SharedFlow<SessionLifecycleEvent>,
+    val sessionEvents: Flow<SessionLifecycleEvent>,
 )
 
 internal fun createProductionSessionGraph(
@@ -24,13 +25,18 @@ internal fun createProductionSessionGraph(
     tokenVault: TokenVault,
     diagnosticSink: ((NetworkDiagnostic) -> Unit)? = null,
     clientOverride: OkHttpClient? = null,
+    beforeInvalidationPublish: suspend (SessionInvalidation) -> Unit = {},
 ): ProductionSessionGraph {
     val client = clientOverride
         ?: diagnosticSink?.let { NetworkModule.createAuthenticatedHttpClient(tokenVault, it) }
         ?: NetworkModule.createAuthenticatedHttpClient(tokenVault)
     val rawApi = NetworkModule.createApi(baseUrl, client)
     val authRemote = VocaEaseAuthRemoteDataSource(RawAuthApi(rawApi))
-    val coordinator = RefreshCoordinator(tokenVault, authRemote)
+    val coordinator = RefreshCoordinator(
+        tokenVault = tokenVault,
+        remote = authRemote,
+        beforeInvalidationPublish = beforeInvalidationPublish,
+    )
     return ProductionSessionGraph(
         authRepository = AuthRepository(tokenVault, authRemote, coordinator),
         patientApi = RefreshingPatientApi(rawApi, coordinator),

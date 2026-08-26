@@ -9,7 +9,7 @@ import com.vocaease.patient.core.security.AndroidTokenVault
 import com.vocaease.patient.feature.auth.AuthRepository
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.Flow
 
 fun interface AppClock {
     fun nowEpochMilliseconds(): Long
@@ -40,7 +40,8 @@ interface AppContainer {
     val uploadFactory: UploadFactory
     val authRepository: AuthRepository
     val patientApi: PatientApi
-    val sessionEvents: SharedFlow<SessionLifecycleEvent>
+    /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
+    val sessionEvents: Flow<SessionLifecycleEvent>
 
     companion object {
         fun unavailable(): AppContainer = UnavailableAppContainer
@@ -87,6 +88,6 @@ private object UnavailableAppContainer : AppContainer {
         get() = unavailable()
     override val patientApi: PatientApi
         get() = unavailable()
-    override val sessionEvents: SharedFlow<SessionLifecycleEvent>
+    override val sessionEvents: Flow<SessionLifecycleEvent>
         get() = unavailable()
 }

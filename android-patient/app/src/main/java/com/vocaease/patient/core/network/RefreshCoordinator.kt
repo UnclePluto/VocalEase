@@ -14,21 +14,14 @@ import java.security.GeneralSecurityException
 import java.security.ProviderException
 import java.util.UUID
 import java.util.concurrent.CancellationException
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
-
-sealed interface SessionLifecycleEvent {
-    data object SessionExpired : SessionLifecycleEvent
-}
 
 sealed interface RefreshResult {
     data class Success(
@@ -49,22 +42,26 @@ fun interface RefreshRemoteDataSource {
 class RefreshCoordinator(
     private val tokenVault: TokenVault,
     private val remote: RefreshRemoteDataSource,
+    internal val sessionArbiter: SessionLifecycleArbiter = SessionLifecycleArbiter(tokenVault),
+    private val beforeInvalidationPublish: suspend (SessionInvalidation) -> Unit = {},
 ) {
     private data class EpochOutcome(val sourceEpoch: Long, val result: RefreshResult)
 
     private val mutex = Mutex()
     private val latestOutcome = AtomicReference<EpochOutcome?>(null)
-    private val mutableEvents = MutableSharedFlow<SessionLifecycleEvent>(extraBufferCapacity = 1)
-    private val sessionExpiredListeners = CopyOnWriteArrayList<() -> Unit>()
 
-    val events: SharedFlow<SessionLifecycleEvent> = mutableEvents.asSharedFlow()
+    val events: Flow<SessionLifecycleEvent> = sessionArbiter.events
 
-    fun addSessionExpiredListener(listener: () -> Unit) {
-        sessionExpiredListeners += listener
+    fun addSessionExpiredListener(listener: (SessionInvalidation) -> Unit) {
+        sessionArbiter.addSessionExpiredListener(listener)
+    }
+
+    internal fun requireTokenVault(candidate: TokenVault) {
+        require(candidate === tokenVault) { "AuthRepository 与 RefreshCoordinator 必须共享同一 TokenVault" }
     }
 
     suspend fun refreshAfterUnauthorized(failedEpoch: Long): RefreshResult = mutex.withLock {
-        val current = tokenVault.sessionSnapshot()
+        val current = sessionArbiter.sessionSnapshot()
         if (current.epoch != failedEpoch) {
             current.accessToken?.let {
                 return@withLock RefreshResult.Success(it, current.epoch, session = null)
@@ -76,10 +73,10 @@ class RefreshCoordinator(
         }
         latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let { return@withLock it.result }
 
-        val refreshLease = when (val read = tokenVault.readRefreshToken(failedEpoch)) {
+        val refreshLease = when (val read = sessionArbiter.mutate { readRefreshToken(failedEpoch) }) {
             is RefreshTokenRead.Available -> read.lease
             is RefreshTokenRead.Missing -> {
-                val observed = tokenVault.sessionSnapshot()
+                val observed = sessionArbiter.sessionSnapshot()
                 if (observed.epoch != failedEpoch) {
                     return@withLock observed.accessToken?.let {
                         RefreshResult.Success(it, observed.epoch, session = null)
@@ -112,12 +109,14 @@ class RefreshCoordinator(
 
         val replacementId = UUID.randomUUID().toString()
         val mutation = try {
-            tokenVault.replaceTokens(
-                expectedEpoch = failedEpoch,
-                accessToken = session.access,
-                refreshToken = session.refresh ?: refreshLease.value,
-                replacementId = replacementId,
-            )
+            sessionArbiter.mutate {
+                replaceTokens(
+                    expectedEpoch = failedEpoch,
+                    accessToken = session.access,
+                    refreshToken = session.refresh ?: refreshLease.value,
+                    replacementId = replacementId,
+                )
+            }
         } catch (error: CancellationException) {
             clearRefreshAttempt(failedEpoch, replacementId)
             throw error
@@ -149,7 +148,7 @@ class RefreshCoordinator(
 
     /** 每个原请求最多因 401 刷新并重试一次；第二个 401 原样传播。 */
     suspend fun <T> executeAuthenticated(request: suspend () -> T): T {
-        val original = tokenVault.sessionSnapshot()
+        val original = sessionArbiter.sessionSnapshot()
         if (original.accessToken == null) throw SessionExpiredException()
         return try {
             request()
@@ -168,7 +167,7 @@ class RefreshCoordinator(
         invalidation: SessionInvalidation,
         cause: Throwable,
     ): RefreshResult = mutex.withLock {
-        val current = tokenVault.sessionSnapshot()
+        val current = sessionArbiter.sessionSnapshot()
         if (current.accessToken != null && current.epoch != invalidation.toEpoch) {
             return@withLock RefreshResult.Success(current.accessToken, current.epoch, session = null)
         }
@@ -179,17 +178,25 @@ class RefreshCoordinator(
     }
 
     private suspend fun expireEpoch(failedEpoch: Long, cause: Throwable?): RefreshResult {
-        val mutation = try {
-            withContext(NonCancellable) { tokenVault.clear(failedEpoch) }
-        } catch (error: VaultInvalidatedException) {
-            return completeVaultInvalidation(
-                failedEpoch = failedEpoch,
-                invalidation = error.invalidation,
-                cause = cause ?: error.cause ?: error,
-            )
-        } catch (error: Throwable) {
-            if (!error.isExpectedRefreshFailure()) throw error
-            SessionMutation(applied = false, snapshot = tokenVault.sessionSnapshot())
+        var claim: InvalidationClaim? = null
+        val mutation = withContext(NonCancellable) {
+            sessionArbiter.mutate {
+                try {
+                    clear(failedEpoch).also { cleared ->
+                        if (cleared.applied) {
+                            claim = claimInvalidation(
+                                SessionInvalidation(failedEpoch, cleared.snapshot.epoch),
+                            )
+                        }
+                    }
+                } catch (error: VaultInvalidatedException) {
+                    claim = claimInvalidation(error.invalidation)
+                    SessionMutation(applied = true, snapshot = sessionSnapshot())
+                } catch (error: Throwable) {
+                    if (!error.isExpectedRefreshFailure()) throw error
+                    SessionMutation(applied = false, snapshot = sessionSnapshot())
+                }
+            }
         }
         if (!mutation.applied && mutation.snapshot.accessToken != null) {
             return RefreshResult.Success(
@@ -200,10 +207,7 @@ class RefreshCoordinator(
         }
         val result = RefreshResult.Failed(cause)
         latestOutcome.set(EpochOutcome(failedEpoch, result))
-        if (mutation.applied) {
-            mutableEvents.emit(SessionLifecycleEvent.SessionExpired)
-            sessionExpiredListeners.forEach { listener -> listener() }
-        }
+        check(!mutation.applied || claim != null) { "会话清理成功但未形成失效裁决" }
         return result
     }
 
@@ -213,36 +217,35 @@ class RefreshCoordinator(
         cause: Throwable,
     ): RefreshResult {
         check(invalidation.fromEpoch == failedEpoch) { "vault 失效起点与请求 epoch 不一致" }
-        val current = tokenVault.sessionSnapshot()
-        if (current.epoch != invalidation.toEpoch || current.accessToken != null) {
-            return current.accessToken?.let {
-                RefreshResult.Success(it, current.epoch, session = null)
-            } ?: latestOutcome.get()
-                ?.takeIf { it.sourceEpoch == failedEpoch }
-                ?.result
-                ?: RefreshResult.Failed(cause)
+        latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let { return it.result }
+        beforeInvalidationPublish(invalidation)
+        val claim = sessionArbiter.mutate { claimInvalidation(invalidation) }
+        if (claim is InvalidationClaim.Superseded) {
+            return claim.snapshot.accessToken?.let {
+                RefreshResult.Success(it, claim.snapshot.epoch, session = null)
+            } ?: RefreshResult.Failed(cause)
         }
         latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let { return it.result }
         val result = RefreshResult.Failed(cause)
         latestOutcome.set(EpochOutcome(failedEpoch, result))
-        mutableEvents.emit(SessionLifecycleEvent.SessionExpired)
-        sessionExpiredListeners.forEach { listener -> listener() }
         return result
     }
 
     private suspend fun clearRefreshAttempt(failedEpoch: Long, replacementId: String) {
         withContext(NonCancellable) {
-            val current = tokenVault.sessionSnapshot()
-            val cleanupEpoch = when {
-                current.epoch == failedEpoch -> failedEpoch
-                current.replacementId == replacementId -> current.epoch
-                else -> null
-            }
-            cleanupEpoch?.let {
-                try {
-                    tokenVault.clear(it)
-                } catch (_: VaultInvalidatedException) {
-                    // 本次 replacement/clear 已在线性化点失效，保留原取消异常。
+            sessionArbiter.mutate {
+                val current = sessionSnapshot()
+                val cleanupEpoch = when {
+                    current.epoch == failedEpoch -> failedEpoch
+                    current.replacementId == replacementId -> current.epoch
+                    else -> null
+                }
+                cleanupEpoch?.let {
+                    try {
+                        clear(it)
+                    } catch (_: VaultInvalidatedException) {
+                        // 本次 replacement/clear 已在线性化点失效，保留原取消异常。
+                    }
                 }
             }
         }

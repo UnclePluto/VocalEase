@@ -113,7 +113,8 @@ class ProductionProtectedApiTest {
         assertEquals(1, refreshCalls.get())
         assertEquals(AuthState.LoggedOut, graph.authRepository.state.value)
         assertEquals(AuthEvent.SessionExpired, event.await())
-        assertEquals(SessionLifecycleEvent.SessionExpired, lifecycleEvent.await())
+        val expired = lifecycleEvent.await()
+        assertTrue(expired is SessionLifecycleEvent.SessionExpired)
     }
 
     private fun json(status: Int, body: String): MockResponse = MockResponse()
