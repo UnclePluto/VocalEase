@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Role, User
@@ -11,12 +12,16 @@ from apps.doctors.models import SequenceCounter
 from apps.media.models import MediaAsset
 from apps.patients.services import create_patient, transition_treatment_plan_status
 from apps.singing.models import SessionMedia, SingingSession
-from apps.singing.services import submit_session
-from apps.singing.services import SingingSubmissionConflict
+from apps.singing.services import (
+    SingingCreationConflict,
+    SingingSubmissionConflict,
+    create_session,
+    submit_session,
+)
 from apps.songs.models import Song
 
 
-def uploaded_session():
+def uploaded_session(session_model=SingingSession):
     SequenceCounter.objects.bulk_create(
         [SequenceCounter(prefix="D"), SequenceCounter(prefix="P")], ignore_conflicts=True,
     )
@@ -45,7 +50,28 @@ def uploaded_session():
         source_verified_size=source.size, source_verified_mime=source.mime,
         source_verified_etag=source.etag, publication_status="published",
     )
-    session = SingingSession.objects.create_from_snapshots(patient=patient, song=song)
+    session = session_model.objects.create(
+        patient_id=patient.id,
+        song_id=song.id,
+        treatment_plan_id=plan.id,
+        patient_snapshot={
+            "id": str(patient.id),
+            "medical_record_no": patient.medical_record_no,
+            "name": patient.name,
+        },
+        song_snapshot={
+            "id": str(song.id),
+            "title": song.title,
+            "artist": song.artist,
+            "duration_seconds": song.duration_seconds,
+        },
+        treatment_plan_snapshot={
+            "id": str(plan.id),
+            "start_date": plan.start_date.isoformat(),
+            "cycle_weeks": plan.cycle_weeks,
+            "target_session_count": plan.target_session_count,
+        },
+    )
     audio = MediaAsset.objects.create(
         patient_owner=patient, owner_type="patient", owner_id=patient.id,
         media_type="singing_audio", backend="qiniu", object_key=f"test/singing_audio/{uuid.uuid4().hex}",
@@ -53,10 +79,10 @@ def uploaded_session():
         upload_expires_at=timezone.now(),
     )
     SessionMedia.objects.create(
-        session=session, asset=audio, media_type="singing_audio", confirmed_at=timezone.now(),
+        session_id=session.id, asset=audio, media_type="singing_audio", confirmed_at=timezone.now(),
     )
+    session_model.objects.filter(pk=session.id).update(status="uploaded")
     session.status = "uploaded"
-    session.save(update_fields=["status", "updated_at"])
     return patient, session
 
 
@@ -154,3 +180,61 @@ def test_submit_rejects_preexisting_idempotency_task_with_wrong_media_binding():
 
     session.refresh_from_db()
     assert session.status == "uploaded" and session.submission_idempotency_key == ""
+
+
+@pytest.mark.django_db
+def test_create_session_same_key_and_song_returns_existing_session(tmp_path, settings):
+    from .test_patient_api import ready_song
+
+    patient, _ = uploaded_session()
+    song = ready_song(tmp_path, settings)
+
+    first = create_session(
+        patient_id=patient.id,
+        song_id=song.id,
+        idempotency_key="create-001",
+    )
+    second = create_session(
+        patient_id=patient.id,
+        song_id=song.id,
+        idempotency_key="create-001",
+    )
+
+    assert first.created is True
+    assert second.created is False
+    assert first.session.id == second.session.id
+    assert SingingSession.objects.filter(patient=patient, creation_idempotency_key="create-001").count() == 1
+
+
+@pytest.mark.django_db
+def test_create_session_same_key_for_different_song_conflicts(tmp_path, settings):
+    from .test_patient_api import ready_song
+
+    patient, _ = uploaded_session()
+    song = ready_song(tmp_path, settings)
+    alternate_song = ready_song(tmp_path, settings, title="另一首提交歌曲")
+    create_session(
+        patient_id=patient.id,
+        song_id=song.id,
+        idempotency_key="create-conflict",
+    )
+
+    with pytest.raises(SingingCreationConflict):
+        create_session(
+            patient_id=patient.id,
+            song_id=alternate_song.id,
+            idempotency_key="create-conflict",
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("idempotency_key", ["x" * 129, ""])
+def test_create_session_rejects_invalid_idempotency_key(idempotency_key):
+    patient, existing_session = uploaded_session()
+
+    with pytest.raises(ValidationError):
+        create_session(
+            patient_id=patient.id,
+            song_id=existing_session.song_id,
+            idempotency_key=idempotency_key,
+        )

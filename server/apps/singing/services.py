@@ -36,6 +36,12 @@ class SingingSubmissionConflict(APIException):
     default_detail = "演唱会话已使用其他幂等键提交"
 
 
+class SingingCreationConflict(APIException):
+    status_code = 409
+    default_code = "singing_creation_conflict"
+    default_detail = "幂等键已用于创建其他演唱会话"
+
+
 class SingingMediaConflict(APIException):
     status_code = 409
     default_code = "singing_media_conflict"
@@ -62,6 +68,12 @@ class SubmissionResult:
 
 
 @dataclass(frozen=True)
+class SessionCreationResult:
+    session: SingingSession
+    created: bool
+
+
+@dataclass(frozen=True)
 class UploadGrantResult:
     session: SingingSession
     asset: MediaAsset
@@ -79,11 +91,24 @@ def _active_patient_locked(patient_id: UUID) -> PatientProfile:
         raise NotFound("患者资料不存在或不可用", code="patient_profile_not_found") from exc
 
 
-def create_session(*, patient_id: UUID, song_id: UUID, created_source="patient_android_api") -> SingingSession:
+def create_session(
+    *, patient_id: UUID, song_id: UUID, idempotency_key: str,
+    created_source="patient_android_api",
+) -> SessionCreationResult:
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise ValidationError({"idempotency_key": "幂等键不能为空且长度不能超过 128"})
     validation_error = None
     session = None
     with transaction.atomic():
         patient = _active_patient_locked(patient_id)
+        existing = SingingSession.objects.select_for_update().filter(
+            patient_id=patient.id,
+            creation_idempotency_key=idempotency_key,
+        ).first()
+        if existing is not None:
+            if existing.song_id != song_id:
+                raise SingingCreationConflict()
+            return SessionCreationResult(session=existing, created=False)
         try:
             plan = TreatmentPlan.objects.select_for_update().get(
                 patient=patient, status=TreatmentPlan.Status.ACTIVE, deleted_at__isnull=True,
@@ -122,12 +147,13 @@ def create_session(*, patient_id: UUID, song_id: UUID, created_source="patient_a
                     "id": str(plan.id), "start_date": plan.start_date.isoformat(),
                     "cycle_weeks": plan.cycle_weeks, "target_session_count": plan.target_session_count,
                 },
+                creation_idempotency_key=idempotency_key,
                 created_source=created_source,
             )
     if validation_error is not None:
         raise validation_error
     assert session is not None
-    return session
+    return SessionCreationResult(session=session, created=True)
 
 
 def issue_session_upload_grant(*, session_id: UUID, patient_id: UUID, media_type: str, mime: str, size: int, idempotency_key: str = "") -> UploadGrantResult:

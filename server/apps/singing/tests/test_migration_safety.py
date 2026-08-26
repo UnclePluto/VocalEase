@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from threading import Event
 
 import pytest
-from django.db import DatabaseError, connection, connections
+from django.db import DatabaseError, IntegrityError, connection, connections, transaction
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.recorder import MigrationRecorder
@@ -12,8 +12,47 @@ from django.utils import timezone
 from apps.analysis.models import AnalysisTask
 from apps.media.models import MediaAsset
 from apps.songs.models import Song
+from apps.singing.models import SingingSession
 
 from .test_submission_idempotency import uploaded_session
+
+
+@pytest.mark.django_db(transaction=True, databases="__all__")
+def test_creation_idempotency_migration_is_reversible_and_enforces_patient_scoped_key():
+    previous_target = [("singing", "0004_remove_analysistimeseries_generation")]
+
+    try:
+        executor = MigrationExecutor(connection)
+        executor.migrate(previous_target)
+        old_apps = executor.loader.project_state(previous_target).apps
+        OldSingingSession = old_apps.get_model("singing", "SingingSession")
+        assert "creation_idempotency_key" not in {
+            field.name for field in OldSingingSession._meta.fields
+        }
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        patient, existing = uploaded_session()
+        session_values = {
+            "song_id": existing.song_id,
+            "treatment_plan_id": existing.treatment_plan_id,
+            "patient_snapshot": existing.patient_snapshot,
+            "song_snapshot": existing.song_snapshot,
+            "treatment_plan_snapshot": existing.treatment_plan_snapshot,
+            "created_source": existing.created_source,
+        }
+        SingingSession.objects.filter(pk=existing.id).update(
+            creation_idempotency_key="migration-create-001",
+        )
+        with pytest.raises(IntegrityError), transaction.atomic():
+            SingingSession.objects.create(
+                patient_id=patient.id,
+                creation_idempotency_key="migration-create-001",
+                **session_values,
+            )
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
 
 
 def _singing_schema_snapshot():
@@ -217,12 +256,13 @@ def test_generation_cleanup_migration_preserves_existing_result_and_series_paylo
         executor = MigrationExecutor(connection)
         executor.migrate(old_targets)
         old_apps = executor.loader.project_state(old_targets).apps
-        patient, session = uploaded_session()
+        OldSingingSession = old_apps.get_model("singing", "SingingSession")
+        patient, session = uploaded_session(session_model=OldSingingSession)
         audio = session.media_bindings.get(media_type="singing_audio").asset
         task = AnalysisTask.objects.create(
             target_type="singing_session",
             target_id=session.id,
-            source_asset=audio,
+            source_asset_id=audio.id,
             task_type="singing_audio_metrics",
             executor="mock_singing",
             generation=7,

@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -98,8 +100,12 @@ class PatientSessionListView(APIView):
         patient = patient_for_request(request)
         serializer = CreateSessionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        session = create_session(patient_id=patient.id, **serializer.validated_data)
-        return api_response(data=SingingSessionReadSerializer(session).data, request_id=request.request_id, status_code=status.HTTP_201_CREATED)
+        result = create_session(
+            patient_id=patient.id,
+            idempotency_key=request.headers.get("Idempotency-Key", uuid4().hex),
+            **serializer.validated_data,
+        )
+        return api_response(data=SingingSessionReadSerializer(result.session).data, request_id=request.request_id, status_code=status.HTTP_201_CREATED)
 
 
 class PatientSessionMixin:

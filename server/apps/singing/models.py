@@ -50,6 +50,7 @@ class SingingSession(models.Model):
     song_snapshot = models.JSONField()
     treatment_plan_snapshot = models.JSONField()
     status = models.CharField(max_length=24, choices=Status.choices, default=Status.CREATED)
+    creation_idempotency_key = models.CharField(max_length=128, blank=True)
     submission_idempotency_key = models.CharField(max_length=128, blank=True)
     retry_idempotency_key = models.CharField(max_length=128, blank=True)
     retry_generation = models.PositiveSmallIntegerField(default=0)
@@ -73,6 +74,11 @@ class SingingSession(models.Model):
             models.Index(fields=["status", "-created_at"]),
         ]
         constraints = [
+            models.UniqueConstraint(
+                fields=["patient", "creation_idempotency_key"],
+                condition=~Q(creation_idempotency_key=""),
+                name="singing_session_creation_idempotency_unique",
+            ),
             models.CheckConstraint(
                 condition=Q(status__in=["created", "awaiting_upload", "uploaded", "processing", "completed", "failed", "cancelled"]),
                 name="singing_session_status_valid",
