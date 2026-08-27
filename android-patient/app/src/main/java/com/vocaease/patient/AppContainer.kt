@@ -3,9 +3,11 @@ package com.vocaease.patient
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.vocaease.patient.BuildConfig
+import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
+import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import com.vocaease.patient.feature.auth.AuthRepository
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +42,8 @@ interface AppContainer {
     val uploadFactory: UploadFactory
     val authRepository: AuthRepository
     val patientApi: PatientApi
+    val patientDatabase: VocaEaseDatabase
+    val encryptedFileStore: ChunkedAesGcmFileStore
     /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
     val sessionEvents: Flow<SessionLifecycleEvent>
 
@@ -55,13 +59,19 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val authRepository = sessionGraph.authRepository
     override val patientApi = sessionGraph.patientApi
     override val sessionEvents = sessionGraph.sessionEvents
+    override val patientDatabase = VocaEaseDatabase.create(context)
+    override val encryptedFileStore = ChunkedAesGcmFileStore(context)
     override val clock = AppClock(System::currentTimeMillis)
     override val dispatchers = object : AppDispatchers {
         override val io: CoroutineDispatcher = Dispatchers.IO
         override val default: CoroutineDispatcher = Dispatchers.Default
     }
     override val repositoryFactory = RepositoryFactory { name ->
-        if (name == "auth") authRepository else error("仓库尚未提供：$name")
+        when (name) {
+            "auth" -> authRepository
+            "draft-storage" -> patientDatabase
+            else -> error("仓库尚未提供：$name")
+        }
     }
     override val mediaFactory = MediaFactory { error("媒体能力将在后续任务中提供") }
     override val uploadFactory = UploadFactory { error("上传能力将在后续任务中提供") }
@@ -87,6 +97,10 @@ private object UnavailableAppContainer : AppContainer {
     override val authRepository: AuthRepository
         get() = unavailable()
     override val patientApi: PatientApi
+        get() = unavailable()
+    override val patientDatabase: VocaEaseDatabase
+        get() = unavailable()
+    override val encryptedFileStore: ChunkedAesGcmFileStore
         get() = unavailable()
     override val sessionEvents: Flow<SessionLifecycleEvent>
         get() = unavailable()
