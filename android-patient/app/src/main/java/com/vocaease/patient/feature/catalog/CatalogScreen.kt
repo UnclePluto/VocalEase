@@ -1,6 +1,7 @@
 package com.vocaease.patient.feature.catalog
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,6 +54,7 @@ import java.util.Locale
 fun CatalogScreen(
     state: CatalogUiState,
     onSearch: (String) -> Unit,
+    onPatientRetry: () -> Unit,
     onRetry: () -> Unit,
     onLoadMore: () -> Unit,
     onSongClick: (CatalogSongUi) -> Unit,
@@ -83,7 +85,24 @@ fun CatalogScreen(
             )
         }
         item {
-            TreatmentProgressCard(progress = state.treatmentProgress)
+            TreatmentProgressCard(
+                progress = state.treatmentProgress,
+                status = state.patientStatus,
+                errorMessage = state.patientErrorMessage,
+                onRetry = onPatientRetry,
+            )
+        }
+        if (state.patientErrorMessage != null && state.treatmentProgress != null) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(state.patientErrorMessage, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    Button(onClick = onPatientRetry, modifier = Modifier.height(40.dp)) { Text("重试") }
+                }
+            }
         }
         item {
             Row(
@@ -218,6 +237,7 @@ private fun SongCard(
             containerColor = AppWhite,
             disabledContainerColor = AppWhite.copy(alpha = 0.62f),
         ),
+        border = BorderStroke(1.dp, Color(0xFFDEE8E2)),
     ) {
         Row(
             modifier = Modifier

@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vocaease.patient.feature.catalog.PatientRepository
+import com.vocaease.patient.feature.catalog.PatientLoadState
+import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +18,12 @@ fun interface PendingUploadCounter {
     suspend fun count(): Int
 }
 
+class AccountScopedPendingUploadCounter(
+    private val storageProvider: AccountScopedDraftStorageProvider,
+) : PendingUploadCounter {
+    override suspend fun count(): Int = storageProvider.current().pendingUploadCount()
+}
+
 data class ProfileUiState(
     val patientName: String = "",
     val lifetimeCompletedSongs: Int = 0,
@@ -23,7 +31,11 @@ data class ProfileUiState(
     val pendingUploadCount: Int = 0,
     val hasActiveTreatmentPlan: Boolean = false,
     val isLoading: Boolean = false,
+    val patientStatus: ProfilePatientStatus = ProfilePatientStatus.INITIAL,
+    val errorMessage: String? = null,
 )
+
+enum class ProfilePatientStatus { INITIAL, LOADING, CONTENT, ERROR }
 
 class ProfileViewModel(
     private val patientRepository: PatientRepository,
@@ -32,6 +44,16 @@ class ProfileViewModel(
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(reduce())
     val state: StateFlow<ProfileUiState> = mutableState.asStateFlow()
+    private var pendingCount = 0
+
+    init {
+        viewModelScope.launch(dispatcher) {
+            patientRepository.state.collect {
+                if (it is PatientLoadState.Initial) pendingCount = 0
+                mutableState.value = reduce(pendingCount)
+            }
+        }
+    }
 
     fun start() {
         if (!mutableState.value.isLoading) {
@@ -42,7 +64,7 @@ class ProfileViewModel(
     suspend fun refresh() {
         mutableState.value = reduce().copy(isLoading = true)
         patientRepository.refreshMe()
-        val pendingCount = try {
+        pendingCount = try {
             pendingUploadCounter.count().coerceAtLeast(0)
         } catch (error: CancellationException) {
             throw error
@@ -53,13 +75,28 @@ class ProfileViewModel(
     }
 
     private fun reduce(pendingCount: Int = 0): ProfileUiState {
-        val profile = patientRepository.profile.value
+        val patientState = patientRepository.state.value
+        val profile = when (patientState) {
+            PatientLoadState.Initial -> null
+            is PatientLoadState.Loading -> patientState.previous
+            is PatientLoadState.Content -> patientState.profile
+            is PatientLoadState.Error -> patientState.previous
+        }
+        val status = when (patientState) {
+            PatientLoadState.Initial -> ProfilePatientStatus.INITIAL
+            is PatientLoadState.Loading -> ProfilePatientStatus.LOADING
+            is PatientLoadState.Content -> ProfilePatientStatus.CONTENT
+            is PatientLoadState.Error -> ProfilePatientStatus.ERROR
+        }
         return ProfileUiState(
             patientName = profile?.name.orEmpty(),
             lifetimeCompletedSongs = profile?.singingSummary?.completedSessionCount ?: 0,
             lifetimeDurationSeconds = profile?.singingSummary?.totalDurationSeconds ?: 0,
             pendingUploadCount = pendingCount,
             hasActiveTreatmentPlan = profile?.activeTreatmentPlan != null,
+            isLoading = patientState is PatientLoadState.Loading,
+            patientStatus = status,
+            errorMessage = (patientState as? PatientLoadState.Error)?.message,
         )
     }
 

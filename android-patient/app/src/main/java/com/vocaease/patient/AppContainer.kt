@@ -18,6 +18,7 @@ import com.vocaease.patient.feature.catalog.SongRepository
 import com.vocaease.patient.feature.catalog.VocaEasePatientRemoteDataSource
 import com.vocaease.patient.feature.catalog.VocaEaseSongRemoteDataSource
 import com.vocaease.patient.feature.profile.PendingUploadCounter
+import com.vocaease.patient.feature.profile.AccountScopedPendingUploadCounter
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -69,8 +70,17 @@ class AndroidAppContainer(context: Context) : AppContainer {
 
     override val authRepository = sessionGraph.authRepository
     override val patientApi = sessionGraph.patientApi
-    override val patientRepository = PatientRepository(VocaEasePatientRemoteDataSource(patientApi))
-    override val songRepository = SongRepository { keyword ->
+    private val accountSession = object : AuthenticatedAccountSession {
+        override fun current(): AuthenticatedAccountLease? = authRepository.currentAuthenticatedLease()
+        override fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) =
+            authRepository.addAuthenticatedLeaseChangedListener(listener)
+        override suspend fun <T> withCurrentLease(
+            expected: AuthenticatedAccountLease,
+            operation: suspend () -> T,
+        ): T = authRepository.withAuthenticatedLease(expected, operation)
+    }
+    override val patientRepository = PatientRepository(VocaEasePatientRemoteDataSource(patientApi), accountSession)
+    override val songRepository = SongRepository(accountSession) { keyword ->
         SongPagingSource(VocaEaseSongRemoteDataSource(patientApi), keyword)
     }
     override val sessionEvents = sessionGraph.sessionEvents
@@ -79,17 +89,9 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val draftStorage = AccountScopedDraftStorageProvider(
         patientDatabase,
         encryptedFileStore,
-        object : AuthenticatedAccountSession {
-            override fun current(): AuthenticatedAccountLease? = authRepository.currentAuthenticatedLease()
-            override suspend fun <T> withCurrentLease(
-                expected: AuthenticatedAccountLease,
-                operation: suspend () -> T,
-            ): T = authRepository.withAuthenticatedLease(expected, operation)
-        },
+        accountSession,
     )
-    override val pendingUploadCounter = PendingUploadCounter {
-        draftStorage.current().pendingUploadCount()
-    }
+    override val pendingUploadCounter = AccountScopedPendingUploadCounter(draftStorage)
     override val clock = AppClock(System::currentTimeMillis)
     override val dispatchers = object : AppDispatchers {
         override val io: CoroutineDispatcher = Dispatchers.IO

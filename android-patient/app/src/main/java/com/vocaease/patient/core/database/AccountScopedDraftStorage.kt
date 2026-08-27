@@ -9,13 +9,14 @@ import kotlinx.coroutines.sync.withLock
 
 class StaleAccountScopeException internal constructor() : IllegalStateException("当前账户存储已失效")
 
-internal class AuthenticatedAccountLease internal constructor(
+class AuthenticatedAccountLease internal constructor(
     internal val patientId: String,
     internal val incarnationId: String = UUID.randomUUID().toString(),
 )
 
-internal interface AuthenticatedAccountSession {
+interface AuthenticatedAccountSession {
     fun current(): AuthenticatedAccountLease?
+    fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) = Unit
     suspend fun <T> withCurrentLease(
         expected: AuthenticatedAccountLease,
         operation: suspend () -> T,
@@ -24,18 +25,25 @@ internal interface AuthenticatedAccountSession {
 
 internal class MutableAuthenticatedAccountSession : AuthenticatedAccountSession {
     private val mutex = Mutex()
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<(AuthenticatedAccountLease?) -> Unit>()
     @Volatile private var lease: AuthenticatedAccountLease? = null
 
     suspend fun authenticate(patientId: String) = mutex.withLock {
         require(patientId.isNotBlank())
         lease = AuthenticatedAccountLease(patientId)
+        listeners.forEach { it(lease) }
     }
 
     suspend fun clear() = mutex.withLock {
         lease = null
+        listeners.forEach { it(null) }
     }
 
     override fun current(): AuthenticatedAccountLease? = lease
+    override fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) {
+        listeners += listener
+        listener(lease)
+    }
     override suspend fun <T> withCurrentLease(
         expected: AuthenticatedAccountLease,
         operation: suspend () -> T,

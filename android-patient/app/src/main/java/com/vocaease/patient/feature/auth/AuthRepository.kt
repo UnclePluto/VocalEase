@@ -405,6 +405,9 @@ class AuthRepository(
     internal fun isCurrentAuthenticatedLease(lease: AuthenticatedAccountLease): Boolean =
         sessionArbiter.currentAuthenticatedAccountLease() === lease
 
+    internal fun addAuthenticatedLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) =
+        sessionArbiter.addAuthenticatedAccountLeaseListener(listener)
+
     internal suspend fun <T> withAuthenticatedLease(
         lease: AuthenticatedAccountLease,
         operation: suspend () -> T,

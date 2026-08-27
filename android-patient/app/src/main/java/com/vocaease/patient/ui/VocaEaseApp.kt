@@ -1,7 +1,7 @@
 package com.vocaease.patient.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +25,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -157,7 +158,7 @@ private fun MainTab(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .clickable(onClick = onClick)
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
             .padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -231,6 +232,7 @@ private fun CatalogRoute(onSongClick: (String) -> Unit) {
     CatalogScreen(
         state = state,
         onSearch = { keyword -> scope.launch { catalogViewModel.search(keyword) } },
+        onPatientRetry = { scope.launch { catalogViewModel.retryPatient() } },
         onRetry = { scope.launch { catalogViewModel.retrySongs() } },
         onLoadMore = { scope.launch { catalogViewModel.loadMore() } },
         onSongClick = { song -> onSongClick(song.id.toString()) },
@@ -244,6 +246,7 @@ private fun ProfileRoute(navigation: ProfileNavigation) {
         factory = ProfileViewModel.factory(container.patientRepository, container.pendingUploadCounter),
     )
     val state by profileViewModel.state.collectAsState()
+    val scope = rememberCoroutineScope()
     LaunchedEffect(profileViewModel) { profileViewModel.start() }
     ProfileScreen(
         state = state,
@@ -251,6 +254,7 @@ private fun ProfileRoute(navigation: ProfileNavigation) {
         onTreatmentPlanClick = navigation.openTreatmentPlan,
         onPendingUploadsClick = navigation.openPendingUploads,
         onSettingsClick = navigation.openSettings,
+        onRetry = { scope.launch { profileViewModel.refresh() } },
     )
 }
 

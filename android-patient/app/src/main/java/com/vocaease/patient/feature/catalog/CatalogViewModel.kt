@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 data class TreatmentProgressUi(
@@ -29,6 +31,8 @@ data class CatalogSongUi(
     val durationSeconds: Int,
 )
 
+enum class PatientUiStatus { INITIAL, LOADING, CONTENT, ERROR }
+
 data class CatalogUiState(
     val patientName: String = "",
     val hasActiveTreatmentPlan: Boolean = false,
@@ -43,6 +47,9 @@ data class CatalogUiState(
     val isLoading: Boolean = false,
     val isLoadingMore: Boolean = false,
     val errorMessage: String? = null,
+    val patientStatus: PatientUiStatus = PatientUiStatus.INITIAL,
+    val patientErrorMessage: String? = null,
+    val showNoTreatmentPlan: Boolean = false,
 )
 
 class CatalogViewModel(
@@ -53,6 +60,13 @@ class CatalogViewModel(
     private val mutableState = MutableStateFlow(reduce())
     val state: StateFlow<CatalogUiState> = mutableState.asStateFlow()
 
+    init {
+        viewModelScope.launch(dispatcher) {
+            combine(patientRepository.state, songRepository.snapshot) { _, _ -> reduce() }
+                .collect { mutableState.value = it }
+        }
+    }
+
     fun start() {
         if (!mutableState.value.isLoading && patientRepository.profile.value == null) {
             viewModelScope.launch(dispatcher) { refresh() }
@@ -60,33 +74,46 @@ class CatalogViewModel(
     }
 
     suspend fun refresh() {
-        mutableState.value = reduce().copy(isLoading = true)
         patientRepository.refreshMe()
         songRepository.refresh()
         mutableState.value = reduce()
     }
 
     suspend fun search(keyword: String) {
-        mutableState.value = reduce().copy(keyword = keyword.trim(), isLoading = true)
         songRepository.refresh(keyword)
         mutableState.value = reduce()
     }
 
     suspend fun retrySongs() {
-        mutableState.value = reduce().copy(isLoading = true)
         songRepository.retry()
+        mutableState.value = reduce()
+    }
+
+    suspend fun retryPatient() {
+        patientRepository.refreshMe()
         mutableState.value = reduce()
     }
 
     suspend fun loadMore() {
         if (!mutableState.value.canLoadMore || mutableState.value.isLoadingMore) return
-        mutableState.value = reduce().copy(isLoadingMore = true)
         songRepository.loadMore()
         mutableState.value = reduce()
     }
 
     private fun reduce(): CatalogUiState {
-        val profile = patientRepository.profile.value
+        val patientState = patientRepository.state.value
+        val profile = when (patientState) {
+            PatientLoadState.Initial -> null
+            is PatientLoadState.Loading -> patientState.previous
+            is PatientLoadState.Content -> patientState.profile
+            is PatientLoadState.Error -> patientState.previous
+        }
+        val patientStatus = when (patientState) {
+            PatientLoadState.Initial -> PatientUiStatus.INITIAL
+            is PatientLoadState.Loading -> PatientUiStatus.LOADING
+            is PatientLoadState.Content -> PatientUiStatus.CONTENT
+            is PatientLoadState.Error -> PatientUiStatus.ERROR
+        }
         val catalog = songRepository.snapshot.value
         val hasPlan = profile?.activeTreatmentPlan != null && profile.treatmentProgress != null
         return CatalogUiState(
@@ -101,6 +128,11 @@ class CatalogViewModel(
             canLoadMore = catalog.nextPage != null,
             canStartTraining = hasPlan,
             errorMessage = catalog.errorMessage,
+            isLoading = patientState is PatientLoadState.Loading || catalog.isLoading,
+            isLoadingMore = catalog.isLoadingMore,
+            patientStatus = patientStatus,
+            patientErrorMessage = (patientState as? PatientLoadState.Error)?.message,
+            showNoTreatmentPlan = profile != null && profile.treatmentProgress == null,
         )
     }
 

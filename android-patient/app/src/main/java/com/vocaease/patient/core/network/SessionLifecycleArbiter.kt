@@ -39,6 +39,7 @@ class SessionLifecycleArbiter(
     private val eventQueue = Channel<SessionLifecycleEvent>(capacity = Channel.UNLIMITED)
     private val sessionExpiredListeners = CopyOnWriteArrayList<(SessionInvalidation) -> Unit>()
     private val refreshSessionAppliedListeners = CopyOnWriteArrayList<(AuthSession) -> Unit>()
+    private val authenticatedAccountLeaseListeners = CopyOnWriteArrayList<(AuthenticatedAccountLease?) -> Unit>()
     private var lastPublishedInvalidation: SessionInvalidation? = null
     @Volatile private var authenticatedAccountLease: AuthenticatedAccountLease? = null
     private var pendingAccountIncarnationId: String? = null
@@ -49,6 +50,11 @@ class SessionLifecycleArbiter(
     fun sessionSnapshot(): SessionSnapshot = tokenVault.sessionSnapshot()
 
     internal fun currentAuthenticatedAccountLease(): AuthenticatedAccountLease? = authenticatedAccountLease
+
+    internal fun addAuthenticatedAccountLeaseListener(listener: (AuthenticatedAccountLease?) -> Unit) {
+        authenticatedAccountLeaseListeners += listener
+        listener(authenticatedAccountLease)
+    }
 
     fun addSessionExpiredListener(listener: (SessionInvalidation) -> Unit) {
         sessionExpiredListeners += listener
@@ -96,6 +102,7 @@ class SessionLifecycleArbiter(
             require(incarnationId.isNotBlank())
             authenticatedAccountLease = null
             pendingAccountIncarnationId = incarnationId
+            authenticatedAccountLeaseListeners.forEach { it(null) }
         }
 
         fun publishAuthenticatedAccount(patientId: String, incarnationId: String): AuthenticatedAccountLease? {
@@ -103,6 +110,7 @@ class SessionLifecycleArbiter(
             return AuthenticatedAccountLease(patientId, incarnationId).also {
                 authenticatedAccountLease = it
                 pendingAccountIncarnationId = null
+                authenticatedAccountLeaseListeners.forEach { listener -> listener(it) }
             }
         }
 
@@ -110,8 +118,10 @@ class SessionLifecycleArbiter(
             pendingAccountIncarnationId == incarnationId
 
         fun revokeAuthenticatedAccount() {
+            val changed = authenticatedAccountLease != null || pendingAccountIncarnationId != null
             authenticatedAccountLease = null
             pendingAccountIncarnationId = null
+            if (changed) authenticatedAccountLeaseListeners.forEach { it(null) }
         }
 
         /** 必须紧跟成功的 token CAS 在同一会话锁内调用。 */

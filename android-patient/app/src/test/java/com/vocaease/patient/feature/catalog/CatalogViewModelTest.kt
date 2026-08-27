@@ -17,6 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancelAndJoin
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -148,20 +150,77 @@ class CatalogViewModelTest {
         assertEquals(listOf("快结果"), viewModel.state.value.songs.map { it.title })
     }
 
+    @Test
+    fun `患者首帧和首次失败不会伪装成无治疗计划`() = runBlocking {
+        val patientRemote = FakePatientRemote(profile()).apply { failure = IOException("offline") }
+        val viewModel = viewModel(patientRemote, FakeSongRemote(mutableMapOf(1 to songPage(0, 1))))
+
+        assertEquals(PatientUiStatus.INITIAL, viewModel.state.value.patientStatus)
+        assertFalse(viewModel.state.value.showNoTreatmentPlan)
+        viewModel.refresh()
+
+        assertEquals(PatientUiStatus.ERROR, viewModel.state.value.patientStatus)
+        assertEquals("患者信息加载失败，请重试", viewModel.state.value.patientErrorMessage)
+        assertFalse(viewModel.state.value.canStartTraining)
+        assertFalse(viewModel.state.value.showNoTreatmentPlan)
+    }
+
+    @Test
+    fun `同账户患者刷新失败保留旧治疗内容并可重试`() = runBlocking {
+        val patientRemote = FakePatientRemote(profile())
+        val viewModel = viewModel(patientRemote, FakeSongRemote(mutableMapOf(1 to songPage(0, 1))))
+        viewModel.refresh()
+        patientRemote.failure = IOException("offline")
+
+        viewModel.retryPatient()
+
+        assertEquals(PatientUiStatus.ERROR, viewModel.state.value.patientStatus)
+        assertEquals(8, viewModel.state.value.treatmentProgress?.completedCount)
+        assertEquals("患者信息加载失败，请重试", viewModel.state.value.patientErrorMessage)
+        assertTrue(viewModel.state.value.canStartTraining)
+    }
+
+    @Test
+    fun `搜索取消后清除加载状态且不提交错误`() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val gate = CompletableDeferred<SongPage>()
+        val remote = SongRemoteDataSource {
+            started.complete(Unit)
+            gate.await()
+        }
+        val viewModel = viewModel(FakePatientRemote(profile()), remote)
+        val search = launch { viewModel.search("待取消") }
+        started.await()
+        assertTrue(viewModel.state.value.isLoading)
+
+        search.cancelAndJoin()
+
+        assertFalse(viewModel.state.value.isLoading)
+        assertNull(viewModel.state.value.errorMessage)
+    }
+
     private fun viewModel(
         patientRemote: PatientRemoteDataSource,
         songRemote: SongRemoteDataSource,
     ) = CatalogViewModel(
-        patientRepository = PatientRepository(patientRemote),
-        songRepository = SongRepository { keyword -> SongPagingSource(songRemote, keyword) },
+        patientRepository = PatientRepository(patientRemote, authenticatedSession()),
+        songRepository = SongRepository(authenticatedSession()) { keyword -> SongPagingSource(songRemote, keyword) },
         dispatcher = Dispatchers.Unconfined,
     )
+
+    private fun authenticatedSession() = TestAuthenticatedAccountSession().apply {
+        authenticate("10000000-0000-4000-8000-000000000001", UUID.randomUUID().toString())
+    }
 }
 
 internal class FakePatientRemote(
     var value: PatientProfile,
 ) : PatientRemoteDataSource {
-    override suspend fun fetchMe(): PatientProfile = value
+    var failure: IOException? = null
+    override suspend fun fetchMe(): PatientProfile {
+        failure?.let { throw it }
+        return value
+    }
 }
 
 internal class FakeSongRemote(
@@ -178,12 +237,13 @@ internal class FakeSongRemote(
 }
 
 internal fun profile(
+    name: String = "Voca",
     progressPercent: String = "33.33",
     activePlan: Boolean = true,
 ): PatientProfile = PatientProfile(
     id = UUID.fromString("10000000-0000-0000-0000-000000000001"),
     medicalRecordNo = "MR-001",
-    name = "Voca",
+    name = name,
     gender = Gender.FEMALE,
     enrollmentAge = 30,
     phone = "",

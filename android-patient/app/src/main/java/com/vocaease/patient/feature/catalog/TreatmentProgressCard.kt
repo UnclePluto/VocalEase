@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -37,6 +39,9 @@ import com.vocaease.patient.ui.theme.BrandGreen
 @Composable
 fun TreatmentProgressCard(
     progress: TreatmentProgressUi?,
+    status: PatientUiStatus,
+    errorMessage: String?,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val percent = progress?.percent?.coerceIn(0f, 100f) ?: 0f
@@ -59,20 +64,33 @@ fun TreatmentProgressCard(
                     .padding(18.dp),
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(
-                    "本周期治疗进度",
-                    color = BrandGreen,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                )
+                Text("本周期治疗进度", color = BrandGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
-                Text(
-                    "暂无进行中的治疗计划，请联系医生",
-                    color = Color(0xFFF2FBF6),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    lineHeight = 27.sp,
-                )
+                when (status) {
+                    PatientUiStatus.INITIAL, PatientUiStatus.LOADING -> Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            color = BrandGreen,
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("正在加载治疗进度", color = Color(0xFFF2FBF6), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    PatientUiStatus.ERROR -> {
+                        Text(errorMessage ?: "患者信息加载失败，请重试", color = Color(0xFFF2FBF6), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = onRetry, modifier = Modifier.height(40.dp)) { Text("重试") }
+                    }
+                    PatientUiStatus.CONTENT -> Text(
+                        "暂无进行中的治疗计划，请联系医生",
+                        color = Color(0xFFF2FBF6),
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        lineHeight = 27.sp,
+                    )
+                }
             }
         } else {
             Row(

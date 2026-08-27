@@ -31,6 +31,7 @@ class CatalogScreenTest {
                 CatalogScreen(
                     state = catalogState(),
                     onSearch = {},
+                    onPatientRetry = {},
                     onRetry = {},
                     onLoadMore = {},
                     onSongClick = {},
@@ -70,6 +71,7 @@ class CatalogScreenTest {
                         canStartTraining = false,
                     ),
                     onSearch = {},
+                    onPatientRetry = {},
                     onRetry = {},
                     onLoadMore = {},
                     onSongClick = { clickCount += 1 },
@@ -82,6 +84,33 @@ class CatalogScreenTest {
             .assertIsNotEnabled()
             .performClick()
         composeRule.runOnIdle { assertEquals(0, clickCount) }
+    }
+
+    @Test
+    fun 首帧加载和请求错误绝不显示联系医生且错误可重试() {
+        var retries = 0
+        composeRule.setContent {
+            VocaEaseTheme {
+                CatalogScreen(
+                    state = catalogState().copy(
+                        patientStatus = PatientUiStatus.ERROR,
+                        treatmentProgress = null,
+                        patientErrorMessage = "患者信息加载失败，请重试",
+                        canStartTraining = false,
+                    ),
+                    onSearch = {},
+                    onPatientRetry = { retries += 1 },
+                    onRetry = {},
+                    onLoadMore = {},
+                    onSongClick = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("暂无进行中的治疗计划，请联系医生").assertDoesNotExist()
+        composeRule.onNodeWithText("患者信息加载失败，请重试").assertIsDisplayed()
+        composeRule.onNodeWithText("重试").performClick()
+        composeRule.runOnIdle { assertEquals(1, retries) }
     }
 
     private fun catalogState() = CatalogUiState(
@@ -101,5 +130,6 @@ class CatalogScreenTest {
         totalSongCount = 32,
         canLoadMore = true,
         canStartTraining = true,
+        patientStatus = PatientUiStatus.CONTENT,
     )
 }

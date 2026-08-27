@@ -1,6 +1,8 @@
 package com.vocaease.patient.feature.profile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,6 +30,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vocaease.patient.ui.theme.AppBackground
@@ -44,8 +52,11 @@ fun ProfileScreen(
     onTreatmentPlanClick: () -> Unit,
     onPendingUploadsClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val hasPatientContent = state.patientStatus == ProfilePatientStatus.CONTENT ||
+        (state.patientStatus == ProfilePatientStatus.ERROR && state.patientName.isNotBlank())
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -60,14 +71,39 @@ fun ProfileScreen(
                 Box(
                     modifier = Modifier
                         .size(40.dp)
-                        .background(AppSurfaceVariant, RoundedCornerShape(20.dp)),
+                        .background(AppSurfaceVariant, RoundedCornerShape(20.dp))
+                        .clickable(onClick = onSettingsClick)
+                        .semantics {
+                            role = Role.Button
+                            contentDescription = "设置"
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text("⚙", color = TextPrimary, fontSize = 18.sp)
                 }
             }
         }
-        item {
+        if (!hasPatientContent) item {
+            Box(
+                modifier = Modifier.fillMaxWidth().height(220.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (state.patientStatus == ProfilePatientStatus.ERROR) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(state.errorMessage ?: "患者信息加载失败，请重试", color = TextSecondary, fontSize = 14.sp)
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = onRetry) { Text("重试") }
+                    }
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = BrandGreen)
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在加载患者信息", color = TextSecondary, fontSize = 14.sp)
+                    }
+                }
+            }
+        }
+        if (hasPatientContent) item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
@@ -89,7 +125,14 @@ fun ProfileScreen(
                 }
             }
         }
-        item {
+        if (hasPatientContent && state.errorMessage != null) item {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(state.errorMessage, color = TextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.weight(1f))
+                Button(onClick = onRetry, modifier = Modifier.height(40.dp)) { Text("重试") }
+            }
+        }
+        if (hasPatientContent) item {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
@@ -114,7 +157,7 @@ fun ProfileScreen(
                 )
             }
         }
-        item {
+        if (hasPatientContent) item {
             Text(
                 "演唱与治疗",
                 modifier = Modifier.padding(top = 10.dp),
@@ -123,22 +166,22 @@ fun ProfileScreen(
                 fontWeight = FontWeight.Bold,
             )
         }
-        item { ProfileEntry("演唱历史", "查看全部记录", onHistoryClick) }
-        item {
+        if (hasPatientContent) item { ProfileEntry("演唱历史", "查看全部记录", onHistoryClick) }
+        if (hasPatientContent) item {
             ProfileEntry(
                 "治疗计划",
                 if (state.hasActiveTreatmentPlan) "查看当前治疗目标" else "暂无计划，请联系医生",
                 onTreatmentPlanClick,
             )
         }
-        item {
+        if (hasPatientContent) item {
             ProfileEntry(
                 "待上传记录",
                 if (state.pendingUploadCount > 0) "${state.pendingUploadCount} 条待处理" else "暂无待处理记录",
                 onPendingUploadsClick,
             )
         }
-        item { ProfileEntry("设置", "密码与账户", onSettingsClick) }
+        if (hasPatientContent) item { ProfileEntry("设置", "密码与账户", onSettingsClick) }
     }
 }
 
@@ -176,6 +219,7 @@ private fun StatisticCard(
         modifier = modifier.height(116.dp),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = background),
+        border = BorderStroke(1.dp, Color(0xFFDEE8E2)),
     ) {
         Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             Column {
@@ -206,6 +250,7 @@ private fun ProfileEntry(
             .height(68.dp),
         shape = RoundedCornerShape(17.dp),
         colors = CardDefaults.cardColors(containerColor = AppWhite),
+        border = BorderStroke(1.dp, Color(0xFFDEE8E2)),
     ) {
         Row(
             modifier = Modifier
