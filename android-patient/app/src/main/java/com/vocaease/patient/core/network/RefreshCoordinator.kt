@@ -35,10 +35,14 @@ sealed interface RefreshResult {
         val epoch: Long,
     ) : RefreshResult
 
+    /** 原 401 所属会话已被登出、登录或其他不可证明同源的会话变更取代。 */
+    data class Superseded(val observedEpoch: Long) : RefreshResult
+
     data class Failed(val cause: Throwable?) : RefreshResult
 }
 
 class SessionExpiredException(cause: Throwable? = null) : Exception("登录状态已失效", cause)
+class SessionChangedException : Exception("登录账号已变更，请重新操作")
 
 fun interface RefreshRemoteDataSource {
     suspend fun refresh(request: RefreshRequestDto): AuthSession
@@ -50,7 +54,11 @@ class RefreshCoordinator(
     internal val sessionArbiter: SessionLifecycleArbiter = SessionLifecycleArbiter(tokenVault),
     private val beforeInvalidationPublish: suspend (SessionInvalidation) -> Unit = {},
 ) {
-    private data class EpochOutcome(val sourceEpoch: Long, val result: RefreshResult)
+    private data class EpochOutcome(
+        val sourceEpoch: Long,
+        val terminalEpoch: Long,
+        val result: RefreshResult,
+    )
 
     private val mutex = Mutex()
     private val latestOutcome = AtomicReference<EpochOutcome?>(null)
@@ -68,21 +76,12 @@ class RefreshCoordinator(
     suspend fun refreshAfterUnauthorized(failedEpoch: Long): RefreshResult = mutex.withLock {
         val current = sessionArbiter.sessionSnapshot()
         if (current.epoch != failedEpoch) {
-            latestOutcome.get()
-                ?.takeIf { it.sourceEpoch == failedEpoch }
-                ?.result
-                ?.let { result ->
-                    if (result is RefreshResult.PasswordChangeRequired && result.epoch == current.epoch) {
-                        return@withLock result
-                    }
-                }
-            current.accessToken?.let {
-                return@withLock RefreshResult.Success(it, current.epoch, session = null)
-            }
-            latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let {
+            latestOutcome.get()?.takeIf {
+                it.sourceEpoch == failedEpoch && it.terminalEpoch == current.epoch
+            }?.let {
                 return@withLock it.result
             }
-            return@withLock RefreshResult.Failed(cause = null)
+            return@withLock RefreshResult.Superseded(current.epoch)
         }
         latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let { return@withLock it.result }
 
@@ -91,12 +90,12 @@ class RefreshCoordinator(
             is RefreshTokenRead.Missing -> {
                 val observed = sessionArbiter.sessionSnapshot()
                 if (observed.epoch != failedEpoch) {
-                    return@withLock observed.accessToken?.let {
-                        RefreshResult.Success(it, observed.epoch, session = null)
-                    } ?: latestOutcome.get()
-                        ?.takeIf { it.sourceEpoch == failedEpoch }
+                    return@withLock latestOutcome.get()
+                        ?.takeIf {
+                            it.sourceEpoch == failedEpoch && it.terminalEpoch == observed.epoch
+                        }
                         ?.result
-                        ?: RefreshResult.Failed(cause = null)
+                        ?: RefreshResult.Superseded(observed.epoch)
                 }
                 return@withLock expireEpoch(failedEpoch, cause = null)
             }
@@ -160,11 +159,9 @@ class RefreshCoordinator(
                 )
             }
         } else {
-            mutation.snapshot.accessToken?.let {
-                RefreshResult.Success(it, mutation.snapshot.epoch, session = null)
-            } ?: RefreshResult.Failed(cause = null)
+            RefreshResult.Superseded(mutation.snapshot.epoch)
         }
-        latestOutcome.set(EpochOutcome(failedEpoch, result))
+        latestOutcome.set(EpochOutcome(failedEpoch, mutation.snapshot.epoch, result))
         result
     }
 
@@ -181,6 +178,7 @@ class RefreshCoordinator(
             when (val refreshed = refreshAfterUnauthorized(original.epoch)) {
                 is RefreshResult.Success -> request()
                 is RefreshResult.PasswordChangeRequired -> throw SessionExpiredException()
+                is RefreshResult.Superseded -> throw SessionChangedException()
                 is RefreshResult.Failed -> throw SessionExpiredException(refreshed.cause)
             }
         }
@@ -192,7 +190,7 @@ class RefreshCoordinator(
     ): RefreshResult = mutex.withLock {
         val current = sessionArbiter.sessionSnapshot()
         if (current.accessToken != null && current.epoch != invalidation.toEpoch) {
-            return@withLock RefreshResult.Success(current.accessToken, current.epoch, session = null)
+            return@withLock RefreshResult.Superseded(current.epoch)
         }
         latestOutcome.get()?.takeIf { it.sourceEpoch == invalidation.fromEpoch }?.let {
             return@withLock it.result
@@ -221,15 +219,11 @@ class RefreshCoordinator(
                 }
             }
         }
-        if (!mutation.applied && mutation.snapshot.accessToken != null) {
-            return RefreshResult.Success(
-                mutation.snapshot.accessToken,
-                mutation.snapshot.epoch,
-                session = null,
-            )
+        if (!mutation.applied) {
+            return RefreshResult.Superseded(mutation.snapshot.epoch)
         }
         val result = RefreshResult.Failed(cause)
-        latestOutcome.set(EpochOutcome(failedEpoch, result))
+        latestOutcome.set(EpochOutcome(failedEpoch, mutation.snapshot.epoch, result))
         check(!mutation.applied || claim != null) { "会话清理成功但未形成失效裁决" }
         return result
     }
@@ -244,13 +238,11 @@ class RefreshCoordinator(
         beforeInvalidationPublish(invalidation)
         val claim = sessionArbiter.mutate { claimInvalidation(invalidation) }
         if (claim is InvalidationClaim.Superseded) {
-            return claim.snapshot.accessToken?.let {
-                RefreshResult.Success(it, claim.snapshot.epoch, session = null)
-            } ?: RefreshResult.Failed(cause)
+            return RefreshResult.Superseded(claim.snapshot.epoch)
         }
         latestOutcome.get()?.takeIf { it.sourceEpoch == failedEpoch }?.let { return it.result }
         val result = RefreshResult.Failed(cause)
-        latestOutcome.set(EpochOutcome(failedEpoch, result))
+        latestOutcome.set(EpochOutcome(failedEpoch, invalidation.toEpoch, result))
         return result
     }
 

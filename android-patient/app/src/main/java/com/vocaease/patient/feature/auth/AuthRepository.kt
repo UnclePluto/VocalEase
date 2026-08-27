@@ -144,6 +144,7 @@ class AuthRepository(
         when (val result = refreshCoordinator.refreshAfterUnauthorized(current.epoch)) {
             is RefreshResult.Success -> restoreAuthenticatedPatient()
             is RefreshResult.PasswordChangeRequired -> Unit
+            is RefreshResult.Superseded -> Unit
             is RefreshResult.Failed -> Unit
         }
     }

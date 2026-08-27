@@ -364,7 +364,7 @@ class AuthRepositoryTest {
     }
 
     @Test
-    fun `旧代请求收到 401 时复用已更新 token 不二次刷新`() = runBlocking {
+    fun `无法证明同一刷新结果的旧代请求不会复用当前token`() = runBlocking {
         val vault = FakeTokenVault(accessToken = "old", refreshToken = "refresh")
         val failedGeneration = vault.sessionSnapshot().epoch
         vault.replaceTokens(failedGeneration, "already-new", "rotated", "manual-replacement")
@@ -374,11 +374,11 @@ class AuthRepositoryTest {
         val result = coordinator.refreshAfterUnauthorized(failedGeneration)
 
         assertEquals(0, remote.refreshCalls.get())
-        assertEquals("already-new", (result as RefreshResult.Success).accessToken)
+        assertTrue(result is RefreshResult.Superseded)
     }
 
     @Test
-    fun `旧epoch失败后新登录获胜时迟到旧401复用新token`() = runBlocking {
+    fun `旧epoch失败后新登录获胜时迟到旧401返回superseded`() = runBlocking {
         val vault = FakeTokenVault(accessToken = "expired", refreshToken = "stored-refresh")
         val remote = FakeAuthRemote(
             loginResult = session(access = "login-access", refresh = "login-refresh"),
@@ -392,8 +392,7 @@ class AuthRepositoryTest {
         repository.login("patient-001", "password")
         val lateResult = coordinator.refreshAfterUnauthorized(oldEpoch)
 
-        assertTrue(lateResult is RefreshResult.Success)
-        assertEquals("login-access", (lateResult as RefreshResult.Success).accessToken)
+        assertTrue(lateResult is RefreshResult.Superseded)
         assertEquals("login-access", vault.sessionSnapshot().accessToken)
         assertEquals(1, remote.refreshCalls.get())
     }

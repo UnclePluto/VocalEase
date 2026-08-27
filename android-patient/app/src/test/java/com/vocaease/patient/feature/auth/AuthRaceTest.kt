@@ -2,6 +2,7 @@ package com.vocaease.patient.feature.auth
 
 import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshResult
+import com.vocaease.patient.core.network.SessionChangedException
 import com.vocaease.patient.core.network.dto.AccountRole
 import com.vocaease.patient.core.network.dto.AuthSession
 import com.vocaease.patient.core.network.dto.ChangePasswordRequestDto
@@ -20,6 +21,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -62,16 +64,75 @@ class AuthRaceTest {
         remote.releaseRefresh.complete(Unit)
         val result = refresh.await()
 
-        assertTrue(result is RefreshResult.Failed)
+        assertTrue(result is RefreshResult.Superseded)
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertNull(vault.sessionSnapshot().accessToken)
     }
 
     @Test
-    fun `旧刷新返回前新登录获胜时旧结果不覆盖新会话`() = runBlocking {
+    fun `刷新远端失败前已登出时仍返回superseded而不是旧会话失败`() = runBlocking {
+        val vault = LinearTokenVault("expired-access", "stored-refresh")
+        val remote = GatedAuthRemote(refreshFailure = java.io.IOException("offline"))
+        val coordinator = RefreshCoordinator(vault, remote)
+        val repository = AuthRepository(vault, remote, coordinator, patientIdentity())
+        repository.restoreSession()
+        remote.holdRefresh = true
+        val failedEpoch = vault.sessionSnapshot().epoch
+        val refresh = async { coordinator.refreshAfterUnauthorized(failedEpoch) }
+        remote.refreshStarted.await()
+
+        repository.logout()
+        remote.releaseRefresh.complete(Unit)
+
+        assertTrue(refresh.await() is RefreshResult.Superseded)
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertNull(vault.sessionSnapshot().accessToken)
+    }
+
+    @Test
+    fun `旧刷新返回前新登录获胜时旧请求终止且不使用新患者token重试`() = runBlocking {
         val vault = LinearTokenVault("expired-access", "stored-refresh")
         val remote = GatedAuthRemote(
             loginResult = authSession("login-access", "login-refresh"),
+            refreshResult = authSession("stale-refresh-access", "stale-refresh-token"),
+        )
+        val coordinator = RefreshCoordinator(vault, remote)
+        val identity = MutablePatientIdentity("11111111-1111-4111-8111-111111111111")
+        val repository = AuthRepository(vault, remote, coordinator, identity)
+        repository.restoreSession()
+        remote.holdRefresh = true
+        var requestCalls = 0
+        val oldRequest = async {
+            val failure = runCatching {
+                coordinator.executeAuthenticated {
+                    requestCalls += 1
+                    if (requestCalls == 1) throw unauthorized()
+                    requireNotNull(vault.sessionSnapshot().accessToken)
+                }
+            }.exceptionOrNull()
+            assertTrue(failure is SessionChangedException)
+        }
+        remote.refreshStarted.await()
+
+        identity.patientId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        repository.login("patient-001", "password")
+        remote.releaseRefresh.complete(Unit)
+        oldRequest.await()
+
+        assertEquals(1, requestCalls)
+        assertEquals("login-access", vault.sessionSnapshot().accessToken)
+        assertEquals("login-refresh", vault.refreshValue())
+        assertEquals(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repository.currentAuthenticatedLease()?.patientId,
+        )
+    }
+
+    @Test
+    fun `旧刷新被登出后同账号重新登录取代时返回superseded`() = runBlocking {
+        val vault = LinearTokenVault("expired-access", "stored-refresh")
+        val remote = GatedAuthRemote(
+            loginResult = authSession("relogin-access", "relogin-refresh"),
             refreshResult = authSession("stale-refresh-access", "stale-refresh-token"),
         )
         val coordinator = RefreshCoordinator(vault, remote)
@@ -82,14 +143,40 @@ class AuthRaceTest {
         val refresh = async { coordinator.refreshAfterUnauthorized(failedEpoch) }
         remote.refreshStarted.await()
 
+        repository.logout()
         repository.login("patient-001", "password")
         remote.releaseRefresh.complete(Unit)
-        val result = refresh.await()
 
-        assertTrue(result is RefreshResult.Success)
-        assertEquals("login-access", (result as RefreshResult.Success).accessToken)
-        assertEquals("login-access", vault.sessionSnapshot().accessToken)
-        assertEquals("login-refresh", vault.refreshValue())
+        assertTrue(refresh.await() is RefreshResult.Superseded)
+        assertEquals("relogin-access", vault.sessionSnapshot().accessToken)
+        assertEquals("relogin-refresh", vault.refreshValue())
+    }
+
+    @Test
+    fun `旧刷新被登出后异账号登录取代时返回superseded且不依赖loginId判定`() = runBlocking {
+        val vault = LinearTokenVault("expired-access", "stored-refresh")
+        val identity = MutablePatientIdentity("11111111-1111-4111-8111-111111111111")
+        val remote = GatedAuthRemote(
+            // 刻意复用同一 loginId；安全判定不能依赖 loginId 字符串。
+            loginResult = authSession("other-access", "other-refresh"),
+            refreshResult = authSession("stale-refresh-access", "stale-refresh-token"),
+        )
+        val coordinator = RefreshCoordinator(vault, remote)
+        val repository = AuthRepository(vault, remote, coordinator, identity)
+        repository.restoreSession()
+        remote.holdRefresh = true
+        val failedEpoch = vault.sessionSnapshot().epoch
+        val refresh = async { coordinator.refreshAfterUnauthorized(failedEpoch) }
+        remote.refreshStarted.await()
+
+        repository.logout()
+        identity.patientId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        repository.login("patient-001", "password")
+        remote.releaseRefresh.complete(Unit)
+
+        assertTrue(refresh.await() is RefreshResult.Superseded)
+        assertEquals("other-access", vault.sessionSnapshot().accessToken)
+        assertEquals("other-refresh", vault.refreshValue())
     }
 
     @Test
@@ -154,6 +241,10 @@ private fun patientIdentity() = PatientIdentityRemoteDataSource {
     "11111111-1111-4111-8111-111111111111"
 }
 
+private class MutablePatientIdentity(var patientId: String) : PatientIdentityRemoteDataSource {
+    override suspend fun patientUuid(): String = patientId
+}
+
 private class LinearTokenVault(
     accessToken: String? = null,
     refreshToken: String? = null,
@@ -203,6 +294,7 @@ private suspend fun TokenVault.refreshValue(): String? =
 private class GatedAuthRemote(
     private val loginResult: AuthSession = authSession("access", "refresh"),
     private val refreshResult: AuthSession = authSession("next-access", "next-refresh"),
+    private val refreshFailure: Throwable? = null,
 ) : AuthRemoteDataSource {
     var holdLogin = false
     var holdRefresh = false
@@ -226,6 +318,7 @@ private class GatedAuthRemote(
     override suspend fun refresh(request: RefreshRequestDto): AuthSession {
         refreshStarted.complete(Unit)
         if (holdRefresh) releaseRefresh.await()
+        refreshFailure?.let { throw it }
         return refreshResult
     }
 
@@ -247,4 +340,11 @@ private fun authSession(access: String, refresh: String): AuthSession = AuthSess
     loginId = "patient-001",
     role = AccountRole.PATIENT,
     mustChangePassword = false,
+)
+
+private fun unauthorized(): retrofit2.HttpException = retrofit2.HttpException(
+    retrofit2.Response.error<Any>(
+        401,
+        "unauthorized".toResponseBody(),
+    ),
 )
