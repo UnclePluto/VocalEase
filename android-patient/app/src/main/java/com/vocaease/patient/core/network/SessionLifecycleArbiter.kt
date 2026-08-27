@@ -1,5 +1,7 @@
 package com.vocaease.patient.core.network
 
+import com.vocaease.patient.core.database.AuthenticatedAccountLease
+import com.vocaease.patient.core.database.StaleAccountScopeException
 import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.SessionMutation
@@ -36,11 +38,15 @@ class SessionLifecycleArbiter(
     private val eventQueue = Channel<SessionLifecycleEvent>(capacity = Channel.UNLIMITED)
     private val sessionExpiredListeners = CopyOnWriteArrayList<(SessionInvalidation) -> Unit>()
     private var lastPublishedInvalidation: SessionInvalidation? = null
+    @Volatile private var authenticatedAccountLease: AuthenticatedAccountLease? = null
+    private var pendingAccountIncarnationId: String? = null
 
     /** 单消费者、进程生命周期、按裁决顺序交付的会话失效队列。 */
     val events: Flow<SessionLifecycleEvent> = eventQueue.receiveAsFlow()
 
     fun sessionSnapshot(): SessionSnapshot = tokenVault.sessionSnapshot()
+
+    internal fun currentAuthenticatedAccountLease(): AuthenticatedAccountLease? = authenticatedAccountLease
 
     fun addSessionExpiredListener(listener: (SessionInvalidation) -> Unit) {
         sessionExpiredListeners += listener
@@ -48,6 +54,15 @@ class SessionLifecycleArbiter(
 
     internal suspend fun <T> mutate(block: suspend MutationScope.() -> T): T =
         mutationMutex.withLock { MutationScope().block() }
+
+    /** 存储操作与登出/换号共用同一线性化边界；获锁等待保持可取消。 */
+    internal suspend fun <T> withAuthenticatedAccountLease(
+        expected: AuthenticatedAccountLease,
+        operation: suspend () -> T,
+    ): T = mutationMutex.withLock {
+        if (authenticatedAccountLease !== expected) throw StaleAccountScopeException()
+        operation()
+    }
 
     internal inner class MutationScope internal constructor() {
         fun sessionSnapshot(): SessionSnapshot = tokenVault.sessionSnapshot()
@@ -67,7 +82,31 @@ class SessionLifecycleArbiter(
             replacementId = replacementId,
         )
 
-        suspend fun clear(expectedEpoch: Long? = null): SessionMutation = tokenVault.clear(expectedEpoch)
+        suspend fun clear(expectedEpoch: Long? = null): SessionMutation = tokenVault.clear(expectedEpoch).also {
+            if (it.applied) revokeAuthenticatedAccount()
+        }
+
+        fun beginAccountAuthentication(incarnationId: String) {
+            require(incarnationId.isNotBlank())
+            authenticatedAccountLease = null
+            pendingAccountIncarnationId = incarnationId
+        }
+
+        fun publishAuthenticatedAccount(patientId: String, incarnationId: String): AuthenticatedAccountLease? {
+            if (pendingAccountIncarnationId != incarnationId || sessionSnapshot().accessToken == null) return null
+            return AuthenticatedAccountLease(patientId, incarnationId).also {
+                authenticatedAccountLease = it
+                pendingAccountIncarnationId = null
+            }
+        }
+
+        fun isPendingAccountAuthentication(incarnationId: String): Boolean =
+            pendingAccountIncarnationId == incarnationId
+
+        fun revokeAuthenticatedAccount() {
+            authenticatedAccountLease = null
+            pendingAccountIncarnationId = null
+        }
 
         fun claimInvalidation(invalidation: SessionInvalidation): InvalidationClaim {
             val current = tokenVault.sessionSnapshot()
@@ -77,6 +116,7 @@ class SessionLifecycleArbiter(
             if (lastPublishedInvalidation == invalidation) return InvalidationClaim.AlreadyPublished
 
             lastPublishedInvalidation = invalidation
+            revokeAuthenticatedAccount()
             sessionExpiredListeners.forEach { listener -> listener(invalidation) }
             check(eventQueue.trySend(SessionLifecycleEvent.SessionExpired(invalidation)).isSuccess) {
                 "会话生命周期事件队列不可用"

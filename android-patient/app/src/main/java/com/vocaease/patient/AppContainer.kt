@@ -68,7 +68,10 @@ class AndroidAppContainer(context: Context) : AppContainer {
         encryptedFileStore,
         object : AuthenticatedAccountSession {
             override fun current(): AuthenticatedAccountLease? = authRepository.currentAuthenticatedLease()
-            override fun isCurrent(lease: AuthenticatedAccountLease): Boolean = authRepository.isCurrentAuthenticatedLease(lease)
+            override suspend fun <T> withCurrentLease(
+                expected: AuthenticatedAccountLease,
+                operation: suspend () -> T,
+            ): T = authRepository.withAuthenticatedLease(expected, operation)
         },
     )
     override val clock = AppClock(System::currentTimeMillis)

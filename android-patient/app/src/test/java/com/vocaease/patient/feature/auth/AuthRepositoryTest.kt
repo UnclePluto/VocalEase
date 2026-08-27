@@ -33,6 +33,8 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -53,7 +55,8 @@ class AuthRepositoryTest {
     fun `启动时 refresh 成功恢复正常患者会话`() = runBlocking {
         val vault = FakeTokenVault(refreshToken = "stored-refresh")
         val remote = FakeAuthRemote(refreshResult = session(access = "new-access"))
-        val repository = repository(vault, remote)
+        val identity = FakePatientIdentity()
+        val repository = repository(vault, remote, identity)
 
         repository.restoreSession()
 
@@ -61,6 +64,8 @@ class AuthRepositoryTest {
         assertEquals("new-access", vault.sessionSnapshot().accessToken)
         assertEquals(1, remote.refreshCalls.get())
         assertEquals(RefreshRequestDto(ClientKind.ANDROID, "stored-refresh"), remote.lastRefresh)
+        assertEquals(1, identity.calls.get())
+        assertEquals(PATIENT_UUID, repository.currentAuthenticatedLease()?.patientId)
     }
 
     @Test
@@ -81,8 +86,9 @@ class AuthRepositoryTest {
     @Test
     fun `登录固定发送安卓客户端且不记住并进入主页`() = runBlocking {
         val vault = FakeTokenVault()
-        val remote = FakeAuthRemote(loginResult = session(access = "access", refresh = "refresh"))
-        val repository = repository(vault, remote)
+        val remote = FakeAuthRemote(loginResult = session(access = "access", refresh = "refresh", loginId = "1"))
+        val identity = FakePatientIdentity()
+        val repository = repository(vault, remote, identity)
 
         repository.login("patient-001", "secret")
 
@@ -96,19 +102,88 @@ class AuthRepositoryTest {
             remote.lastLogin,
         )
         assertEquals(AuthState.Authenticated, repository.state.value)
-        assertEquals("patient-001", repository.currentAuthenticatedLease()?.patientId)
+        assertEquals(1, identity.calls.get())
+        assertEquals(PATIENT_UUID, repository.currentAuthenticatedLease()?.patientId)
+        assertFalse(repository.currentAuthenticatedLease()?.patientId.orEmpty().contains("patient-001"))
     }
 
     @Test
     fun `首次登录必须改密时不能进入主页`() = runBlocking {
         val remote = FakeAuthRemote(loginResult = session(mustChangePassword = true))
-        val repository = repository(FakeTokenVault(), remote)
+        val identity = FakePatientIdentity()
+        val repository = repository(FakeTokenVault(), remote, identity)
 
         repository.login("patient-001", "initial-password")
 
         assertEquals(AuthState.MustChangePassword, repository.state.value)
         assertFalse(repository.state.value == AuthState.Authenticated)
         assertNull(repository.currentAuthenticatedLease())
+        assertEquals(0, identity.calls.get())
+    }
+
+    @Test
+    fun `patient me 失败或UUID非法时不发布认证并清除已落盘凭据`() = runBlocking {
+        listOf(
+            FakePatientIdentity(failure = java.io.IOException("me unavailable")),
+            FakePatientIdentity(patientId = "patient-001"),
+        ).forEach { identity ->
+            val vault = FakeTokenVault()
+            val repository = repository(
+                vault,
+                FakeAuthRemote(loginResult = session(access = "must-clear", refresh = "must-clear")),
+                identity,
+            )
+
+            repository.login("patient-001", "password")
+
+            assertEquals(AuthState.LoggedOut, repository.state.value)
+            assertNull(repository.currentAuthenticatedLease())
+            assertNull(vault.sessionSnapshot().accessToken)
+            assertNull(vault.refreshValue())
+        }
+    }
+
+    @Test
+    fun `同loginId不同患者UUID不共享scope且同UUID重登旧facade仍失效`() = runBlocking {
+        val vault = FakeTokenVault()
+        val identity = FakePatientIdentity(patientId = PATIENT_UUID)
+        val repository = repository(vault, FakeAuthRemote(loginResult = session(loginId = "same-login")), identity)
+
+        repository.login("same-login", "password")
+        val first = requireNotNull(repository.currentAuthenticatedLease())
+        repository.logout()
+
+        identity.patientId = OTHER_PATIENT_UUID
+        repository.login("same-login", "password")
+        val otherPatient = requireNotNull(repository.currentAuthenticatedLease())
+        assertFalse(first.patientId == otherPatient.patientId)
+        assertFalse(repository.isCurrentAuthenticatedLease(first))
+
+        repository.logout()
+        identity.patientId = OTHER_PATIENT_UUID
+        repository.login("same-login", "password")
+        val samePatientRelogin = requireNotNull(repository.currentAuthenticatedLease())
+        assertEquals(otherPatient.patientId, samePatientRelogin.patientId)
+        assertNotSame(otherPatient, samePatientRelogin)
+        assertFalse(repository.isCurrentAuthenticatedLease(otherPatient))
+    }
+
+    @Test
+    fun `正常refresh后保留当前account incarnation`() = runBlocking {
+        val vault = FakeTokenVault()
+        val remote = FakeAuthRemote(
+            loginResult = session(access = "access-1", refresh = "refresh-1"),
+            refreshResult = session(access = "access-2", refresh = "refresh-2"),
+        )
+        val coordinator = RefreshCoordinator(vault, remote)
+        val repository = AuthRepository(vault, remote, coordinator, FakePatientIdentity())
+        repository.login("patient-001", "password")
+        val beforeRefresh = requireNotNull(repository.currentAuthenticatedLease())
+
+        assertTrue(coordinator.refreshAfterUnauthorized(vault.sessionSnapshot().epoch) is RefreshResult.Success)
+
+        assertSame(beforeRefresh, repository.currentAuthenticatedLease())
+        assertTrue(repository.isCurrentAuthenticatedLease(beforeRefresh))
     }
 
     @Test
@@ -237,7 +312,7 @@ class AuthRepositoryTest {
             refreshFailure = java.io.IOException("offline"),
         )
         val coordinator = RefreshCoordinator(vault, remote)
-        val repository = AuthRepository(vault, remote, coordinator)
+        val repository = AuthRepository(vault, remote, coordinator, FakePatientIdentity())
         val oldEpoch = vault.sessionSnapshot().epoch
 
         assertTrue(coordinator.refreshAfterUnauthorized(oldEpoch) is RefreshResult.Failed)
@@ -382,7 +457,7 @@ class AuthRepositoryTest {
         val vault = FakeTokenVault(accessToken = "expired", refreshToken = "stored-refresh")
         val remote = FakeAuthRemote(refreshFailure = java.io.IOException("offline"))
         val coordinator = RefreshCoordinator(vault, remote)
-        val repository = AuthRepository(vault, remote, coordinator)
+        val repository = AuthRepository(vault, remote, coordinator, FakePatientIdentity())
         repository.restoreSession()
         val event = async { repository.events.first() }
 
@@ -395,11 +470,26 @@ class AuthRepositoryTest {
     private fun repository(
         vault: FakeTokenVault,
         remote: FakeAuthRemote = FakeAuthRemote(),
+        identity: FakePatientIdentity = FakePatientIdentity(),
     ): AuthRepository = AuthRepository(
         tokenVault = vault,
         remote = remote,
         refreshCoordinator = RefreshCoordinator(vault, remote),
+        patientIdentity = identity,
     )
+}
+
+private class FakePatientIdentity(
+    var patientId: String = PATIENT_UUID,
+    private val failure: Throwable? = null,
+) : PatientIdentityRemoteDataSource {
+    val calls = AtomicInteger()
+
+    override suspend fun patientUuid(): String {
+        calls.incrementAndGet()
+        failure?.let { throw it }
+        return patientId
+    }
 }
 
 private class FakeTokenVault(
@@ -509,14 +599,18 @@ private fun session(
     access: String = "access",
     refresh: String = "refresh",
     mustChangePassword: Boolean = false,
+    loginId: String = "patient-001",
 ): AuthSession = AuthSession(
     access = access,
     refresh = refresh,
     refreshExpiresAt = Instant.parse("2026-09-01T08:00:00Z"),
-    loginId = "patient-001",
+    loginId = loginId,
     role = AccountRole.PATIENT,
     mustChangePassword = mustChangePassword,
 )
+
+private const val PATIENT_UUID = "11111111-1111-4111-8111-111111111111"
+private const val OTHER_PATIENT_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 private fun unauthorized(): HttpException = HttpException(
     Response.error<Any>(401, "unauthorized".toResponseBody()),

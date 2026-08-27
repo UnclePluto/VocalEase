@@ -186,6 +186,7 @@ class AuthFlowTest {
             tokenVault = vault,
             remote = remote,
             refreshCoordinator = com.vocaease.patient.core.network.RefreshCoordinator(vault, remote),
+            patientIdentity = PatientIdentityRemoteDataSource { error("must-change 阶段不应请求 patient me") },
         )
         runBlocking { repository.login("patient-001", "initial-password") }
 

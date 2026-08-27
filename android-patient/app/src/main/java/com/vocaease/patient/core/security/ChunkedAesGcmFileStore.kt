@@ -19,20 +19,46 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 
 open class EncryptedMediaException internal constructor(message: String) : java.io.IOException(message)
 class MediaKeyInvalidatedException internal constructor() : EncryptedMediaException("加密媒体密钥已失效")
 
 internal data class EncryptedMediaReference(val relativePath: String, val encryptedSizeBytes: Long)
 internal enum class StoreIoStep { TEMP_CHMOD, FILE_FSYNC, ATOMIC_MOVE, DESTINATION_CHMOD, DIRECTORY_FSYNC, TEMP_CLEANUP }
+
+/** 软件 AES key 的单一生命周期实例；destroy 后密钥字节不可再导出或用于新 cipher。 */
+internal class WipeableAesKey(keyMaterial: ByteArray) : SecretKey {
+    private val bytes = keyMaterial.copyOf()
+    @Volatile private var destroyed = false
+
+    init {
+        require(keyMaterial.size == 32)
+    }
+
+    override fun getAlgorithm(): String = "AES"
+    override fun getFormat(): String = "RAW"
+
+    @Synchronized override fun getEncoded(): ByteArray {
+        check(!destroyed) { "key destroyed" }
+        return bytes.copyOf()
+    }
+
+    @Synchronized override fun destroy() {
+        if (destroyed) return
+        bytes.fill(0)
+        destroyed = true
+    }
+
+    override fun isDestroyed(): Boolean = destroyed
+}
 
 /**
  * VEF1 媒体存储。调用方只持有账户内相对路径，物理目录固定为 root/SHA-256(scope)。
@@ -50,19 +76,20 @@ internal class ChunkedAesGcmFileStore(
     private val secureRandom = SecureRandom()
 
     suspend fun encrypt(accountScope: String, plaintext: InputStream, originalLength: Long): EncryptedMediaReference =
-        withContext(ioDispatcher) { encryptBlocking(accountScope, plaintext, originalLength) }
+        runInterruptible(ioDispatcher) { encryptBlocking(accountScope, plaintext, originalLength) }
 
     private fun encryptBlocking(accountScope: String, plaintext: InputStream, originalLength: Long): EncryptedMediaReference {
         if (accountScope.isBlank() || originalLength <= 0 || originalLength > MAX_ORIGINAL_LENGTH) failWrite()
         val scopeHash = sha256(accountScope)
-        val mediaDirectory = File(accountDirectory(scopeHash), "media/v1")
-        ensurePrivateDirectory(mediaDirectory)
-        val fileId = fileIdGenerator()
-        if (fileId.size != FILE_ID_LENGTH || fileId.all { it == 0.toByte() }) failWrite()
-        val relativePath = "media/v1/${fileId.toHex()}.vef"
-        val destination = resolveAccountRelative(accountScope, relativePath, WRITE_ERROR)
-        val destinationLock = publicationLocks.computeIfAbsent(destination.canonicalPath) { Any() }
-        return synchronized(destinationLock) {
+        return synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+            val mediaDirectory = File(accountDirectory(scopeHash), "media/v1")
+            ensurePrivateDirectory(mediaDirectory)
+            val fileId = fileIdGenerator()
+            if (fileId.size != FILE_ID_LENGTH || fileId.all { it == 0.toByte() }) failWrite()
+            val relativePath = "media/v1/${fileId.toHex()}.vef"
+            val destination = resolveAccountRelative(accountScope, relativePath, WRITE_ERROR)
+            val destinationLock = publicationLocks.computeIfAbsent(destination.canonicalPath) { Any() }
+            synchronized(destinationLock) {
             if (destination.exists()) failWrite()
             val temporary = try {
                 File.createTempFile(".vef-", ".tmp", mediaDirectory)
@@ -85,18 +112,14 @@ internal class ChunkedAesGcmFileStore(
                             try {
                                 readExact(plaintext, plain)
                                 val key = master.secretKey()
-                                try {
-                                    val cipher = softwareCipher()
-                                    chunkCipherObserver(cipher.provider.name, key.javaClass.name)
-                                    val nonce = ByteArray(NONCE_LENGTH).also(secureRandom::nextBytes)
-                                    cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(TAG_BITS, nonce))
-                                    cipher.updateAAD(chunkAad(header, chunkIndex, plainLength))
-                                    output.writeInt(plainLength)
-                                    output.write(nonce.copyOf())
-                                    output.write(cipher.doFinal(plain))
-                                } finally {
-                                    runCatching { key.destroy() }
-                                }
+                                val cipher = softwareCipher()
+                                chunkCipherObserver(cipher.provider.name, key.javaClass.name)
+                                val nonce = ByteArray(NONCE_LENGTH).also(secureRandom::nextBytes)
+                                cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(TAG_BITS, nonce))
+                                cipher.updateAAD(chunkAad(header, chunkIndex, plainLength))
+                                output.writeInt(plainLength)
+                                output.write(nonce.copyOf())
+                                output.write(cipher.doFinal(plain))
                             } finally {
                                 plain.fill(0)
                             }
@@ -130,6 +153,7 @@ internal class ChunkedAesGcmFileStore(
                     temporary.delete()
                 }
             }
+            }
         }
     }
 
@@ -140,34 +164,64 @@ internal class ChunkedAesGcmFileStore(
 
     fun open(accountScope: String, encryptedRelativePath: String): EncryptedFileReader {
         if (accountScope.isBlank()) failOpen()
-        val source = resolveAccountRelative(accountScope, encryptedRelativePath, OPEN_ERROR)
-        var file: RandomAccessFile? = null
-        var master: MasterKeyLease? = null
-        try {
-            file = RandomAccessFile(source, "r")
-            val header = ByteArray(HEADER_SIZE)
-            file.readFully(header)
-            val parsed = parseAndValidateHeader(header, file.length())
-            validateUniqueNonces(file, parsed.chunkCount)
-            master = loadMaster(accountScope, createIfMissing = false)
-            return EncryptedFileReader(file, master, header, parsed.originalLength, parsed.chunkCount, chunkCipherObserver, readerCloseObserver)
-        } catch (error: MediaKeyInvalidatedException) {
-            file?.closeQuietly(); master?.close(); throw error
-        } catch (error: EncryptedMediaException) {
-            file?.closeQuietly(); master?.close(); throw error
-        } catch (_: Exception) {
-            file?.closeQuietly(); master?.close(); failOpen()
+        val scopeHash = sha256(accountScope)
+        val registryKey = registryKey(scopeHash)
+        return synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+            val source = resolveAccountRelative(accountScope, encryptedRelativePath, OPEN_ERROR)
+            var file: RandomAccessFile? = null
+            var master: MasterKeyLease? = null
+            try {
+                file = RandomAccessFile(source, "r")
+                val header = ByteArray(HEADER_SIZE)
+                file.readFully(header)
+                val parsed = parseAndValidateHeader(header, file.length())
+                validateUniqueNonces(file, parsed.chunkCount)
+                master = loadMaster(accountScope, createIfMissing = false)
+                val generation = accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.get()
+                lateinit var reader: EncryptedFileReader
+                reader = EncryptedFileReader(
+                    file = file,
+                    master = master,
+                    header = header,
+                    length = parsed.originalLength,
+                    chunkCount = parsed.chunkCount,
+                    cipherObserver = chunkCipherObserver,
+                    generationValid = {
+                        accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.get() == generation
+                    },
+                    closeObserver = {
+                        activeReaders[registryKey]?.remove(reader)
+                        readerCloseObserver()
+                    },
+                )
+                activeReaders.computeIfAbsent(registryKey) { ConcurrentHashMap.newKeySet() }.add(reader)
+                reader
+            } catch (error: MediaKeyInvalidatedException) {
+                file?.closeQuietly(); master?.close(); throw error
+            } catch (error: EncryptedMediaException) {
+                file?.closeQuietly(); master?.close(); throw error
+            } catch (_: Exception) {
+                file?.closeQuietly(); master?.close(); failOpen()
+            }
         }
     }
 
     internal fun encryptedMediaExists(accountScope: String, encryptedRelativePath: String): Boolean =
-        runCatching { resolveAccountRelative(accountScope, encryptedRelativePath, OPEN_ERROR).isFile }.getOrDefault(false)
+        runCatching {
+            val scopeHash = sha256(accountScope)
+            synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+                resolveAccountRelative(accountScope, encryptedRelativePath, OPEN_ERROR).isFile
+            }
+        }.getOrDefault(false)
 
     internal fun destroyAccountEncryption(accountScope: String) {
         if (accountScope.isBlank()) failWrite()
         val scopeHash = sha256(accountScope)
         try {
             synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+                val registryKey = registryKey(scopeHash)
+                accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.incrementAndGet()
+                activeReaders.remove(registryKey)?.toList()?.forEach(EncryptedFileReader::revoke)
                 val directory = accountDirectory(scopeHash)
                 if (directory.exists()) {
                     directory.walkBottomUp().forEach { if (it.exists() && !it.delete()) failWrite() }
@@ -287,6 +341,7 @@ internal class ChunkedAesGcmFileStore(
     }
 
     private fun accountDirectory(scopeHash: String) = File(rootDirectory, scopeHash)
+    private fun registryKey(scopeHash: String): String = rootDirectory.canonicalPath + '\u0000' + scopeHash
 
     private fun ensurePrivateDirectory(target: File) {
         val root = rootDirectory.canonicalFile
@@ -314,7 +369,7 @@ internal class ChunkedAesGcmFileStore(
 
     private fun keyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
     private fun alias(scopeHash: String) = KEY_ALIAS_PREFIX + scopeHash
-    private fun softwareCipher(): Cipher = Cipher.getInstance(CIPHER_TRANSFORMATION, "AndroidOpenSSL")
+    private fun softwareCipher(): Cipher = Cipher.getInstance(CIPHER_TRANSFORMATION)
 
     private fun validateUniqueNonces(file: RandomAccessFile, chunkCount: Int) {
         val seen = HashSet<String>(chunkCount)
@@ -374,10 +429,21 @@ internal class ChunkedAesGcmFileStore(
         override fun close() = data.close()
     }
 
-    internal class MasterKeyLease(private val bytes: ByteArray) : Closeable {
-        private var closed = false
-        fun secretKey(): SecretKeySpec { check(!closed); return SecretKeySpec(bytes, "AES") }
-        override fun close() { if (!closed) { closed = true; bytes.fill(0) } }
+    internal class MasterKeyLease(bytes: ByteArray) : Closeable {
+        private val key = WipeableAesKey(bytes)
+
+        init {
+            bytes.fill(0)
+        }
+
+        fun secretKey(): SecretKey {
+            check(!key.isDestroyed)
+            return key
+        }
+
+        override fun close() {
+            key.destroy()
+        }
     }
 
     companion object {
@@ -406,6 +472,8 @@ internal class ChunkedAesGcmFileStore(
         private val MEDIA_PATH = Regex("media/v1/[0-9a-f]{32}\\.vef")
         private val accountLocks = ConcurrentHashMap<String, Any>()
         private val publicationLocks = ConcurrentHashMap<String, Any>()
+        private val accountGenerations = ConcurrentHashMap<String, AtomicLong>()
+        private val activeReaders = ConcurrentHashMap<String, MutableSet<EncryptedFileReader>>()
 
         internal fun chunkAad(header: ByteArray, chunkIndex: Int, plainLength: Int): ByteArray =
             ByteBuffer.allocate(header.size + Int.SIZE_BYTES * 2).put(header).putInt(chunkIndex).putInt(plainLength).array()
@@ -428,6 +496,7 @@ internal class EncryptedFileReader internal constructor(
     val length: Long,
     private val chunkCount: Int,
     private val cipherObserver: (String, String) -> Unit,
+    private val generationValid: () -> Boolean,
     private val closeObserver: () -> Unit,
 ) : Closeable {
     private var closed = false
@@ -435,7 +504,7 @@ internal class EncryptedFileReader internal constructor(
     private var cachedPlaintext: ByteArray? = null
 
     @Synchronized fun read(position: Long, target: ByteArray, offset: Int, requestedLength: Int): Int {
-        if (closed || position < 0 || offset < 0 || requestedLength < 0 || offset > target.size - requestedLength) failRead()
+        if (closed || !generationValid() || position < 0 || offset < 0 || requestedLength < 0 || offset > target.size - requestedLength) failRead()
         if (requestedLength == 0) return 0
         if (position >= length) return -1
         var sourcePosition = position
@@ -464,15 +533,11 @@ internal class EncryptedFileReader internal constructor(
             val nonce = ByteArray(12).also(file::readFully)
             val ciphertext = ByteArray(plainLength + 16).also(file::readFully)
             val key = master.secretKey()
-            val plaintext = try {
-                val cipher = Cipher.getInstance("AES/GCM/NoPadding", "AndroidOpenSSL")
-                cipherObserver(cipher.provider.name, key.javaClass.name)
-                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, nonce))
-                cipher.updateAAD(ChunkedAesGcmFileStore.chunkAad(header, chunkIndex, plainLength))
-                cipher.doFinal(ciphertext)
-            } finally {
-                runCatching { key.destroy() }
-            }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipherObserver(cipher.provider.name, key.javaClass.name)
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, nonce))
+            cipher.updateAAD(ChunkedAesGcmFileStore.chunkAad(header, chunkIndex, plainLength))
+            val plaintext = cipher.doFinal(ciphertext)
             cachedPlaintext?.fill(0)
             cachedChunkIndex = chunkIndex; cachedPlaintext = plaintext
             return plaintext
@@ -482,15 +547,22 @@ internal class EncryptedFileReader internal constructor(
     }
 
     private fun poison() {
+        if (closed) return
         closed = true; cachedPlaintext?.fill(0); cachedPlaintext = null; cachedChunkIndex = -1
         runCatching { file.close() }; master.close(); runCatching(closeObserver)
+    }
+
+    @Synchronized internal fun revoke() {
+        poison()
     }
 
     @Synchronized override fun close() {
         if (closed) return
         closed = true; cachedPlaintext?.fill(0); cachedPlaintext = null; cachedChunkIndex = -1
-        try { file.close() } catch (_: Exception) { master.close(); failRead() }
-        master.close(); runCatching(closeObserver)
+        val closeFailed = runCatching { file.close() }.isFailure
+        master.close()
+        runCatching(closeObserver)
+        if (closeFailed) failRead()
     }
 
     private fun failRead(): Nothing = throw EncryptedMediaException("无法读取加密媒体")

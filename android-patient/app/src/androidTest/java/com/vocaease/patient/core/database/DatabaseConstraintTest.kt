@@ -94,12 +94,72 @@ class DatabaseConstraintTest {
         Unit
     }
 
-    private fun validDraft() = DraftEntity(
-        accountScope = "a",
-        draftId = "d",
+    @Test
+    fun rawUploadInsertAndUpdateEnforceConfirmationPayloadAndGlobalAccountIdempotency() = runBlocking {
+        database.draftDao().insert(validDraft("a", "d1"))
+        database.draftDao().insert(validDraft("a", "d2"))
+        database.draftDao().insert(validDraft("b", "d1"))
+        database.uploadDao().insert(UploadJobEntity.newPending("a", "d1", "audio-key", "video-key", "submit-key"))
+        val db = database.openHelper.writableDatabase
+
+        listOf(
+            "UPDATE upload_jobs SET audio_confirmed_at=-1 WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET audio_confirmed_at=0 WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET audio_asset_key='asset-only' WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET audio_asset_key='asset',audio_object_key='object',audio_receipt='receipt' WHERE account_scope='a' AND draft_id='d1'",
+        ).forEach { sql -> assertThrows(SQLiteConstraintException::class.java) { db.execSQL(sql) } }
+
+        assertThrows(SQLiteConstraintException::class.java) {
+            cloneUploadJobRaw("a", "d1", "d2", "audio-key", "video-key-2", "submit-key-2")
+        }
+        assertThrows(SQLiteConstraintException::class.java) {
+            cloneUploadJobRaw("a", "d1", "d2", "audio-key-2", "submit-key", "submit-key-2")
+        }
+        assertThrows(SQLiteConstraintException::class.java) {
+            runBlocking {
+                database.uploadDao().insert(UploadJobEntity.newPending("a", "d2", "same-key", "same-key", "submit-key-2"))
+            }
+        }
+
+        database.uploadDao().insert(UploadJobEntity.newPending("b", "d1", "audio-key", "video-key", "submit-key"))
+        assertEquals("audio-key", database.uploadDao().find("b", "d1")?.audioGrantKey)
+    }
+
+    private fun cloneUploadJobRaw(
+        accountScope: String,
+        sourceDraftId: String,
+        targetDraftId: String,
+        audioGrantKey: String,
+        videoGrantKey: String,
+        submitKey: String,
+    ) {
+        database.openHelper.writableDatabase.execSQL(
+            """
+            INSERT INTO upload_jobs(
+              account_scope,draft_id,overall_state,audio_grant_state,video_grant_state,
+              audio_upload_state,video_upload_state,audio_receipt_state,video_receipt_state,
+              audio_confirm_state,video_confirm_state,submit_state,audio_grant_key,video_grant_key,
+              submit_key,audio_asset_key,video_asset_key,audio_object_key,video_object_key,
+              audio_receipt,video_receipt,audio_confirmed_at,video_confirmed_at,attempt_count,
+              next_retry_at,last_safe_error
+            )
+            SELECT account_scope,?,overall_state,audio_grant_state,video_grant_state,
+              audio_upload_state,video_upload_state,audio_receipt_state,video_receipt_state,
+              audio_confirm_state,video_confirm_state,submit_state,?,?,?,audio_asset_key,
+              video_asset_key,audio_object_key,video_object_key,audio_receipt,video_receipt,
+              audio_confirmed_at,video_confirmed_at,attempt_count,next_retry_at,last_safe_error
+            FROM upload_jobs WHERE account_scope=? AND draft_id=?
+            """.trimIndent(),
+            arrayOf(targetDraftId, audioGrantKey, videoGrantKey, submitKey, accountScope, sourceDraftId),
+        )
+    }
+
+    private fun validDraft(accountScope: String = "a", draftId: String = "d") = DraftEntity(
+        accountScope = accountScope,
+        draftId = draftId,
         songId = "song",
-        sessionId = "session",
-        creationKey = "creation",
+        sessionId = "session-$draftId",
+        creationKey = "creation-$draftId",
         state = DraftState.RECORDING,
         durationMs = 0,
         createdAt = 0,

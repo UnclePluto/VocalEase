@@ -3,33 +3,46 @@ package com.vocaease.patient.core.database
 import androidx.room.withTransaction
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import java.io.InputStream
+import java.util.UUID
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class StaleAccountScopeException internal constructor() : IllegalStateException("当前账户存储已失效")
 
 internal class AuthenticatedAccountLease internal constructor(
     internal val patientId: String,
-    private val generation: Any = Any(),
+    internal val incarnationId: String = UUID.randomUUID().toString(),
 )
 
 internal interface AuthenticatedAccountSession {
     fun current(): AuthenticatedAccountLease?
-    fun isCurrent(lease: AuthenticatedAccountLease): Boolean
+    suspend fun <T> withCurrentLease(
+        expected: AuthenticatedAccountLease,
+        operation: suspend () -> T,
+    ): T
 }
 
 internal class MutableAuthenticatedAccountSession : AuthenticatedAccountSession {
+    private val mutex = Mutex()
     @Volatile private var lease: AuthenticatedAccountLease? = null
 
-    fun authenticate(patientId: String) {
+    suspend fun authenticate(patientId: String) = mutex.withLock {
         require(patientId.isNotBlank())
         lease = AuthenticatedAccountLease(patientId)
     }
 
-    fun clear() {
+    suspend fun clear() = mutex.withLock {
         lease = null
     }
 
     override fun current(): AuthenticatedAccountLease? = lease
-    override fun isCurrent(lease: AuthenticatedAccountLease): Boolean = this.lease === lease
+    override suspend fun <T> withCurrentLease(
+        expected: AuthenticatedAccountLease,
+        operation: suspend () -> T,
+    ): T = mutex.withLock {
+        if (lease !== expected) throw StaleAccountScopeException()
+        operation()
+    }
 }
 
 /**
@@ -193,8 +206,7 @@ class AccountScopedDraftStorage internal constructor(
     }
 
     private suspend fun <T> checked(block: suspend () -> T): T {
-        if (!session.isCurrent(lease)) throw StaleAccountScopeException()
-        return block()
+        return session.withCurrentLease(lease, block)
     }
 
     private fun allowedTransition(from: UploadOverallState, to: UploadOverallState): Boolean =

@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
@@ -35,6 +36,9 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
 
 @RunWith(AndroidJUnit4::class)
 class EncryptedFileStoreTest {
@@ -282,7 +286,7 @@ class EncryptedFileStoreTest {
             assertEquals(0, Os.stat(directory.absolutePath).st_mode and (OsConstants.S_IRWXG or OsConstants.S_IRWXO))
         }
         assertFalse(chunkProvider.contains("AndroidKeyStore", ignoreCase = true))
-        assertTrue(keyClass.contains("SecretKeySpec"))
+        assertTrue(keyClass.contains("WipeableAesKey"))
         val kek = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             .getKey("vocaease_media_kek_${digest(ACCOUNT_A)}", null) as SecretKey
         assertEquals(null, kek.encoded)
@@ -302,6 +306,120 @@ class EncryptedFileStoreTest {
         assertFalse(envelopeBytes.containsSlice(master))
         master.fill(0)
         assertArrayEquals(sample.copyOfRange(0, 64), readAll(inspectedStore, ACCOUNT_A, reference.relativePath).copyOfRange(0, 64))
+    }
+
+    @Test
+    fun wipeableSoftwareKeyDestroyZeroizesAndRejectsEncodingOrCipherReuse() {
+        val original = ByteArray(32) { (it + 1).toByte() }
+        val key = WipeableAesKey(original)
+        assertArrayEquals(original, key.encoded)
+
+        key.destroy()
+
+        assertTrue(key.isDestroyed)
+        assertThrows(IllegalStateException::class.java) { key.encoded }
+        assertThrows(IllegalStateException::class.java) {
+            Cipher.getInstance("AES/GCM/NoPadding").init(
+                Cipher.ENCRYPT_MODE,
+                key,
+                GCMParameterSpec(128, ByteArray(12)),
+            )
+        }
+    }
+
+    @Test
+    fun destroyAccountRevokesOpenReaderAndCachedPlaintextBeforeDeletingKeyMaterial() = runBlocking {
+        val reference = store.encrypt(ACCOUNT_A, ByteArrayInputStream(sample), sample.size.toLong())
+        val reader = store.open(ACCOUNT_A, reference.relativePath)
+        assertEquals(64, reader.read(0, ByteArray(64), 0, 64))
+
+        store.destroyAccountEncryption(ACCOUNT_A)
+
+        assertThrows(EncryptedMediaException::class.java) {
+            reader.read(0, ByteArray(64), 0, 64)
+        }
+        reader.close()
+    }
+
+    @Test
+    fun concurrentReadAndDestroyLinearizeAndClosedReaderLeavesRegistry() = runBlocking {
+        val blockRead = AtomicBoolean(false)
+        val readEnteredCipher = CountDownLatch(1)
+        val releaseRead = CountDownLatch(1)
+        var closeCount = 0
+        val observedStore = ChunkedAesGcmFileStore(
+            context,
+            root,
+            chunkCipherObserver = { _, _ ->
+                if (blockRead.get()) {
+                    readEnteredCipher.countDown()
+                    assertTrue(releaseRead.await(10, TimeUnit.SECONDS))
+                }
+            },
+            readerCloseObserver = { closeCount++ },
+        )
+        val reference = observedStore.encrypt(ACCOUNT_A, ByteArrayInputStream(sample), sample.size.toLong())
+        val reader = observedStore.open(ACCOUNT_A, reference.relativePath)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            blockRead.set(true)
+            val readFuture = executor.submit<Int> {
+                reader.read(MIB.toLong(), ByteArray(64), 0, 64)
+            }
+            assertTrue(readEnteredCipher.await(10, TimeUnit.SECONDS))
+            val destroyFuture = executor.submit<Unit> { observedStore.destroyAccountEncryption(ACCOUNT_A) }
+            Thread.sleep(100)
+            assertFalse("destroy 必须与已进入的 read 线性化", destroyFuture.isDone)
+
+            releaseRead.countDown()
+            assertEquals(64, readFuture.get(10, TimeUnit.SECONDS))
+            destroyFuture.get(10, TimeUnit.SECONDS)
+            assertThrows(EncryptedMediaException::class.java) {
+                reader.read(0, ByteArray(1), 0, 1)
+            }
+            assertEquals(1, closeCount)
+            reader.close()
+            observedStore.destroyAccountEncryption(ACCOUNT_A)
+            assertEquals(1, closeCount)
+        } finally {
+            releaseRead.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun cancellingEncryptInterruptsBlockingInputAndNeverPublishesCiphertext() = runBlocking {
+        supervisorScope {
+        val readEntered = CountDownLatch(1)
+        val releaseRead = CountDownLatch(1)
+        val readInterrupted = CountDownLatch(1)
+        val blockingInput = object : java.io.InputStream() {
+            override fun read(): Int = error("bulk read expected")
+            override fun read(target: ByteArray, offset: Int, length: Int): Int {
+                readEntered.countDown()
+                try {
+                    releaseRead.await(10, TimeUnit.SECONDS)
+                } catch (error: InterruptedException) {
+                    readInterrupted.countDown()
+                    throw java.io.IOException("interrupted", error)
+                }
+                target[offset] = 1
+                return 1
+            }
+        }
+        val encryption = async(Dispatchers.IO) {
+            store.encrypt(ACCOUNT_A, blockingInput, 1)
+        }
+        assertTrue(readEntered.await(10, TimeUnit.SECONDS))
+        try {
+            encryption.cancel()
+            assertTrue("取消必须中断阻塞输入", readInterrupted.await(2, TimeUnit.SECONDS))
+        } finally {
+            releaseRead.countDown()
+            runCatching { encryption.await() }
+        }
+        assertTrue(root.walkTopDown().none { it.extension == "vef" })
+        }
     }
 
     @Test

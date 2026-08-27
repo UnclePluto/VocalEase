@@ -10,6 +10,7 @@ import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.TokenVault
 import com.vocaease.patient.feature.auth.AuthRepository
+import com.vocaease.patient.feature.auth.VocaEasePatientIdentityRemoteDataSource
 import com.vocaease.patient.feature.auth.VocaEaseAuthRemoteDataSource
 import kotlinx.coroutines.flow.Flow
 import okhttp3.OkHttpClient
@@ -37,9 +38,15 @@ internal fun createProductionSessionGraph(
         remote = authRemote,
         beforeInvalidationPublish = beforeInvalidationPublish,
     )
+    val patientApi = RefreshingPatientApi(rawApi, coordinator)
     return ProductionSessionGraph(
-        authRepository = AuthRepository(tokenVault, authRemote, coordinator),
-        patientApi = RefreshingPatientApi(rawApi, coordinator),
+        authRepository = AuthRepository(
+            tokenVault,
+            authRemote,
+            coordinator,
+            VocaEasePatientIdentityRemoteDataSource(patientApi),
+        ),
+        patientApi = patientApi,
         sessionEvents = coordinator.events,
     )
 }

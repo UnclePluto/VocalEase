@@ -214,7 +214,7 @@ class ProductionVaultInvalidationTest {
         }
         yield()
         assertEquals(1, eventCount.get())
-        assertEquals(1, transport.patientCalls.get())
+        assertEquals(2, transport.patientCalls.get())
         assertEquals(if (refreshSucceeds) 1 else 0, transport.refreshCalls.get())
         collector.cancel()
     }
@@ -257,13 +257,23 @@ private class AuthTestTransport(
 ) : Interceptor {
     val patientCalls = AtomicInteger()
     val refreshCalls = AtomicInteger()
+    private val initialIdentityDelivered = java.util.concurrent.atomic.AtomicBoolean()
+    private val loginIdentityDelivered = java.util.concurrent.atomic.AtomicBoolean()
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val (code, body) = when (request.url.encodedPath) {
             "/api/v1/patient/me/" -> {
                 patientCalls.incrementAndGet()
-                401 to unauthorized()
+                if (
+                    initialIdentityDelivered.compareAndSet(false, true) ||
+                    (request.header("Authorization") == "Bearer access-secret" &&
+                        loginIdentityDelivered.compareAndSet(false, true))
+                ) {
+                    200 to patientMeSuccess()
+                } else {
+                    401 to unauthorized()
+                }
             }
             "/api/v1/auth/refresh/" -> {
                 refreshCalls.incrementAndGet()
@@ -310,6 +320,27 @@ private class AuthTestTransport(
             "user":{"login_id":"patient001","role":"patient","must_change_password":false}
           },
           "request_id":"auth-login-1"
+        }
+    """.trimIndent()
+
+    private fun patientMeSuccess(): String = """
+        {
+          "code":"ok",
+          "message":"",
+          "data":{
+            "id":"11111111-1111-4111-8111-111111111111",
+            "medical_record_no":"MR-2026-001",
+            "name":"患者甲",
+            "gender":"female",
+            "enrollment_age":36,
+            "phone":"13800000001",
+            "notes":"",
+            "primary_doctor":{"id":"22222222-2222-4222-8222-222222222222","name":"李医生"},
+            "active_treatment_plan":null,
+            "treatment_progress":null,
+            "singing_summary":{"completed_session_count":0,"total_duration_seconds":0}
+          },
+          "request_id":"patient-me-auth-1"
         }
     """.trimIndent()
 

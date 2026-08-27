@@ -77,11 +77,29 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_insert_v1 BEFORE INSERT ON upload
     OR (NEW.video_object_key IS NOT NULL AND (trim(NEW.video_object_key) = '' OR length(NEW.video_object_key) > 512))
     OR (NEW.audio_receipt IS NOT NULL AND (trim(NEW.audio_receipt) = '' OR length(NEW.audio_receipt) > 512))
     OR (NEW.video_receipt IS NOT NULL AND (trim(NEW.video_receipt) = '' OR length(NEW.video_receipt) > 512))
+    OR (NEW.audio_confirmed_at IS NOT NULL AND (typeof(NEW.audio_confirmed_at) != 'integer' OR NEW.audio_confirmed_at < 0))
+    OR (NEW.video_confirmed_at IS NOT NULL AND (typeof(NEW.video_confirmed_at) != 'integer' OR NEW.video_confirmed_at < 0))
+    OR (NEW.audio_asset_key IS NULL) != (NEW.audio_object_key IS NULL)
+    OR (NEW.video_asset_key IS NULL) != (NEW.video_object_key IS NULL)
+    OR (NEW.audio_receipt IS NOT NULL AND (NEW.audio_asset_key IS NULL OR NEW.audio_object_key IS NULL))
+    OR (NEW.video_receipt IS NOT NULL AND (NEW.video_asset_key IS NULL OR NEW.video_object_key IS NULL))
     OR (NEW.audio_receipt_state = 'RECEIPT_RECEIVED' AND (trim(coalesce(NEW.audio_receipt,'')) = '' OR trim(coalesce(NEW.audio_asset_key,'')) = '' OR trim(coalesce(NEW.audio_object_key,'')) = ''))
     OR (NEW.video_receipt_state = 'RECEIPT_RECEIVED' AND (trim(coalesce(NEW.video_receipt,'')) = '' OR trim(coalesce(NEW.video_asset_key,'')) = '' OR trim(coalesce(NEW.video_object_key,'')) = ''))
+    OR (NEW.audio_receipt_state != 'RECEIPT_RECEIVED' AND NEW.audio_receipt IS NOT NULL)
+    OR (NEW.video_receipt_state != 'RECEIPT_RECEIVED' AND NEW.video_receipt IS NOT NULL)
     OR (NEW.audio_confirm_state = 'CONFIRMED' AND (NEW.audio_receipt_state != 'RECEIPT_RECEIVED' OR NEW.audio_confirmed_at IS NULL))
     OR (NEW.video_confirm_state = 'CONFIRMED' AND (NEW.video_receipt_state != 'RECEIPT_RECEIVED' OR NEW.video_confirmed_at IS NULL))
+    OR (NEW.audio_confirm_state != 'CONFIRMED' AND NEW.audio_confirmed_at IS NOT NULL)
+    OR (NEW.video_confirm_state != 'CONFIRMED' AND NEW.video_confirmed_at IS NOT NULL)
     OR (NEW.overall_state = 'READY_TO_SUBMIT' AND (NEW.audio_confirm_state != 'CONFIRMED' OR NEW.video_confirm_state != 'CONFIRMED'))
+    OR NEW.audio_grant_key = NEW.video_grant_key OR NEW.audio_grant_key = NEW.submit_key OR NEW.video_grant_key = NEW.submit_key
+    OR EXISTS (
+      SELECT 1 FROM upload_jobs AS existing
+      WHERE existing.account_scope = NEW.account_scope AND existing.draft_id != NEW.draft_id
+        AND (existing.audio_grant_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key)
+          OR existing.video_grant_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key)
+          OR existing.submit_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key))
+    )
   THEN RAISE(ABORT, 'upload constraint') END;
 END;
 -- VOCAEASE-STATEMENT
@@ -110,10 +128,28 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     OR (NEW.video_object_key IS NOT NULL AND (trim(NEW.video_object_key) = '' OR length(NEW.video_object_key) > 512))
     OR (NEW.audio_receipt IS NOT NULL AND (trim(NEW.audio_receipt) = '' OR length(NEW.audio_receipt) > 512))
     OR (NEW.video_receipt IS NOT NULL AND (trim(NEW.video_receipt) = '' OR length(NEW.video_receipt) > 512))
+    OR (NEW.audio_confirmed_at IS NOT NULL AND (typeof(NEW.audio_confirmed_at) != 'integer' OR NEW.audio_confirmed_at < 0))
+    OR (NEW.video_confirmed_at IS NOT NULL AND (typeof(NEW.video_confirmed_at) != 'integer' OR NEW.video_confirmed_at < 0))
+    OR (NEW.audio_asset_key IS NULL) != (NEW.audio_object_key IS NULL)
+    OR (NEW.video_asset_key IS NULL) != (NEW.video_object_key IS NULL)
+    OR (NEW.audio_receipt IS NOT NULL AND (NEW.audio_asset_key IS NULL OR NEW.audio_object_key IS NULL))
+    OR (NEW.video_receipt IS NOT NULL AND (NEW.video_asset_key IS NULL OR NEW.video_object_key IS NULL))
     OR (NEW.audio_receipt_state = 'RECEIPT_RECEIVED' AND (trim(coalesce(NEW.audio_receipt,'')) = '' OR trim(coalesce(NEW.audio_asset_key,'')) = '' OR trim(coalesce(NEW.audio_object_key,'')) = ''))
     OR (NEW.video_receipt_state = 'RECEIPT_RECEIVED' AND (trim(coalesce(NEW.video_receipt,'')) = '' OR trim(coalesce(NEW.video_asset_key,'')) = '' OR trim(coalesce(NEW.video_object_key,'')) = ''))
+    OR (NEW.audio_receipt_state != 'RECEIPT_RECEIVED' AND NEW.audio_receipt IS NOT NULL)
+    OR (NEW.video_receipt_state != 'RECEIPT_RECEIVED' AND NEW.video_receipt IS NOT NULL)
     OR (NEW.audio_confirm_state = 'CONFIRMED' AND (NEW.audio_receipt_state != 'RECEIPT_RECEIVED' OR NEW.audio_confirmed_at IS NULL))
     OR (NEW.video_confirm_state = 'CONFIRMED' AND (NEW.video_receipt_state != 'RECEIPT_RECEIVED' OR NEW.video_confirmed_at IS NULL))
+    OR (NEW.audio_confirm_state != 'CONFIRMED' AND NEW.audio_confirmed_at IS NOT NULL)
+    OR (NEW.video_confirm_state != 'CONFIRMED' AND NEW.video_confirmed_at IS NOT NULL)
     OR (NEW.overall_state = 'READY_TO_SUBMIT' AND (NEW.audio_confirm_state != 'CONFIRMED' OR NEW.video_confirm_state != 'CONFIRMED'))
+    OR NEW.audio_grant_key = NEW.video_grant_key OR NEW.audio_grant_key = NEW.submit_key OR NEW.video_grant_key = NEW.submit_key
+    OR EXISTS (
+      SELECT 1 FROM upload_jobs AS existing
+      WHERE existing.account_scope = NEW.account_scope AND existing.draft_id != NEW.draft_id
+        AND (existing.audio_grant_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key)
+          OR existing.video_grant_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key)
+          OR existing.submit_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key))
+    )
   THEN RAISE(ABORT, 'upload constraint') END;
 END;

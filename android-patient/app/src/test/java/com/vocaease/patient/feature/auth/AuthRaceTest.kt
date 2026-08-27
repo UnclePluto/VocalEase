@@ -32,7 +32,7 @@ class AuthRaceTest {
         val vault = LinearTokenVault()
         val remote = GatedAuthRemote(loginResult = authSession("login-access", "login-refresh"))
         val coordinator = RefreshCoordinator(vault, remote)
-        val repository = AuthRepository(vault, remote, coordinator)
+        val repository = AuthRepository(vault, remote, coordinator, patientIdentity())
         remote.holdLogin = true
 
         val login = async { repository.login("patient-001", "password") }
@@ -51,7 +51,7 @@ class AuthRaceTest {
         val vault = LinearTokenVault("expired-access", "stored-refresh")
         val remote = GatedAuthRemote(refreshResult = authSession("refresh-access", "rotated-refresh"))
         val coordinator = RefreshCoordinator(vault, remote)
-        val repository = AuthRepository(vault, remote, coordinator)
+        val repository = AuthRepository(vault, remote, coordinator, patientIdentity())
         repository.restoreSession()
         remote.holdRefresh = true
         val failedEpoch = vault.sessionSnapshot().epoch
@@ -75,7 +75,7 @@ class AuthRaceTest {
             refreshResult = authSession("stale-refresh-access", "stale-refresh-token"),
         )
         val coordinator = RefreshCoordinator(vault, remote)
-        val repository = AuthRepository(vault, remote, coordinator)
+        val repository = AuthRepository(vault, remote, coordinator, patientIdentity())
         repository.restoreSession()
         remote.holdRefresh = true
         val failedEpoch = vault.sessionSnapshot().epoch
@@ -96,7 +96,7 @@ class AuthRaceTest {
     fun `改密请求挂起时取消仍先清除本地凭据并传播取消`() = runBlocking {
         val vault = LinearTokenVault("access", "refresh")
         val remote = GatedAuthRemote().apply { holdChangePassword = true }
-        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote))
+        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
 
         val change = async { repository.changePassword("old-password", "new-password") }
         remote.changePasswordStarted.await()
@@ -114,7 +114,7 @@ class AuthRaceTest {
     fun `改密成功后的远端登出挂起时取消仍保留重新登录提示且无凭据`() = runBlocking {
         val vault = LinearTokenVault("access", "refresh")
         val remote = GatedAuthRemote().apply { holdLogout = true }
-        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote))
+        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
         val event = async(start = CoroutineStart.UNDISPATCHED) { repository.events.first() }
 
         val change = async { repository.changePassword("old-password", "new-password") }
@@ -135,7 +135,7 @@ class AuthRaceTest {
     fun `普通登出远端挂起时取消仍先清除凭据并传播取消`() = runBlocking {
         val vault = LinearTokenVault("access", "refresh")
         val remote = GatedAuthRemote().apply { holdLogout = true }
-        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote))
+        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
 
         val logout = async { repository.logout() }
         remote.logoutStarted.await()
@@ -148,6 +148,10 @@ class AuthRaceTest {
         assertNull(vault.sessionSnapshot().accessToken)
         assertNull(vault.refreshValue())
     }
+}
+
+private fun patientIdentity() = PatientIdentityRemoteDataSource {
+    "11111111-1111-4111-8111-111111111111"
 }
 
 private class LinearTokenVault(

@@ -86,6 +86,53 @@ class ProductionProtectedApiTest {
     }
 
     @Test
+    fun `生产登录落盘token后必须请求patient me才发布UUID lease`() = runBlocking {
+        val paths = mutableListOf<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                synchronized(paths) { paths += requireNotNull(request.path) }
+                return when (request.path) {
+                    "/api/v1/auth/login/" -> json(200, fixture("fixtures/login.json"))
+                    "/api/v1/patient/me/" -> json(200, fixture("fixtures/patient_me.json"))
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val graph = createProductionSessionGraph(server.url("/").toString(), ProductionTokenVault(null, null))
+
+        graph.authRepository.login("patient001", "password")
+
+        assertEquals(AuthState.Authenticated, graph.authRepository.state.value)
+        assertEquals("11111111-1111-4111-8111-111111111111", graph.authRepository.currentAuthenticatedLease()?.patientId)
+        assertEquals(listOf("/api/v1/auth/login/", "/api/v1/patient/me/"), synchronized(paths) { paths.toList() })
+    }
+
+    @Test
+    fun `生产启动refresh恢复后必须请求patient me才发布UUID lease`() = runBlocking {
+        val paths = mutableListOf<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                synchronized(paths) { paths += requireNotNull(request.path) }
+                return when (request.path) {
+                    "/api/v1/auth/refresh/" -> json(200, fixture("fixtures/refresh.json"))
+                    "/api/v1/patient/me/" -> json(200, fixture("fixtures/patient_me.json"))
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val graph = createProductionSessionGraph(
+            server.url("/").toString(),
+            ProductionTokenVault(accessToken = null, refreshToken = "stored-refresh"),
+        )
+
+        graph.authRepository.restoreSession()
+
+        assertEquals(AuthState.Authenticated, graph.authRepository.state.value)
+        assertEquals("11111111-1111-4111-8111-111111111111", graph.authRepository.currentAuthenticatedLease()?.patientId)
+        assertEquals(listOf("/api/v1/auth/refresh/", "/api/v1/patient/me/"), synchronized(paths) { paths.toList() })
+    }
+
+    @Test
     fun `生产患者 API 刷新失败会实际驱动认证仓库过期`() = runBlocking {
         val refreshCalls = AtomicInteger()
         server.dispatcher = object : Dispatcher() {
