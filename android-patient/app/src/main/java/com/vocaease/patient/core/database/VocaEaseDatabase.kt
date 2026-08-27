@@ -33,6 +33,12 @@ class DatabaseConverters {
     @TypeConverter
     fun toUploadStepState(value: String): UploadStepState = enumValueOrReject(value)
 
+    @TypeConverter
+    fun fromUploadOverallState(value: UploadOverallState): String = value.name
+
+    @TypeConverter
+    fun toUploadOverallState(value: String): UploadOverallState = enumValueOrReject(value)
+
     private inline fun <reified T : Enum<T>> enumValueOrReject(value: String): T =
         enumValues<T>().firstOrNull { it.name == value }
             ?: throw IllegalArgumentException("数据库状态值无效")
@@ -44,21 +50,53 @@ class DatabaseConverters {
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
-abstract class VocaEaseDatabase : RoomDatabase() {
+internal abstract class VocaEaseDatabase : RoomDatabase() {
     abstract fun draftDao(): DraftDao
     abstract fun mediaDao(): MediaDao
     abstract fun uploadDao(): UploadDao
 
     companion object {
-        fun create(context: Context, name: String = "vocaease-patient.db"): VocaEaseDatabase =
-            Room.databaseBuilder(context.applicationContext, VocaEaseDatabase::class.java, name)
-                .addCallback(
-                    object : Callback() {
-                        override fun onOpen(db: SupportSQLiteDatabase) {
-                            db.execSQL("PRAGMA foreign_keys = ON")
-                        }
-                    },
-                )
-                .build()
+        fun create(
+            context: Context,
+            name: String = "vocaease-patient.db",
+            allowMainThreadQueries: Boolean = false,
+        ): VocaEaseDatabase {
+            val builder = Room.databaseBuilder(context.applicationContext, VocaEaseDatabase::class.java, name)
+                .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
+            if (allowMainThreadQueries) builder.allowMainThreadQueries()
+            return builder.build()
+        }
+
+        fun inMemory(context: Context, allowMainThreadQueries: Boolean = false): VocaEaseDatabase {
+            val builder = Room.inMemoryDatabaseBuilder(context.applicationContext, VocaEaseDatabase::class.java)
+                .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
+            if (allowMainThreadQueries) builder.allowMainThreadQueries()
+            return builder.build()
+        }
+    }
+}
+
+internal object DatabaseConstraintInstaller {
+    private const val ASSET = "database/v1_constraints.sql"
+    private const val BOUNDARY = "-- VOCAEASE-STATEMENT"
+
+    val triggerNames = listOf(
+        "drafts_guard_insert_v1", "drafts_guard_update_v1",
+        "media_guard_insert_v1", "media_guard_update_v1",
+        "upload_jobs_guard_insert_v1", "upload_jobs_guard_update_v1",
+    )
+
+    fun callback(context: Context) = object : RoomDatabase.Callback() {
+        override fun onCreate(db: SupportSQLiteDatabase) = install(context, db)
+        override fun onOpen(db: SupportSQLiteDatabase) = install(context, db)
+    }
+
+    private fun install(context: Context, db: SupportSQLiteDatabase) {
+        db.execSQL("PRAGMA foreign_keys = ON")
+        context.assets.open(ASSET).bufferedReader().use { it.readText() }
+            .split(BOUNDARY)
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .forEach(db::execSQL)
     }
 }

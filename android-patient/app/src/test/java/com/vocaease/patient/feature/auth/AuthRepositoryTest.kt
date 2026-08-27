@@ -96,6 +96,7 @@ class AuthRepositoryTest {
             remote.lastLogin,
         )
         assertEquals(AuthState.Authenticated, repository.state.value)
+        assertEquals("patient-001", repository.currentAuthenticatedLease()?.patientId)
     }
 
     @Test
@@ -107,6 +108,7 @@ class AuthRepositoryTest {
 
         assertEquals(AuthState.MustChangePassword, repository.state.value)
         assertFalse(repository.state.value == AuthState.Authenticated)
+        assertNull(repository.currentAuthenticatedLease())
     }
 
     @Test
@@ -126,6 +128,7 @@ class AuthRepositoryTest {
         assertNull(vault.sessionSnapshot().accessToken)
         assertNull(vault.refreshValue())
         assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertNull(repository.currentAuthenticatedLease())
         assertEquals(AuthEvent.PasswordChanged, event.await())
     }
 

@@ -29,7 +29,10 @@ enum class MediaValidationState {
             deferred = false,
         ),
     ],
-    indices = [Index(value = ["account_scope", "draft_id"])],
+    indices = [
+        Index(value = ["account_scope", "draft_id"]),
+        Index(value = ["account_scope", "encrypted_relative_path"], unique = true),
+    ],
 )
 data class MediaEntity(
     @ColumnInfo(name = "account_scope") val accountScope: String,
@@ -44,8 +47,9 @@ data class MediaEntity(
     init {
         require(accountScope.isNotBlank())
         require(draftId.isNotBlank())
-        require(isSafeRelativePath(encryptedRelativePath))
+        require(isEncryptedMediaRelativePath(encryptedRelativePath))
         require(mimeType.isNotBlank())
+        require(mimeType.length <= 128)
         require(sizeBytes >= 0)
         require(SHA_256.matches(sha256))
     }
@@ -60,3 +64,6 @@ internal fun isSafeRelativePath(path: String): Boolean {
     val segments = path.replace('\\', '/').split('/')
     return segments.none { it.isBlank() || it == "." || it == ".." }
 }
+
+private val ENCRYPTED_MEDIA_PATH = Regex("media/v1/[0-9a-f]{32}\\.vef")
+internal fun isEncryptedMediaRelativePath(path: String): Boolean = isSafeRelativePath(path) && ENCRYPTED_MEDIA_PATH.matches(path)

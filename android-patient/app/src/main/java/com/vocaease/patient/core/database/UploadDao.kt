@@ -7,7 +7,7 @@ import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
 
 @Dao
-interface UploadDao {
+internal interface UploadDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(job: UploadJobEntity)
 
@@ -30,26 +30,46 @@ interface UploadDao {
 
     @Query(
         """
-        UPDATE upload_jobs
-        SET audio_grant_state = :audioGrantState,
-            video_grant_state = :videoGrantState,
-            audio_upload_state = :audioUploadState,
-            video_upload_state = :videoUploadState,
+        UPDATE upload_jobs SET
+            overall_state = :overallState,
+            audio_grant_state = :audioGrantState, video_grant_state = :videoGrantState,
+            audio_upload_state = :audioUploadState, video_upload_state = :videoUploadState,
+            audio_receipt_state = :audioReceiptState, video_receipt_state = :videoReceiptState,
+            audio_confirm_state = :audioConfirmState, video_confirm_state = :videoConfirmState,
             submit_state = :submitState,
-            attempt_count = :attemptCount,
-            next_retry_at = :nextRetryAt,
-            last_safe_error = :lastSafeError
+            audio_grant_key = :audioGrantKey, video_grant_key = :videoGrantKey, submit_key = :submitKey,
+            audio_asset_key = :audioAssetKey, video_asset_key = :videoAssetKey,
+            audio_object_key = :audioObjectKey, video_object_key = :videoObjectKey,
+            audio_receipt = :audioReceipt, video_receipt = :videoReceipt,
+            audio_confirmed_at = :audioConfirmedAt, video_confirmed_at = :videoConfirmedAt,
+            attempt_count = :attemptCount, next_retry_at = :nextRetryAt, last_safe_error = :lastSafeError
         WHERE account_scope = :accountScope AND draft_id = :draftId
         """,
     )
-    suspend fun updateStepStates(
+    suspend fun checkpoint(
         accountScope: String,
         draftId: String,
+        overallState: UploadOverallState,
         audioGrantState: UploadStepState,
         videoGrantState: UploadStepState,
         audioUploadState: UploadStepState,
         videoUploadState: UploadStepState,
+        audioReceiptState: UploadStepState,
+        videoReceiptState: UploadStepState,
+        audioConfirmState: UploadStepState,
+        videoConfirmState: UploadStepState,
         submitState: UploadStepState,
+        audioGrantKey: String,
+        videoGrantKey: String,
+        submitKey: String,
+        audioAssetKey: String?,
+        videoAssetKey: String?,
+        audioObjectKey: String?,
+        videoObjectKey: String?,
+        audioReceipt: String?,
+        videoReceipt: String?,
+        audioConfirmedAt: Long?,
+        videoConfirmedAt: Long?,
         attemptCount: Int,
         nextRetryAt: Long?,
         lastSafeError: String?,

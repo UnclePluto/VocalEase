@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "7229cb7112f5587db8740780c0772c23",
+    "identityHash": "ff9a454769cbd872efc5d3e896bc0619",
     "entities": [
       {
         "tableName": "drafts",
@@ -179,6 +179,16 @@
             ],
             "orders": [],
             "createSql": "CREATE INDEX IF NOT EXISTS `index_media_account_scope_draft_id` ON `${TABLE_NAME}` (`account_scope`, `draft_id`)"
+          },
+          {
+            "name": "index_media_account_scope_encrypted_relative_path",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "encrypted_relative_path"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_media_account_scope_encrypted_relative_path` ON `${TABLE_NAME}` (`account_scope`, `encrypted_relative_path`)"
           }
         ],
         "foreignKeys": [
@@ -199,7 +209,7 @@
       },
       {
         "tableName": "upload_jobs",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `audio_grant_state` TEXT NOT NULL, `video_grant_state` TEXT NOT NULL, `audio_upload_state` TEXT NOT NULL, `video_upload_state` TEXT NOT NULL, `submit_state` TEXT NOT NULL, `audio_grant_key` TEXT NOT NULL, `video_grant_key` TEXT NOT NULL, `submit_key` TEXT NOT NULL, `audio_asset_key` TEXT, `video_asset_key` TEXT, `audio_object_key` TEXT, `video_object_key` TEXT, `attempt_count` INTEGER NOT NULL, `next_retry_at` INTEGER, `last_safe_error` TEXT, PRIMARY KEY(`account_scope`, `draft_id`), FOREIGN KEY(`account_scope`, `draft_id`) REFERENCES `drafts`(`account_scope`, `draft_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `overall_state` TEXT NOT NULL, `audio_grant_state` TEXT NOT NULL, `video_grant_state` TEXT NOT NULL, `audio_upload_state` TEXT NOT NULL, `video_upload_state` TEXT NOT NULL, `audio_receipt_state` TEXT NOT NULL, `video_receipt_state` TEXT NOT NULL, `audio_confirm_state` TEXT NOT NULL, `video_confirm_state` TEXT NOT NULL, `submit_state` TEXT NOT NULL, `audio_grant_key` TEXT NOT NULL, `video_grant_key` TEXT NOT NULL, `submit_key` TEXT NOT NULL, `audio_asset_key` TEXT, `video_asset_key` TEXT, `audio_object_key` TEXT, `video_object_key` TEXT, `audio_receipt` TEXT, `video_receipt` TEXT, `audio_confirmed_at` INTEGER, `video_confirmed_at` INTEGER, `attempt_count` INTEGER NOT NULL, `next_retry_at` INTEGER, `last_safe_error` TEXT, PRIMARY KEY(`account_scope`, `draft_id`), FOREIGN KEY(`account_scope`, `draft_id`) REFERENCES `drafts`(`account_scope`, `draft_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "accountScope",
@@ -210,6 +220,12 @@
           {
             "fieldPath": "draftId",
             "columnName": "draft_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "overallState",
+            "columnName": "overall_state",
             "affinity": "TEXT",
             "notNull": true
           },
@@ -234,6 +250,30 @@
           {
             "fieldPath": "videoUploadState",
             "columnName": "video_upload_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioReceiptState",
+            "columnName": "audio_receipt_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoReceiptState",
+            "columnName": "video_receipt_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioConfirmState",
+            "columnName": "audio_confirm_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoConfirmState",
+            "columnName": "video_confirm_state",
             "affinity": "TEXT",
             "notNull": true
           },
@@ -280,6 +320,26 @@
             "fieldPath": "videoObjectKey",
             "columnName": "video_object_key",
             "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioReceipt",
+            "columnName": "audio_receipt",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "videoReceipt",
+            "columnName": "video_receipt",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioConfirmedAt",
+            "columnName": "audio_confirmed_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "videoConfirmedAt",
+            "columnName": "video_confirmed_at",
+            "affinity": "INTEGER"
           },
           {
             "fieldPath": "attemptCount",
@@ -346,7 +406,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7229cb7112f5587db8740780c0772c23')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ff9a454769cbd872efc5d3e896bc0619')"
     ]
   }
 }

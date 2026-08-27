@@ -1,7 +1,6 @@
 package com.vocaease.patient.core.database
 
 import android.content.Context
-import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.vocaease.patient.AndroidAppContainer
@@ -24,9 +23,7 @@ class DatabaseIsolationTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        database = Room.inMemoryDatabaseBuilder(context, VocaEaseDatabase::class.java)
-            .allowMainThreadQueries()
-            .build()
+        database = VocaEaseDatabase.inMemory(context, allowMainThreadQueries = true)
     }
 
     @After
@@ -116,28 +113,22 @@ class DatabaseIsolationTest {
         database.close()
         val databaseFile = File(context.cacheDir, "draft-reopen-${System.nanoTime()}.db")
         context.deleteDatabase(databaseFile.name)
-        var diskDatabase = Room.databaseBuilder(context, VocaEaseDatabase::class.java, databaseFile.name)
-            .allowMainThreadQueries()
-            .build()
+        var diskDatabase = VocaEaseDatabase.create(context, databaseFile.name, allowMainThreadQueries = true)
         try {
             diskDatabase.draftDao().insert(draft("patient-a", "draft-1", "song-a"))
             diskDatabase.mediaDao().insert(media("patient-a", "draft-1", MediaType.AUDIO))
             diskDatabase.uploadDao().insert(uploadJob("patient-a", "draft-1"))
             diskDatabase.close()
 
-            diskDatabase = Room.databaseBuilder(context, VocaEaseDatabase::class.java, databaseFile.name)
-                .allowMainThreadQueries()
-                .build()
+            diskDatabase = VocaEaseDatabase.create(context, databaseFile.name, allowMainThreadQueries = true)
 
             assertEquals("session-draft-1", diskDatabase.draftDao().find("patient-a", "draft-1")?.sessionId)
-            assertEquals("encrypted/draft-1-audio.vef", diskDatabase.mediaDao().find("patient-a", "draft-1", MediaType.AUDIO)?.encryptedRelativePath)
+            assertEquals("media/v1/a${"0".repeat(31)}.vef", diskDatabase.mediaDao().find("patient-a", "draft-1", MediaType.AUDIO)?.encryptedRelativePath)
             assertEquals(2, diskDatabase.uploadDao().find("patient-a", "draft-1")?.attemptCount)
         } finally {
             diskDatabase.close()
             context.deleteDatabase(databaseFile.name)
-            database = Room.inMemoryDatabaseBuilder(context, VocaEaseDatabase::class.java)
-                .allowMainThreadQueries()
-                .build()
+            database = VocaEaseDatabase.inMemory(context, allowMainThreadQueries = true)
         }
     }
 
@@ -168,9 +159,7 @@ class DatabaseIsolationTest {
     fun androidAppContainer_exposesAccountScopedStorageForRepositoryFactories() {
         val container = AndroidAppContainer(context)
 
-        assertEquals(VocaEaseDatabase::class.java, container.patientDatabase::class.java.superclass)
-        assertEquals("ChunkedAesGcmFileStore", container.encryptedFileStore::class.java.simpleName)
-        container.patientDatabase.close()
+        assertEquals("AccountScopedDraftStorageProvider", container.draftStorage::class.java.simpleName)
     }
 
     private fun draft(
@@ -195,7 +184,7 @@ class DatabaseIsolationTest {
         accountScope = accountScope,
         draftId = draftId,
         type = type,
-        encryptedRelativePath = "encrypted/$draftId-${type.name.lowercase()}.vef",
+        encryptedRelativePath = "media/v1/${if (type == MediaType.AUDIO) "a" else "b"}${"0".repeat(31)}.vef",
         mimeType = if (type == MediaType.AUDIO) "audio/mp4" else "video/mp4",
         sizeBytes = 3_670_016,
         sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -205,6 +194,7 @@ class DatabaseIsolationTest {
     private fun uploadJob(accountScope: String, draftId: String) = UploadJobEntity(
         accountScope = accountScope,
         draftId = draftId,
+        overallState = UploadOverallState.PAUSED,
         audioGrantState = UploadStepState.PENDING,
         videoGrantState = UploadStepState.PENDING,
         audioUploadState = UploadStepState.PENDING,

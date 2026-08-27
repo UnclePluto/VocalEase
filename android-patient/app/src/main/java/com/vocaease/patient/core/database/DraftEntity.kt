@@ -40,10 +40,12 @@ data class DraftEntity(
         require(songId.isNotBlank())
         require(sessionId.isNotBlank())
         require(creationKey.isNotBlank())
+        require(listOf(accountScope, draftId, songId, sessionId, creationKey).all { it.length <= 128 })
         require(durationMs >= 0)
         require(createdAt >= 0)
         require(expiresAt >= createdAt)
         require(expiresAt - createdAt <= MAX_RETENTION_MILLIS)
+        require(interruptionReason == null || interruptionReason.length <= 256)
     }
 
     companion object {

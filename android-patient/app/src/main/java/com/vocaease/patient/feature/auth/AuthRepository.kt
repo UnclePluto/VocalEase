@@ -22,6 +22,7 @@ import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.TokenVault
 import com.vocaease.patient.core.security.VaultInvalidatedException
+import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.ProviderException
@@ -84,6 +85,7 @@ class AuthRepository(
     private val mutableState = MutableStateFlow<AuthState>(AuthState.Restoring)
     private val mutableOperation = MutableStateFlow<AuthOperationState>(AuthOperationState.Idle)
     private val eventChannel = Channel<AuthEvent>(capacity = Channel.BUFFERED)
+    @Volatile private var authenticatedLease: AuthenticatedAccountLease? = null
 
     val state: StateFlow<AuthState> = mutableState.asStateFlow()
     val operation: StateFlow<AuthOperationState> = mutableOperation.asStateFlow()
@@ -92,6 +94,7 @@ class AuthRepository(
     init {
         refreshCoordinator.requireTokenVault(tokenVault)
         refreshCoordinator.addSessionExpiredListener {
+            authenticatedLease = null
             mutableState.value = AuthState.LoggedOut
             mutableOperation.value = AuthOperationState.Idle
             eventChannel.trySend(AuthEvent.SessionExpired)
@@ -113,6 +116,7 @@ class AuthRepository(
                 sessionArbiter.mutate {
                     val observed = sessionSnapshot()
                     if (observed.epoch == read.observedEpoch && observed.accessToken == null) {
+                        authenticatedLease = null
                         mutableState.value = AuthState.LoggedOut
                     }
                 }
@@ -145,6 +149,7 @@ class AuthRepository(
             return
         }
         mutableOperation.value = AuthOperationState.Loading
+        authenticatedLease = null
         val attemptEpoch = withContext(NonCancellable) {
             sessionArbiter.mutate {
                 val mutation = prepareLoginAttemptLocked()
@@ -224,6 +229,7 @@ class AuthRepository(
                     sessionArbiter.mutate {
                         if (refreshRead !is RefreshTokenRead.Invalidated) secureClearLocked()
                         mutableState.value = AuthState.LoggedOut
+                        authenticatedLease = null
                         eventChannel.trySend(AuthEvent.PasswordChanged)
                     }
                 }
@@ -240,6 +246,7 @@ class AuthRepository(
                 val refreshRead = readRefreshToken(beforeLogout.epoch)
                 if (refreshRead !is RefreshTokenRead.Invalidated) secureClearLocked()
                 mutableState.value = AuthState.LoggedOut
+                authenticatedLease = null
                 mutableOperation.value = AuthOperationState.Idle
                 (refreshRead as? RefreshTokenRead.Available)?.lease?.value
             }
@@ -269,7 +276,10 @@ class AuthRepository(
         withContext(NonCancellable) {
             sessionArbiter.mutate {
                 val mutation = secureClearLocked(expectedEpoch)
-                if (mutation.snapshot.accessToken == null) mutableState.value = AuthState.LoggedOut
+                if (mutation.snapshot.accessToken == null) {
+                    authenticatedLease = null
+                    mutableState.value = AuthState.LoggedOut
+                }
             }
         }
     }
@@ -285,6 +295,7 @@ class AuthRepository(
                 }
                 val mutation = cleanupEpoch?.let { secureClearLocked(it) }
                 if ((mutation?.snapshot ?: current).accessToken == null) {
+                    authenticatedLease = null
                     mutableState.value = AuthState.LoggedOut
                 }
             }
@@ -310,12 +321,17 @@ class AuthRepository(
     }
 
     private fun routeFor(session: AuthSession) {
+        authenticatedLease = if (session.mustChangePassword) null else AuthenticatedAccountLease(session.loginId)
         mutableState.value = if (session.mustChangePassword) {
             AuthState.MustChangePassword
         } else {
             AuthState.Authenticated
         }
     }
+
+    internal fun currentAuthenticatedLease(): AuthenticatedAccountLease? = authenticatedLease
+
+    internal fun isCurrentAuthenticatedLease(lease: AuthenticatedAccountLease): Boolean = authenticatedLease === lease
 
     private fun Throwable.userMessage(endpoint: ApiEndpoint): String = when (this) {
         is HttpException, is IOException, is SerializationException -> when (val failure = ApiErrorMapper.map(this, endpoint)) {

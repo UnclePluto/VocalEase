@@ -10,7 +10,8 @@ import com.vocaease.patient.core.security.EncryptedFileReader
 import com.vocaease.patient.core.security.EncryptedMediaException
 
 @UnstableApi
-class EncryptedMediaDataSource(
+/** Media3 只应在 Loader/播放后台线程调用本 DataSource；禁止从主线程直接读取。 */
+internal class EncryptedMediaDataSource(
     private val store: ChunkedAesGcmFileStore,
     private val accountScope: String,
 ) : BaseDataSource(false) {
@@ -44,9 +45,11 @@ class EncryptedMediaDataSource(
             transferStarted(dataSpec)
             return bytesRemaining
         } catch (error: EncryptedMediaException) {
+            reader?.closeSafely()
             clearState()
             throw error
         } catch (_: Exception) {
+            reader?.closeSafely()
             clearState()
             throw EncryptedMediaException("无法读取加密媒体")
         }
@@ -83,5 +86,9 @@ class EncryptedMediaDataSource(
         readPosition = 0
         bytesRemaining = 0
         transferOpen = false
+    }
+
+    private fun EncryptedFileReader.closeSafely() {
+        runCatching { close() }
     }
 }

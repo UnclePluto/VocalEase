@@ -3,6 +3,9 @@ package com.vocaease.patient
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.vocaease.patient.BuildConfig
+import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
+import com.vocaease.patient.core.database.AuthenticatedAccountLease
+import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
@@ -42,8 +45,7 @@ interface AppContainer {
     val uploadFactory: UploadFactory
     val authRepository: AuthRepository
     val patientApi: PatientApi
-    val patientDatabase: VocaEaseDatabase
-    val encryptedFileStore: ChunkedAesGcmFileStore
+    val draftStorage: AccountScopedDraftStorageProvider
     /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
     val sessionEvents: Flow<SessionLifecycleEvent>
 
@@ -59,8 +61,16 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val authRepository = sessionGraph.authRepository
     override val patientApi = sessionGraph.patientApi
     override val sessionEvents = sessionGraph.sessionEvents
-    override val patientDatabase = VocaEaseDatabase.create(context)
-    override val encryptedFileStore = ChunkedAesGcmFileStore(context)
+    private val patientDatabase = VocaEaseDatabase.create(context)
+    private val encryptedFileStore = ChunkedAesGcmFileStore(context)
+    override val draftStorage = AccountScopedDraftStorageProvider(
+        patientDatabase,
+        encryptedFileStore,
+        object : AuthenticatedAccountSession {
+            override fun current(): AuthenticatedAccountLease? = authRepository.currentAuthenticatedLease()
+            override fun isCurrent(lease: AuthenticatedAccountLease): Boolean = authRepository.isCurrentAuthenticatedLease(lease)
+        },
+    )
     override val clock = AppClock(System::currentTimeMillis)
     override val dispatchers = object : AppDispatchers {
         override val io: CoroutineDispatcher = Dispatchers.IO
@@ -69,7 +79,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val repositoryFactory = RepositoryFactory { name ->
         when (name) {
             "auth" -> authRepository
-            "draft-storage" -> patientDatabase
+            "draft-storage" -> draftStorage
             else -> error("仓库尚未提供：$name")
         }
     }
@@ -98,9 +108,7 @@ private object UnavailableAppContainer : AppContainer {
         get() = unavailable()
     override val patientApi: PatientApi
         get() = unavailable()
-    override val patientDatabase: VocaEaseDatabase
-        get() = unavailable()
-    override val encryptedFileStore: ChunkedAesGcmFileStore
+    override val draftStorage: AccountScopedDraftStorageProvider
         get() = unavailable()
     override val sessionEvents: Flow<SessionLifecycleEvent>
         get() = unavailable()

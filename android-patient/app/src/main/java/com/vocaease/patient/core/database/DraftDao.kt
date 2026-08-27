@@ -7,7 +7,7 @@ import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
 
 @Dao
-interface DraftDao {
+internal interface DraftDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(draft: DraftEntity)
 
@@ -42,10 +42,16 @@ interface DraftDao {
 
     @Query("DELETE FROM drafts WHERE account_scope = :accountScope AND expires_at <= :nowEpochMilliseconds")
     suspend fun deleteExpired(accountScope: String, nowEpochMilliseconds: Long): Int
+
+    @Query("SELECT COUNT(*) FROM drafts WHERE account_scope = :accountScope")
+    suspend fun count(accountScope: String): Int
+
+    @Query("DELETE FROM drafts WHERE account_scope = :accountScope")
+    suspend fun deleteAll(accountScope: String): Int
 }
 
 @Dao
-interface MediaDao {
+internal interface MediaDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(media: MediaEntity)
 

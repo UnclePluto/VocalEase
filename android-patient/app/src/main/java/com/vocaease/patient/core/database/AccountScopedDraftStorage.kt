@@ -1,0 +1,269 @@
+package com.vocaease.patient.core.database
+
+import androidx.room.withTransaction
+import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import java.io.InputStream
+
+class StaleAccountScopeException internal constructor() : IllegalStateException("当前账户存储已失效")
+
+internal class AuthenticatedAccountLease internal constructor(
+    internal val patientId: String,
+    private val generation: Any = Any(),
+)
+
+internal interface AuthenticatedAccountSession {
+    fun current(): AuthenticatedAccountLease?
+    fun isCurrent(lease: AuthenticatedAccountLease): Boolean
+}
+
+internal class MutableAuthenticatedAccountSession : AuthenticatedAccountSession {
+    @Volatile private var lease: AuthenticatedAccountLease? = null
+
+    fun authenticate(patientId: String) {
+        require(patientId.isNotBlank())
+        lease = AuthenticatedAccountLease(patientId)
+    }
+
+    fun clear() {
+        lease = null
+    }
+
+    override fun current(): AuthenticatedAccountLease? = lease
+    override fun isCurrent(lease: AuthenticatedAccountLease): Boolean = this.lease === lease
+}
+
+/**
+ * 只签发与当前认证患者绑定的存储 facade。账户标识不出现在任何公开方法参数中。
+ */
+class AccountScopedDraftStorageProvider internal constructor(
+    private val database: VocaEaseDatabase,
+    private val fileStore: ChunkedAesGcmFileStore,
+    private val session: AuthenticatedAccountSession,
+) {
+    fun current(): AccountScopedDraftStorage {
+        val lease = session.current() ?: throw StaleAccountScopeException()
+        return AccountScopedDraftStorage(database, fileStore, session, lease)
+    }
+}
+
+class AccountScopedDraftStorage internal constructor(
+    private val database: VocaEaseDatabase,
+    private val fileStore: ChunkedAesGcmFileStore,
+    private val session: AuthenticatedAccountSession,
+    private val lease: AuthenticatedAccountLease,
+) {
+    suspend fun encryptMedia(plaintext: InputStream, originalLength: Long): EncryptedMediaAsset = checked {
+        fileStore.encrypt(lease.patientId, plaintext, originalLength).let {
+            EncryptedMediaAsset(it.relativePath, it.encryptedSizeBytes)
+        }
+    }
+    suspend fun insertDraft(
+        draftId: String,
+        songId: String,
+        sessionId: String,
+        creationKey: String,
+        state: DraftState,
+        durationMs: Long,
+        createdAt: Long,
+        expiresAt: Long,
+        interruptionReason: String?,
+    ) = checked {
+        database.draftDao().insert(
+            DraftEntity(
+                accountScope = lease.patientId,
+                draftId = draftId,
+                songId = songId,
+                sessionId = sessionId,
+                creationKey = creationKey,
+                state = state,
+                durationMs = durationMs,
+                createdAt = createdAt,
+                expiresAt = expiresAt,
+                interruptionReason = interruptionReason,
+            ),
+        )
+    }
+
+    suspend fun findDraft(draftId: String): DraftSnapshot? = checked {
+        database.draftDao().find(lease.patientId, draftId)?.let {
+            DraftSnapshot(it.draftId, it.songId, it.sessionId, it.creationKey, it.state, it.durationMs, it.createdAt, it.expiresAt, it.interruptionReason)
+        }
+    }
+
+    suspend fun deleteDraft(draftId: String): Int = checked {
+        database.draftDao().delete(lease.patientId, draftId)
+    }
+
+    suspend fun insertMedia(
+        draftId: String,
+        type: MediaType,
+        encryptedRelativePath: String,
+        mimeType: String,
+        sizeBytes: Long,
+        sha256: String,
+        validationState: MediaValidationState,
+    ) = checked {
+        database.withTransaction {
+            require(database.draftDao().find(lease.patientId, draftId) != null) { "草稿不存在" }
+            require(fileStore.encryptedMediaExists(lease.patientId, encryptedRelativePath)) { "加密媒体不存在" }
+            database.mediaDao().insert(
+                MediaEntity(
+                    accountScope = lease.patientId,
+                    draftId = draftId,
+                    type = type,
+                    encryptedRelativePath = encryptedRelativePath,
+                    mimeType = mimeType,
+                    sizeBytes = sizeBytes,
+                    sha256 = sha256,
+                    validationState = validationState,
+                ),
+            )
+        }
+    }
+
+    suspend fun insertUploadJob(draftId: String, audioGrantKey: String, videoGrantKey: String, submitKey: String) = checked {
+        database.withTransaction {
+            require(database.draftDao().find(lease.patientId, draftId) != null) { "草稿不存在" }
+            database.uploadDao().insert(UploadJobEntity.newPending(lease.patientId, draftId, audioGrantKey, videoGrantKey, submitKey))
+        }
+    }
+
+    suspend fun checkpointUpload(draftId: String, checkpoint: UploadCheckpoint): Int = checked {
+        database.withTransaction {
+            val current = database.uploadDao().find(lease.patientId, draftId) ?: error("上传任务不存在")
+            require(allowedTransition(current.overallState, checkpoint.overallState)) { "非法上传状态转换" }
+            require(
+                listOf(
+                    current.audioGrantState to checkpoint.audioGrantState,
+                    current.videoGrantState to checkpoint.videoGrantState,
+                    current.audioUploadState to checkpoint.audioUploadState,
+                    current.videoUploadState to checkpoint.videoUploadState,
+                    current.audioReceiptState to checkpoint.audioReceiptState,
+                    current.videoReceiptState to checkpoint.videoReceiptState,
+                    current.audioConfirmState to checkpoint.audioConfirmState,
+                    current.videoConfirmState to checkpoint.videoConfirmState,
+                    current.submitState to checkpoint.submitState,
+                ).all { (from, to) -> allowedStepTransition(from, to) },
+            ) { "非法上传步骤状态转换" }
+            require(checkpoint.attemptCount >= current.attemptCount) { "上传尝试次数不能回退" }
+            database.uploadDao().checkpoint(
+                accountScope = lease.patientId,
+                draftId = draftId,
+                overallState = checkpoint.overallState,
+                audioGrantState = checkpoint.audioGrantState,
+                videoGrantState = checkpoint.videoGrantState,
+                audioUploadState = checkpoint.audioUploadState,
+                videoUploadState = checkpoint.videoUploadState,
+                audioReceiptState = checkpoint.audioReceiptState,
+                videoReceiptState = checkpoint.videoReceiptState,
+                audioConfirmState = checkpoint.audioConfirmState,
+                videoConfirmState = checkpoint.videoConfirmState,
+                submitState = checkpoint.submitState,
+                audioGrantKey = current.audioGrantKey,
+                videoGrantKey = current.videoGrantKey,
+                submitKey = current.submitKey,
+                audioAssetKey = checkpoint.audioAssetKey,
+                videoAssetKey = checkpoint.videoAssetKey,
+                audioObjectKey = checkpoint.audioObjectKey,
+                videoObjectKey = checkpoint.videoObjectKey,
+                audioReceipt = checkpoint.audioReceipt,
+                videoReceipt = checkpoint.videoReceipt,
+                audioConfirmedAt = checkpoint.audioConfirmedAt,
+                videoConfirmedAt = checkpoint.videoConfirmedAt,
+                attemptCount = checkpoint.attemptCount,
+                nextRetryAt = checkpoint.nextRetryAt,
+                lastSafeError = checkpoint.lastSafeError,
+            ).also { check(it == 1) { "上传检查点未持久化" } }
+        }
+    }
+
+    /** 普通登出不会调用此操作，因此保留草稿和 wrapped master。 */
+    suspend fun destroyEncryptionMaterialIfNoDrafts(): Boolean = checked {
+        database.withTransaction {
+            if (database.draftDao().count(lease.patientId) != 0) return@withTransaction false
+            fileStore.destroyAccountEncryption(lease.patientId)
+            true
+        }
+    }
+
+    /** 仅供明确处理永久密钥失效：先清账户草稿，再销毁旧密文和 KEK。 */
+    suspend fun purgeAfterPermanentKeyInvalidation() = checked {
+        database.withTransaction { database.draftDao().deleteAll(lease.patientId) }
+        fileStore.destroyAccountEncryption(lease.patientId)
+    }
+
+    private suspend fun <T> checked(block: suspend () -> T): T {
+        if (!session.isCurrent(lease)) throw StaleAccountScopeException()
+        return block()
+    }
+
+    private fun allowedTransition(from: UploadOverallState, to: UploadOverallState): Boolean =
+        to == from || to in OVERALL_TRANSITIONS.getValue(from)
+
+    private fun allowedStepTransition(from: UploadStepState, to: UploadStepState): Boolean = when (from) {
+        UploadStepState.TERMINAL_FAILURE, UploadStepState.SUCCEEDED -> to == from
+        UploadStepState.RETRYABLE_FAILURE -> true
+        else -> to == UploadStepState.RETRYABLE_FAILURE || to == UploadStepState.TERMINAL_FAILURE || STEP_RANK.getValue(to) >= STEP_RANK.getValue(from)
+    }
+
+    private companion object {
+        val OVERALL_TRANSITIONS = mapOf(
+            UploadOverallState.PAUSED to setOf(UploadOverallState.WAITING_NETWORK, UploadOverallState.UPLOADING, UploadOverallState.CANCELLED),
+            UploadOverallState.WAITING_NETWORK to setOf(UploadOverallState.UPLOADING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED, UploadOverallState.FAILED),
+            UploadOverallState.UPLOADING to setOf(UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.PAUSED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.WAITING_CALLBACK to setOf(UploadOverallState.CONFIRMING, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.CONFIRMING to setOf(UploadOverallState.READY_TO_SUBMIT, UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.READY_TO_SUBMIT to setOf(UploadOverallState.SUBMITTING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED),
+            UploadOverallState.SUBMITTING to setOf(UploadOverallState.ANALYZING, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.ANALYZING to setOf(UploadOverallState.COMPLETED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.FAILED to setOf(UploadOverallState.PAUSED, UploadOverallState.WAITING_NETWORK, UploadOverallState.CANCELLED),
+            UploadOverallState.CANCELLED to emptySet(),
+            UploadOverallState.COMPLETED to emptySet(),
+        )
+        val STEP_RANK = UploadStepState.entries.withIndex().associate { (index, state) ->
+            state to when (state) {
+                UploadStepState.RETRYABLE_FAILURE -> 0
+                UploadStepState.TERMINAL_FAILURE -> Int.MAX_VALUE
+                else -> index
+            }
+        }
+    }
+}
+
+data class UploadCheckpoint(
+    val overallState: UploadOverallState,
+    val audioGrantState: UploadStepState,
+    val videoGrantState: UploadStepState,
+    val audioUploadState: UploadStepState,
+    val videoUploadState: UploadStepState,
+    val audioReceiptState: UploadStepState,
+    val videoReceiptState: UploadStepState,
+    val audioConfirmState: UploadStepState,
+    val videoConfirmState: UploadStepState,
+    val submitState: UploadStepState,
+    val audioAssetKey: String?,
+    val videoAssetKey: String?,
+    val audioObjectKey: String?,
+    val videoObjectKey: String?,
+    val audioReceipt: String?,
+    val videoReceipt: String?,
+    val audioConfirmedAt: Long?,
+    val videoConfirmedAt: Long?,
+    val attemptCount: Int,
+    val nextRetryAt: Long?,
+    val lastSafeError: String?,
+)
+
+data class EncryptedMediaAsset(val relativePath: String, val encryptedSizeBytes: Long)
+
+data class DraftSnapshot(
+    val draftId: String,
+    val songId: String,
+    val sessionId: String,
+    val creationKey: String,
+    val state: DraftState,
+    val durationMs: Long,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val interruptionReason: String?,
+)
