@@ -29,6 +29,7 @@ import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.ProviderException
 import java.util.UUID
+import java.util.Locale
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
@@ -110,6 +111,9 @@ class AuthRepository(
             mutableOperation.value = AuthOperationState.Idle
             eventChannel.trySend(AuthEvent.SessionExpired)
         }
+        sessionArbiter.addRefreshSessionAppliedListener { session ->
+            if (session.mustChangePassword) mutableState.value = AuthState.MustChangePassword
+        }
     }
 
     suspend fun restoreSession() {
@@ -138,20 +142,8 @@ class AuthRepository(
             is RefreshTokenRead.Available -> Unit
         }
         when (val result = refreshCoordinator.refreshAfterUnauthorized(current.epoch)) {
-            is RefreshResult.Success -> {
-                val mustChangePassword = result.session?.mustChangePassword == true
-                if (mustChangePassword) {
-                    sessionArbiter.mutate {
-                        val observed = sessionSnapshot()
-                        if (observed.accessToken != null) {
-                            revokeAuthenticatedAccount()
-                            mutableState.value = AuthState.MustChangePassword
-                        }
-                    }
-                } else {
-                    restoreAuthenticatedPatient()
-                }
-            }
+            is RefreshResult.Success -> restoreAuthenticatedPatient()
+            is RefreshResult.PasswordChangeRequired -> Unit
             is RefreshResult.Failed -> Unit
         }
     }
@@ -380,7 +372,10 @@ class AuthRepository(
     private suspend fun publishAuthenticatedPatient(accountIncarnationId: String) {
         val rawPatientId = patientIdentity.patientUuid()
         val patientId = try {
-            UUID.fromString(rawPatientId).toString()
+            require(rawPatientId.length == UUID_CANONICAL_LENGTH)
+            UUID.fromString(rawPatientId).toString().also { canonical ->
+                require(canonical == rawPatientId.lowercase(Locale.ROOT))
+            }
         } catch (error: IllegalArgumentException) {
             throw NetworkContractException("patient.id 不是有效 UUID", error)
         }
@@ -427,3 +422,5 @@ class AuthRepository(
 }
 
 private class AuthContractException(message: String) : IllegalStateException(message)
+
+private const val UUID_CANONICAL_LENGTH = 36

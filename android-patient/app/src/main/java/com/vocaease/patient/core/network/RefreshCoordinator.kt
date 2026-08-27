@@ -30,6 +30,11 @@ sealed interface RefreshResult {
         val session: AuthSession?,
     ) : RefreshResult
 
+    data class PasswordChangeRequired(
+        val accessToken: String,
+        val epoch: Long,
+    ) : RefreshResult
+
     data class Failed(val cause: Throwable?) : RefreshResult
 }
 
@@ -63,6 +68,14 @@ class RefreshCoordinator(
     suspend fun refreshAfterUnauthorized(failedEpoch: Long): RefreshResult = mutex.withLock {
         val current = sessionArbiter.sessionSnapshot()
         if (current.epoch != failedEpoch) {
+            latestOutcome.get()
+                ?.takeIf { it.sourceEpoch == failedEpoch }
+                ?.result
+                ?.let { result ->
+                    if (result is RefreshResult.PasswordChangeRequired && result.epoch == current.epoch) {
+                        return@withLock result
+                    }
+                }
             current.accessToken?.let {
                 return@withLock RefreshResult.Success(it, current.epoch, session = null)
             }
@@ -115,7 +128,9 @@ class RefreshCoordinator(
                     accessToken = session.access,
                     refreshToken = session.refresh ?: refreshLease.value,
                     replacementId = replacementId,
-                )
+                ).also { applied ->
+                    if (applied.applied) synchronizeAppliedRefreshSession(session)
+                }
             }
         } catch (error: CancellationException) {
             clearRefreshAttempt(failedEpoch, replacementId)
@@ -132,11 +147,18 @@ class RefreshCoordinator(
         }
 
         val result = if (mutation.applied) {
-            RefreshResult.Success(
-                accessToken = requireNotNull(mutation.snapshot.accessToken),
-                epoch = mutation.snapshot.epoch,
-                session = session,
-            )
+            if (session.mustChangePassword) {
+                RefreshResult.PasswordChangeRequired(
+                    accessToken = requireNotNull(mutation.snapshot.accessToken),
+                    epoch = mutation.snapshot.epoch,
+                )
+            } else {
+                RefreshResult.Success(
+                    accessToken = requireNotNull(mutation.snapshot.accessToken),
+                    epoch = mutation.snapshot.epoch,
+                    session = session,
+                )
+            }
         } else {
             mutation.snapshot.accessToken?.let {
                 RefreshResult.Success(it, mutation.snapshot.epoch, session = null)
@@ -158,6 +180,7 @@ class RefreshCoordinator(
             if (!error.isUnauthorized()) throw error
             when (val refreshed = refreshAfterUnauthorized(original.epoch)) {
                 is RefreshResult.Success -> request()
+                is RefreshResult.PasswordChangeRequired -> throw SessionExpiredException()
                 is RefreshResult.Failed -> throw SessionExpiredException(refreshed.cause)
             }
         }

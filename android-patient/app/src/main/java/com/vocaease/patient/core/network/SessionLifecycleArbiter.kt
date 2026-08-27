@@ -2,6 +2,7 @@ package com.vocaease.patient.core.network
 
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.StaleAccountScopeException
+import com.vocaease.patient.core.network.dto.AuthSession
 import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.SessionMutation
@@ -37,6 +38,7 @@ class SessionLifecycleArbiter(
     private val mutationMutex = Mutex()
     private val eventQueue = Channel<SessionLifecycleEvent>(capacity = Channel.UNLIMITED)
     private val sessionExpiredListeners = CopyOnWriteArrayList<(SessionInvalidation) -> Unit>()
+    private val refreshSessionAppliedListeners = CopyOnWriteArrayList<(AuthSession) -> Unit>()
     private var lastPublishedInvalidation: SessionInvalidation? = null
     @Volatile private var authenticatedAccountLease: AuthenticatedAccountLease? = null
     private var pendingAccountIncarnationId: String? = null
@@ -50,6 +52,10 @@ class SessionLifecycleArbiter(
 
     fun addSessionExpiredListener(listener: (SessionInvalidation) -> Unit) {
         sessionExpiredListeners += listener
+    }
+
+    internal fun addRefreshSessionAppliedListener(listener: (AuthSession) -> Unit) {
+        refreshSessionAppliedListeners += listener
     }
 
     internal suspend fun <T> mutate(block: suspend MutationScope.() -> T): T =
@@ -106,6 +112,12 @@ class SessionLifecycleArbiter(
         fun revokeAuthenticatedAccount() {
             authenticatedAccountLease = null
             pendingAccountIncarnationId = null
+        }
+
+        /** 必须紧跟成功的 token CAS 在同一会话锁内调用。 */
+        fun synchronizeAppliedRefreshSession(session: AuthSession) {
+            if (session.mustChangePassword) revokeAuthenticatedAccount()
+            refreshSessionAppliedListeners.forEach { listener -> listener(session) }
         }
 
         fun claimInvalidation(invalidation: SessionInvalidation): InvalidationClaim {

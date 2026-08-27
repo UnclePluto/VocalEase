@@ -93,10 +93,45 @@ internal object DatabaseConstraintInstaller {
 
     private fun install(context: Context, db: SupportSQLiteDatabase) {
         db.execSQL("PRAGMA foreign_keys = ON")
-        context.assets.open(ASSET).bufferedReader().use { it.readText() }
+        val canonicalStatements = context.assets.open(ASSET).bufferedReader().use { it.readText() }
             .split(BOUNDARY)
             .map(String::trim)
             .filter(String::isNotEmpty)
-            .forEach(db::execSQL)
+        val canonicalByName = canonicalStatements.associateBy(::triggerName)
+        check(canonicalByName.keys == triggerNames.toSet()) { "数据库约束定义不完整" }
+
+        val ownsTransaction = !db.inTransaction()
+        if (ownsTransaction) db.beginTransaction()
+        try {
+            triggerNames.forEach { name -> db.execSQL("DROP TRIGGER IF EXISTS $name") }
+            canonicalStatements.forEach(db::execSQL)
+            check(installedTriggers(db) == canonicalByName.mapValues { (_, sql) -> normalizeSql(sql) }) {
+                "数据库约束安装失败"
+            }
+            if (ownsTransaction) db.setTransactionSuccessful()
+        } finally {
+            if (ownsTransaction) db.endTransaction()
+        }
     }
+
+    private fun installedTriggers(db: SupportSQLiteDatabase): Map<String, String> = db.query(
+        "SELECT name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name",
+    ).use { cursor ->
+        buildMap {
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(0)
+                if (name in triggerNames) put(name, normalizeSql(cursor.getString(1)))
+            }
+        }
+    }
+
+    private fun triggerName(statement: String): String = requireNotNull(
+        Regex("CREATE TRIGGER(?: IF NOT EXISTS)? ([^ ]+)").find(statement),
+    ).groupValues[1]
+
+    private fun normalizeSql(sql: String): String = sql
+        .trim()
+        .removeSuffix(";")
+        .replace(Regex("\\s+"), " ")
+        .replace("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ")
 }

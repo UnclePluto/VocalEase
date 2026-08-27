@@ -69,6 +69,28 @@ class AuthRepositoryTest {
     }
 
     @Test
+    fun `启动refresh返回必须改密时保留凭据但不请求patient me或发布lease`() = runBlocking {
+        val vault = FakeTokenVault(refreshToken = "stored-refresh")
+        val remote = FakeAuthRemote(
+            refreshResult = session(
+                access = "password-change-access",
+                refresh = "password-change-refresh",
+                mustChangePassword = true,
+            ),
+        )
+        val identity = FakePatientIdentity()
+        val repository = repository(vault, remote, identity)
+
+        repository.restoreSession()
+
+        assertEquals(AuthState.MustChangePassword, repository.state.value)
+        assertNull(repository.currentAuthenticatedLease())
+        assertEquals(0, identity.calls.get())
+        assertEquals("password-change-access", vault.sessionSnapshot().accessToken)
+        assertEquals("password-change-refresh", vault.refreshValue())
+    }
+
+    @Test
     fun `启动刷新失败会清除会话并发送过期事件`() = runBlocking {
         val vault = FakeTokenVault(refreshToken = "stored-refresh")
         val remote = FakeAuthRemote(refreshFailure = java.io.IOException("refresh rejected"))
@@ -144,6 +166,23 @@ class AuthRepositoryTest {
     }
 
     @Test
+    fun `patient me返回UUID缩写时拒绝认证并清除凭据`() = runBlocking {
+        val vault = FakeTokenVault()
+        val repository = repository(
+            vault,
+            FakeAuthRemote(loginResult = session(access = "must-clear", refresh = "must-clear")),
+            FakePatientIdentity(patientId = "1-1-1-1-1"),
+        )
+
+        repository.login("patient-001", "password")
+
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertNull(repository.currentAuthenticatedLease())
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(vault.refreshValue())
+    }
+
+    @Test
     fun `同loginId不同患者UUID不共享scope且同UUID重登旧facade仍失效`() = runBlocking {
         val vault = FakeTokenVault()
         val identity = FakePatientIdentity(patientId = PATIENT_UUID)
@@ -184,6 +223,40 @@ class AuthRepositoryTest {
 
         assertSame(beforeRefresh, repository.currentAuthenticatedLease())
         assertTrue(repository.isCurrentAuthenticatedLease(beforeRefresh))
+    }
+
+    @Test
+    fun `已认证请求401后refresh要求改密会撤销lease且不重试原请求`() = runBlocking {
+        val vault = FakeTokenVault()
+        val remote = FakeAuthRemote(
+            loginResult = session(access = "access-1", refresh = "refresh-1"),
+            refreshResult = session(
+                access = "password-change-access",
+                refresh = "password-change-refresh",
+                mustChangePassword = true,
+            ),
+        )
+        val coordinator = RefreshCoordinator(vault, remote)
+        val repository = AuthRepository(vault, remote, coordinator, FakePatientIdentity())
+        repository.login("patient-001", "password")
+        val authenticatedLease = requireNotNull(repository.currentAuthenticatedLease())
+        var requestCalls = 0
+
+        assertThrows(com.vocaease.patient.core.network.SessionExpiredException::class.java) {
+            runBlocking {
+                coordinator.executeAuthenticated<Unit> {
+                    requestCalls += 1
+                    throw unauthorized()
+                }
+            }
+        }
+
+        assertEquals(1, requestCalls)
+        assertEquals(AuthState.MustChangePassword, repository.state.value)
+        assertNull(repository.currentAuthenticatedLease())
+        assertFalse(repository.isCurrentAuthenticatedLease(authenticatedLease))
+        assertEquals("password-change-access", vault.sessionSnapshot().accessToken)
+        assertEquals("password-change-refresh", vault.refreshValue())
     }
 
     @Test
