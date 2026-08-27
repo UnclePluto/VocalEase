@@ -28,6 +28,9 @@ sealed interface AppRoute {
     data object PendingUploads : AppRoute
 
     @Serializable
+    data object TreatmentPlan : AppRoute
+
+    @Serializable
     data object History : AppRoute
 
     @Serializable

@@ -12,6 +12,12 @@ import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import com.vocaease.patient.feature.auth.AuthRepository
+import com.vocaease.patient.feature.catalog.PatientRepository
+import com.vocaease.patient.feature.catalog.SongPagingSource
+import com.vocaease.patient.feature.catalog.SongRepository
+import com.vocaease.patient.feature.catalog.VocaEasePatientRemoteDataSource
+import com.vocaease.patient.feature.catalog.VocaEaseSongRemoteDataSource
+import com.vocaease.patient.feature.profile.PendingUploadCounter
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -45,6 +51,9 @@ interface AppContainer {
     val uploadFactory: UploadFactory
     val authRepository: AuthRepository
     val patientApi: PatientApi
+    val patientRepository: PatientRepository
+    val songRepository: SongRepository
+    val pendingUploadCounter: PendingUploadCounter
     val draftStorage: AccountScopedDraftStorageProvider
     /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
     val sessionEvents: Flow<SessionLifecycleEvent>
@@ -60,6 +69,10 @@ class AndroidAppContainer(context: Context) : AppContainer {
 
     override val authRepository = sessionGraph.authRepository
     override val patientApi = sessionGraph.patientApi
+    override val patientRepository = PatientRepository(VocaEasePatientRemoteDataSource(patientApi))
+    override val songRepository = SongRepository { keyword ->
+        SongPagingSource(VocaEaseSongRemoteDataSource(patientApi), keyword)
+    }
     override val sessionEvents = sessionGraph.sessionEvents
     private val patientDatabase = VocaEaseDatabase.create(context)
     private val encryptedFileStore = ChunkedAesGcmFileStore(context)
@@ -74,6 +87,9 @@ class AndroidAppContainer(context: Context) : AppContainer {
             ): T = authRepository.withAuthenticatedLease(expected, operation)
         },
     )
+    override val pendingUploadCounter = PendingUploadCounter {
+        draftStorage.current().pendingUploadCount()
+    }
     override val clock = AppClock(System::currentTimeMillis)
     override val dispatchers = object : AppDispatchers {
         override val io: CoroutineDispatcher = Dispatchers.IO
@@ -83,6 +99,8 @@ class AndroidAppContainer(context: Context) : AppContainer {
         when (name) {
             "auth" -> authRepository
             "draft-storage" -> draftStorage
+            "patient" -> patientRepository
+            "songs" -> songRepository
             else -> error("仓库尚未提供：$name")
         }
     }
@@ -110,6 +128,12 @@ private object UnavailableAppContainer : AppContainer {
     override val authRepository: AuthRepository
         get() = unavailable()
     override val patientApi: PatientApi
+        get() = unavailable()
+    override val patientRepository: PatientRepository
+        get() = unavailable()
+    override val songRepository: SongRepository
+        get() = unavailable()
+    override val pendingUploadCounter: PendingUploadCounter
         get() = unavailable()
     override val draftStorage: AccountScopedDraftStorageProvider
         get() = unavailable()

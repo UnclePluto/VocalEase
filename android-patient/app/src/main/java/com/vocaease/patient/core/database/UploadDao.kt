@@ -19,6 +19,15 @@ internal interface UploadDao {
 
     @Query(
         """
+        SELECT COUNT(*) FROM upload_jobs
+        WHERE account_scope = :accountScope
+          AND overall_state NOT IN ('COMPLETED', 'CANCELLED')
+        """,
+    )
+    suspend fun countPending(accountScope: String): Int
+
+    @Query(
+        """
         SELECT * FROM upload_jobs
         WHERE account_scope = :accountScope
           AND next_retry_at IS NOT NULL

@@ -141,6 +141,10 @@ class AccountScopedDraftStorage internal constructor(
         }
     }
 
+    suspend fun pendingUploadCount(): Int = checked {
+        database.uploadDao().countPending(lease.patientId)
+    }
+
     suspend fun checkpointUpload(draftId: String, checkpoint: UploadCheckpoint): Int = checked {
         database.withTransaction {
             val current = database.uploadDao().find(lease.patientId, draftId) ?: error("上传任务不存在")
