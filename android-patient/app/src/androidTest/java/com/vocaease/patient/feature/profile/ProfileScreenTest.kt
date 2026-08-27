@@ -11,6 +11,9 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assertWidthIsAtLeast
+import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.vocaease.patient.ui.theme.VocaEaseTheme
@@ -76,7 +79,9 @@ class ProfileScreenTest {
 
         composeRule.onNodeWithText("早上好，患者").assertDoesNotExist()
         composeRule.onNodeWithText("患者信息加载失败，请重试").assertIsDisplayed()
-        composeRule.onNodeWithText("重试").performClick()
+        composeRule.onNodeWithText("重试")
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
         composeRule.runOnIdle { assertEquals(1, retries) }
     }
 
@@ -99,6 +104,8 @@ class ProfileScreenTest {
         composeRule.onNodeWithContentDescription("设置")
             .assertHasClickAction()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
             .performClick()
         composeRule.runOnIdle { assertEquals(1, opened) }
     }

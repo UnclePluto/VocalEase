@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vocaease.patient.ui.theme.BrandForest
 import com.vocaease.patient.ui.theme.BrandGreen
+import com.vocaease.patient.ui.theme.MinimumTouchTargetSize
 
 @Composable
 fun TreatmentProgressCard(
@@ -81,7 +82,9 @@ fun TreatmentProgressCard(
                     PatientUiStatus.ERROR -> {
                         Text(errorMessage ?: "患者信息加载失败，请重试", color = Color(0xFFF2FBF6), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick = onRetry, modifier = Modifier.height(40.dp)) { Text("重试") }
+                        Button(onClick = onRetry, modifier = Modifier.height(MinimumTouchTargetSize)) {
+                            Text("重试")
+                        }
                     }
                     PatientUiStatus.CONTENT -> Text(
                         "暂无进行中的治疗计划，请联系医生",

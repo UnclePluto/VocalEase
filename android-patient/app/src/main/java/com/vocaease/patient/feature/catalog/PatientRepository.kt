@@ -7,6 +7,7 @@ import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import java.io.IOException
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -56,22 +57,33 @@ class PatientRepository(
         val request = synchronized(lock) {
             synchronizeLeaseLocked()
             val currentLease = lease ?: return PatientRefreshResult.Failure
-            generation += 1
             val previous = mutableProfile.value
+            val expectedPatientId = currentLease.patientId.toCanonicalUuidOrNull()
+            if (expectedPatientId == null) {
+                mutableState.value = PatientLoadState.Error(previous, IDENTITY_ERROR)
+                return PatientRefreshResult.Failure
+            }
+            generation += 1
             mutableState.value = PatientLoadState.Loading(previous)
-            PatientRequest(currentLease, generation, previous)
+            PatientRequest(currentLease, expectedPatientId, generation, previous)
         }
         return try {
             val refreshed = remote.fetchMe()
+            var publication: PatientRefreshResult = PatientRefreshResult.Failure
             accountSession.withCurrentLease(request.lease) {
                 synchronized(lock) {
                     if (lease === request.lease && generation == request.generation) {
-                        mutableProfile.value = refreshed
-                        mutableState.value = PatientLoadState.Content(refreshed)
+                        if (refreshed.id == request.expectedPatientId) {
+                            mutableProfile.value = refreshed
+                            mutableState.value = PatientLoadState.Content(refreshed)
+                            publication = PatientRefreshResult.Success(refreshed)
+                        } else {
+                            mutableState.value = PatientLoadState.Error(request.previous, IDENTITY_ERROR)
+                        }
                     }
                 }
             }
-            PatientRefreshResult.Success(refreshed)
+            publication
         } catch (error: CancellationException) {
             restoreAfterCancellation(request)
             throw error
@@ -120,7 +132,18 @@ class PatientRepository(
 
     private data class PatientRequest(
         val lease: AuthenticatedAccountLease,
+        val expectedPatientId: UUID,
         val generation: Long,
         val previous: PatientProfile?,
     )
+
+    private companion object {
+        const val IDENTITY_ERROR = "患者身份校验失败，请重新登录"
+    }
+}
+
+private fun String.toCanonicalUuidOrNull(): UUID? = try {
+    UUID.fromString(this).takeIf { it.toString() == this }
+} catch (_: IllegalArgumentException) {
+    null
 }

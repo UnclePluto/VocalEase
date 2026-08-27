@@ -36,6 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,7 +104,9 @@ fun CatalogScreen(
                 ) {
                     Text(state.patientErrorMessage, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
                     Spacer(Modifier.weight(1f))
-                    Button(onClick = onPatientRetry, modifier = Modifier.height(40.dp)) { Text("重试") }
+                    Button(onClick = onPatientRetry, modifier = Modifier.height(MinimumTouchTargetSize)) {
+                        Text("重试")
+                    }
                 }
             }
         }
@@ -194,11 +200,21 @@ private fun CatalogHeader(
             IconButton(
                 onClick = onSearchToggle,
                 modifier = Modifier
-                    .size(40.dp)
-                    .background(AppSurfaceVariant, CircleShape)
-                    .testTag("search-toggle"),
+                    .size(MinimumTouchTargetSize)
+                    .testTag("search-toggle")
+                    .semantics {
+                        contentDescription = "搜索"
+                        role = Role.Button
+                    },
             ) {
-                Text("⌕", color = TextPrimary, fontSize = 22.sp)
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(AppSurfaceVariant, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("⌕", color = TextPrimary, fontSize = 22.sp)
+                }
             }
         }
         if (searchVisible) {

@@ -181,6 +181,37 @@ class CatalogViewModelTest {
     }
 
     @Test
+    fun `患者身份不匹配时首次阻断训练且旧安全计划保持许可`() = runBlocking {
+        val patientRemote = FakePatientRemote(
+            profile(patientId = UUID.fromString("40000000-0000-4000-8000-000000000004")),
+        )
+        val firstLoad = viewModel(patientRemote, FakeSongRemote(mutableMapOf(1 to songPage(0, 1))))
+
+        firstLoad.refresh()
+
+        assertEquals(PatientUiStatus.ERROR, firstLoad.state.value.patientStatus)
+        assertFalse(firstLoad.state.value.canStartTraining)
+        assertNull(firstLoad.state.value.treatmentProgress)
+        assertEquals("患者身份校验失败，请重新登录", firstLoad.state.value.patientErrorMessage)
+
+        val retainedRemote = FakePatientRemote(profile(name = "安全患者"))
+        val retained = viewModel(retainedRemote, FakeSongRemote(mutableMapOf(1 to songPage(0, 1))))
+        retained.refresh()
+        retainedRemote.value = profile(
+            patientId = UUID.fromString("40000000-0000-4000-8000-000000000004"),
+            name = "错误患者",
+            activePlan = false,
+        )
+
+        retained.retryPatient()
+
+        assertEquals("安全患者", retained.state.value.patientName)
+        assertTrue(retained.state.value.canStartTraining)
+        assertEquals(8, retained.state.value.treatmentProgress?.completedCount)
+        assertEquals("患者身份校验失败，请重新登录", retained.state.value.patientErrorMessage)
+    }
+
+    @Test
     fun `搜索取消后清除加载状态且不提交错误`() = runBlocking {
         val started = CompletableDeferred<Unit>()
         val gate = CompletableDeferred<SongPage>()
@@ -237,11 +268,12 @@ internal class FakeSongRemote(
 }
 
 internal fun profile(
+    patientId: UUID = UUID.fromString("10000000-0000-4000-8000-000000000001"),
     name: String = "Voca",
     progressPercent: String = "33.33",
     activePlan: Boolean = true,
 ): PatientProfile = PatientProfile(
-    id = UUID.fromString("10000000-0000-0000-0000-000000000001"),
+    id = patientId,
     medicalRecordNo = "MR-001",
     name = name,
     gender = Gender.FEMALE,

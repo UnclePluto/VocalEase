@@ -41,6 +41,7 @@ import com.vocaease.patient.ui.theme.AppSurfaceVariant
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandForest
 import com.vocaease.patient.ui.theme.BrandGreen
+import com.vocaease.patient.ui.theme.MinimumTouchTargetSize
 import com.vocaease.patient.ui.theme.TextPrimary
 import com.vocaease.patient.ui.theme.TextSecondary
 import java.util.Locale
@@ -70,8 +71,7 @@ fun ProfileScreen(
                 Spacer(Modifier.weight(1f))
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
-                        .background(AppSurfaceVariant, RoundedCornerShape(20.dp))
+                        .size(MinimumTouchTargetSize)
                         .clickable(onClick = onSettingsClick)
                         .semantics {
                             role = Role.Button
@@ -79,7 +79,14 @@ fun ProfileScreen(
                         },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("⚙", color = TextPrimary, fontSize = 18.sp)
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(AppSurfaceVariant, RoundedCornerShape(20.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("⚙", color = TextPrimary, fontSize = 18.sp)
+                    }
                 }
             }
         }
@@ -92,7 +99,9 @@ fun ProfileScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.errorMessage ?: "患者信息加载失败，请重试", color = TextSecondary, fontSize = 14.sp)
                         Spacer(Modifier.height(12.dp))
-                        Button(onClick = onRetry) { Text("重试") }
+                        Button(onClick = onRetry, modifier = Modifier.height(MinimumTouchTargetSize)) {
+                            Text("重试")
+                        }
                     }
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -129,7 +138,9 @@ fun ProfileScreen(
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(state.errorMessage, color = TextSecondary, fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
-                Button(onClick = onRetry, modifier = Modifier.height(40.dp)) { Text("重试") }
+                Button(onClick = onRetry, modifier = Modifier.height(MinimumTouchTargetSize)) {
+                    Text("重试")
+                }
             }
         }
         if (hasPatientContent) item {
@@ -219,7 +230,6 @@ private fun StatisticCard(
         modifier = modifier.height(116.dp),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = background),
-        border = BorderStroke(1.dp, Color(0xFFDEE8E2)),
     ) {
         Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             Column {

@@ -26,7 +26,7 @@ class AccountBoundRepositoryTest {
     fun `换号立即原子清空患者和歌曲缓存且相同登录名不能复用旧计划`() = runBlocking {
         val session = TestAuthenticatedAccountSession()
         session.authenticate(PATIENT_A, "incarnation-a")
-        val patientRemote = QueuePatientRemote().apply { enqueue(profile(name = "患者A")) }
+        val patientRemote = QueuePatientRemote().apply { enqueue(profile(patientId = UUID.fromString(PATIENT_A), name = "患者A")) }
         val songRemote = QueueSongRemote().apply { enqueue(songPage(1, 1, song("A的歌曲"))) }
         val patientRepository = PatientRepository(patientRemote, session)
         val songRepository = SongRepository(session) { keyword -> SongPagingSource(songRemote, keyword) }
@@ -44,7 +44,7 @@ class AccountBoundRepositoryTest {
         assertTrue(songRepository.snapshot.value.songs.isEmpty())
         assertEquals("", songRepository.snapshot.value.keyword)
         assertNull(songRepository.snapshot.value.errorMessage)
-        patientRemote.enqueue(profile(name = "患者B", activePlan = false))
+        patientRemote.enqueue(profile(patientId = UUID.fromString(PATIENT_B), name = "患者B", activePlan = false))
         songRemote.enqueue(songPage(1, 1, song("B的歌曲")))
         patientRepository.refreshMe()
         songRepository.refresh()
@@ -71,13 +71,13 @@ class AccountBoundRepositoryTest {
             songRemote.awaitCall()
 
             session.authenticate(nextPatientId, nextIncarnation)
-            patientRemote.enqueue(profile(name = "当前患者", activePlan = false))
+            patientRemote.enqueue(profile(patientId = UUID.fromString(nextPatientId), name = "当前患者", activePlan = false))
             songRemote.enqueue(songPage(1, 1, song("当前歌曲")))
             val currentPatient = async { patientRepository.refreshMe() }
             val currentSongs = async { songRepository.refresh("当前搜索") }
             currentPatient.await()
             currentSongs.await()
-            patientGate.complete(profile(name = "旧患者"))
+            patientGate.complete(profile(patientId = UUID.fromString(PATIENT_A), name = "旧患者"))
             songGate.complete(songPage(1, 1, song("旧歌曲")))
             oldPatient.await()
             oldSongs.await()
@@ -104,7 +104,7 @@ class AccountBoundRepositoryTest {
         val loading = async { repository.refreshMe() }
         remote.awaitCall()
         assertTrue(repository.state.value is PatientLoadState.Loading)
-        loadingGate.complete(profile(name = "无计划患者", activePlan = false))
+        loadingGate.complete(profile(patientId = UUID.fromString(PATIENT_A), name = "无计划患者", activePlan = false))
         loading.await()
         assertNull((repository.state.value as PatientLoadState.Content).profile.treatmentProgress)
 
@@ -171,6 +171,57 @@ class AccountBoundRepositoryTest {
         refresh.cancelAndJoin()
 
         assertSame(PatientLoadState.Initial, repository.state.value)
+    }
+
+    @Test
+    fun `当前lease首次收到异UUID患者必须阻断发布和训练`() = runBlocking {
+        val session = TestAuthenticatedAccountSession().apply { authenticate(PATIENT_A, "incarnation-a") }
+        val repository = PatientRepository(
+            PatientRemoteDataSource { profile(patientId = UUID.fromString(PATIENT_B), name = "错误患者") },
+            session,
+        )
+
+        val result = repository.refreshMe()
+
+        assertSame(PatientRefreshResult.Failure, result)
+        assertNull(repository.profile.value)
+        val error = repository.state.value as PatientLoadState.Error
+        assertNull(error.previous)
+        assertEquals("患者身份校验失败，请重新登录", error.message)
+        assertFalse(error.message.contains(PATIENT_A))
+        assertFalse(error.message.contains(PATIENT_B))
+    }
+
+    @Test
+    fun `异UUID响应不能替换同lease已有安全患者内容`() = runBlocking {
+        val session = TestAuthenticatedAccountSession().apply { authenticate(PATIENT_A, "incarnation-a") }
+        val remote = QueuePatientRemote().apply {
+            enqueue(profile(patientId = UUID.fromString(PATIENT_A), name = "安全患者"))
+            enqueue(profile(patientId = UUID.fromString(PATIENT_B), name = "错误患者", activePlan = false))
+        }
+        val repository = PatientRepository(remote, session)
+        repository.refreshMe()
+
+        val result = repository.refreshMe()
+
+        assertSame(PatientRefreshResult.Failure, result)
+        assertEquals("安全患者", repository.profile.value?.name)
+        val error = repository.state.value as PatientLoadState.Error
+        assertEquals("安全患者", error.previous?.name)
+        assertTrue(error.previous?.activeTreatmentPlan != null)
+        assertEquals("患者身份校验失败，请重新登录", error.message)
+    }
+
+    @Test
+    fun `UUID类型比较不受构造字符串大小写影响`() = runBlocking {
+        val session = TestAuthenticatedAccountSession().apply { authenticate(PATIENT_A, "incarnation-a") }
+        val uppercaseUuid = UUID.fromString(PATIENT_A.uppercase())
+        val repository = PatientRepository(PatientRemoteDataSource { profile(patientId = uppercaseUuid) }, session)
+
+        val result = repository.refreshMe()
+
+        assertTrue(result is PatientRefreshResult.Success)
+        assertEquals(uppercaseUuid, repository.profile.value?.id)
     }
 
     private companion object {

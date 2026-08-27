@@ -11,6 +11,11 @@ import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assertWidthIsAtLeast
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.vocaease.patient.ui.theme.VocaEaseTheme
 import java.util.UUID
@@ -109,8 +114,27 @@ class CatalogScreenTest {
 
         composeRule.onNodeWithText("暂无进行中的治疗计划，请联系医生").assertDoesNotExist()
         composeRule.onNodeWithText("患者信息加载失败，请重试").assertIsDisplayed()
-        composeRule.onNodeWithText("重试").performClick()
+        composeRule.onNodeWithText("重试")
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
         composeRule.runOnIdle { assertEquals(1, retries) }
+    }
+
+    @Test
+    fun 搜索按钮提供中文按钮语义和最小触控目标() {
+        composeRule.setContent {
+            VocaEaseTheme {
+                CatalogScreen(
+                    state = catalogState(),
+                    onSearch = {}, onPatientRetry = {}, onRetry = {}, onLoadMore = {}, onSongClick = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("搜索")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
     }
 
     private fun catalogState() = CatalogUiState(
