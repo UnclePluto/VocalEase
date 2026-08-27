@@ -42,7 +42,7 @@ sealed interface RefreshResult {
 }
 
 class SessionExpiredException(cause: Throwable? = null) : Exception("登录状态已失效", cause)
-class SessionChangedException : Exception("登录账号已变更，请重新操作")
+class SessionChangedException : IOException("登录账号已变更，请重新操作")
 
 fun interface RefreshRemoteDataSource {
     suspend fun refresh(request: RefreshRequestDto): AuthSession
@@ -166,17 +166,22 @@ class RefreshCoordinator(
     }
 
     /** 每个原请求最多因 401 刷新并重试一次；第二个 401 原样传播。 */
-    suspend fun <T> executeAuthenticated(request: suspend () -> T): T {
+    internal suspend fun <T> executeAuthenticated(request: suspend (AuthRequestContext) -> T): T {
         val original = sessionArbiter.sessionSnapshot()
         if (original.accessToken == null) throw SessionExpiredException()
         return try {
-            request()
+            request(AuthRequestContext.Current)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             if (!error.isUnauthorized()) throw error
             when (val refreshed = refreshAfterUnauthorized(original.epoch)) {
-                is RefreshResult.Success -> request()
+                is RefreshResult.Success -> request(
+                    AuthRequestContext.Retry(
+                        accessToken = refreshed.accessToken,
+                        expectedEpoch = refreshed.epoch,
+                    ),
+                )
                 is RefreshResult.PasswordChangeRequired -> throw SessionExpiredException()
                 is RefreshResult.Superseded -> throw SessionChangedException()
                 is RefreshResult.Failed -> throw SessionExpiredException(refreshed.cause)

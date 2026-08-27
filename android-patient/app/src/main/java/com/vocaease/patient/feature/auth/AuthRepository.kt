@@ -11,6 +11,7 @@ import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshRemoteDataSource
 import com.vocaease.patient.core.network.RefreshResult
 import com.vocaease.patient.core.network.SessionExpiredException
+import com.vocaease.patient.core.network.SessionChangedException
 import com.vocaease.patient.core.network.SessionLifecycleArbiter
 import com.vocaease.patient.core.network.dto.AccountRole
 import com.vocaease.patient.core.network.dto.AuthSession
@@ -410,6 +411,7 @@ class AuthRepository(
     ): T = sessionArbiter.withAuthenticatedAccountLease(lease, operation)
 
     private fun Throwable.userMessage(endpoint: ApiEndpoint): String = when (this) {
+        is SessionChangedException -> "登录账号已变更，请重新操作"
         is HttpException, is IOException, is SerializationException -> when (val failure = ApiErrorMapper.map(this, endpoint)) {
             is ApiFailure.Unauthorized -> if (endpoint == ApiEndpoint.AUTH_LOGIN) "病历号或密码错误" else failure.userMessage
             else -> failure.userMessage

@@ -69,37 +69,40 @@ internal class RefreshingPatientApi(
     private val raw: VocaEaseApi,
     private val refreshCoordinator: RefreshCoordinator,
 ) : PatientApi {
-    private suspend fun <T> protectedCall(call: suspend VocaEaseApi.() -> T): T =
-        refreshCoordinator.executeAuthenticated { raw.call() }
+    private suspend fun <T> protectedCall(call: suspend VocaEaseApi.(AuthRequestContext) -> T): T =
+        refreshCoordinator.executeAuthenticated { authContext -> raw.call(authContext) }
 
-    override suspend fun patientMe() = protectedCall { patientMe() }
+    override suspend fun patientMe() = protectedCall { authContext -> patientMe(authContext) }
     override suspend fun songs(page: Int?, pageSize: Int?, keyword: String?, sort: String?) =
-        protectedCall { songs(page, pageSize, keyword, sort) }
-    override suspend fun song(songId: String) = protectedCall { song(songId) }
-    override suspend fun previewSong(songId: String) = protectedCall { previewSong(songId) }
+        protectedCall { authContext -> songs(page, pageSize, keyword, sort, authContext) }
+    override suspend fun song(songId: String) = protectedCall { authContext -> song(songId, authContext) }
+    override suspend fun previewSong(songId: String) =
+        protectedCall { authContext -> previewSong(songId, authContext) }
     override suspend fun sessions(
         page: Int?,
         pageSize: Int?,
         status: SessionStatus?,
         createdFrom: String?,
         createdTo: String?,
-    ) = protectedCall { sessions(page, pageSize, status, createdFrom, createdTo) }
+    ) = protectedCall { authContext -> sessions(page, pageSize, status, createdFrom, createdTo, authContext) }
     override suspend fun createSession(idempotencyKey: String, request: CreateSessionRequestDto) =
-        protectedCall { createSession(idempotencyKey, request) }
-    override suspend fun session(sessionId: String) = protectedCall { session(sessionId) }
+        protectedCall { authContext -> createSession(idempotencyKey, request, authContext) }
+    override suspend fun session(sessionId: String) = protectedCall { authContext -> session(sessionId, authContext) }
     override suspend fun sessionUploadGrant(
         sessionId: String,
         idempotencyKey: String?,
         request: SessionUploadGrantRequestDto,
-    ) = protectedCall { sessionUploadGrant(sessionId, idempotencyKey, request) }
+    ) = protectedCall { authContext -> sessionUploadGrant(sessionId, idempotencyKey, request, authContext) }
     override suspend fun patientMediaUploadGrant(request: PatientMediaUploadGrantRequestDto) =
-        protectedCall { patientMediaUploadGrant(request) }
+        protectedCall { authContext -> patientMediaUploadGrant(request, authContext) }
     override suspend fun confirmSessionMedia(sessionId: String, request: ConfirmSessionMediaRequestDto) =
-        protectedCall { confirmSessionMedia(sessionId, request) }
+        protectedCall { authContext -> confirmSessionMedia(sessionId, request, authContext) }
     override suspend fun submitSession(sessionId: String, idempotencyKey: String) =
-        protectedCall { submitSession(sessionId, idempotencyKey) }
-    override suspend fun cancelSession(sessionId: String) = protectedCall { cancelSession(sessionId) }
+        protectedCall { authContext -> submitSession(sessionId, idempotencyKey, authContext) }
+    override suspend fun cancelSession(sessionId: String) =
+        protectedCall { authContext -> cancelSession(sessionId, authContext) }
     override suspend fun retrySession(sessionId: String, idempotencyKey: String) =
-        protectedCall { retrySession(sessionId, idempotencyKey) }
-    override suspend fun patientMediaPrivateUrl(assetId: String) = protectedCall { patientMediaPrivateUrl(assetId) }
+        protectedCall { authContext -> retrySession(sessionId, idempotencyKey, authContext) }
+    override suspend fun patientMediaPrivateUrl(assetId: String) =
+        protectedCall { authContext -> patientMediaPrivateUrl(assetId, authContext) }
 }

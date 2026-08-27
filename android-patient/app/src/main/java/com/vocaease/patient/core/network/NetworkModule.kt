@@ -116,6 +116,7 @@ object NetworkModule {
         )
         .addInterceptor(AuthInterceptor(tokenVault))
         .addInterceptor(SafeNetworkDiagnosticInterceptor(diagnosticSink))
+        .addNetworkInterceptor(RetryRequestSingleAttemptInterceptor())
         .build()
 }
 

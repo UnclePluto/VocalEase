@@ -1,7 +1,11 @@
 package com.vocaease.patient
 
 import com.vocaease.patient.core.network.SessionExpiredException
+import com.vocaease.patient.core.network.SessionChangedException
 import com.vocaease.patient.core.network.SessionLifecycleEvent
+import com.vocaease.patient.core.network.AuthInterceptor
+import com.vocaease.patient.core.network.NetworkModule
+import com.vocaease.patient.core.network.dto.CreateSessionRequestDto
 import com.vocaease.patient.core.security.RefreshTokenLease
 import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
@@ -21,6 +25,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.Interceptor
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -83,6 +88,98 @@ class ProductionProtectedApiTest {
         assertEquals(20, expiredCalls.get())
         assertEquals(20, retriedCalls.get())
         assertEquals(1, refreshCalls.get())
+    }
+
+    @Test
+    fun `刷新CAS完成后切换患者时旧请求在线性化点终止且绝不发送新患者token`() = runBlocking {
+        val vault = ProductionTokenVault("expired-a-access", "stored-a-refresh")
+        val retryReachedAuthBoundary = CountDownLatch(1)
+        val releaseRetry = CountDownLatch(1)
+        val protectedBoundaryCalls = AtomicInteger()
+        val bSideEffects = AtomicInteger()
+        val createAuthorizations = mutableListOf<String?>()
+        val retryGate = Interceptor { chain ->
+            if (
+                chain.request().url.encodedPath == "/api/v1/patient/singing-sessions/" &&
+                protectedBoundaryCalls.incrementAndGet() == 2
+            ) {
+                retryReachedAuthBoundary.countDown()
+                check(releaseRetry.await(5, TimeUnit.SECONDS)) { "重试 gate 未获释放" }
+            }
+            chain.proceed(chain.request())
+        }
+        val client = NetworkModule.createAuthenticatedHttpClient(vault)
+            .newBuilder()
+            .apply { interceptors().add(0, retryGate) }
+            .build()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/v1/patient/singing-sessions/" -> {
+                    val authorization = request.getHeader("Authorization")
+                    synchronized(createAuthorizations) { createAuthorizations += authorization }
+                    when (authorization) {
+                        "Bearer expired-a-access" -> json(401, unauthorized())
+                        "Bearer b-access" -> {
+                            bSideEffects.incrementAndGet()
+                            json(200, fixture("fixtures/session.json"))
+                        }
+                        "Bearer refreshed-a-access" -> json(200, fixture("fixtures/session.json"))
+                        else -> json(401, unauthorized())
+                    }
+                }
+                "/api/v1/auth/refresh/" -> json(
+                    200,
+                    fixture("fixtures/refresh.json")
+                        .replace("next-access-secret", "refreshed-a-access"),
+                )
+                "/api/v1/auth/logout/" -> json(200, fixture("fixtures/empty.json"))
+                "/api/v1/auth/login/" -> json(
+                    200,
+                    fixture("fixtures/login.json")
+                        .replace("access-secret", "b-access")
+                        .replace("refresh-secret", "b-refresh"),
+                )
+                "/api/v1/patient/me/" -> json(
+                    200,
+                    fixture("fixtures/patient_me.json").replace(
+                        "11111111-1111-4111-8111-111111111111",
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    ),
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val graph = createProductionSessionGraph(
+            baseUrl = server.url("/").toString(),
+            tokenVault = vault,
+            clientOverride = client,
+        )
+
+        val oldRequest = async(Dispatchers.IO) {
+            runCatching {
+                graph.patientApi.createSession(
+                    idempotencyKey = "session-create:a-draft",
+                    request = CreateSessionRequestDto("44444444-4444-4444-8444-444444444444"),
+                )
+            }.exceptionOrNull()
+        }
+        assertTrue(
+            "刷新结果已构造，但 retry 尚未进入 AuthInterceptor 前的 gate",
+            retryReachedAuthBoundary.await(5, TimeUnit.SECONDS),
+        )
+
+        graph.authRepository.logout()
+        graph.authRepository.login("patient001", "same-login-id-password")
+        assertEquals(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            graph.authRepository.currentAuthenticatedLease()?.patientId,
+        )
+        releaseRetry.countDown()
+
+        assertTrue(oldRequest.await() is SessionChangedException)
+        assertEquals(listOf("Bearer expired-a-access"), synchronized(createAuthorizations) { createAuthorizations.toList() })
+        assertEquals(0, bSideEffects.get())
+        assertEquals("b-access", vault.sessionSnapshot().accessToken)
     }
 
     @Test

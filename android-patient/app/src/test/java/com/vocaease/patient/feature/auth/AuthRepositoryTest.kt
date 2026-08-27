@@ -9,6 +9,7 @@ import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.RefreshCoordinator
 import com.vocaease.patient.core.network.RefreshResult
+import com.vocaease.patient.core.network.SessionChangedException
 import com.vocaease.patient.core.security.RefreshTokenLease
 import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
@@ -49,6 +50,41 @@ class AuthRepositoryTest {
         repository.restoreSession()
 
         assertEquals(AuthState.LoggedOut, repository.state.value)
+    }
+
+    @Test
+    fun `登录解析patient me时会话被取代只发布安全错误而不泄漏异常`() = runBlocking {
+        val repository = repository(
+            vault = FakeTokenVault(),
+            remote = FakeAuthRemote(loginResult = session(access = "old-login-access")),
+            identity = FakePatientIdentity(failure = SessionChangedException()),
+        )
+
+        repository.login("patient-001", "password")
+
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertEquals(
+            AuthOperationState.Error("登录账号已变更，请重新操作"),
+            repository.operation.value,
+        )
+        assertNull(repository.currentAuthenticatedLease())
+    }
+
+    @Test
+    fun `恢复解析patient me时会话被取代只发布安全错误而不泄漏异常`() = runBlocking {
+        val repository = repository(
+            vault = FakeTokenVault(accessToken = "old-restore-access", refreshToken = "old-refresh"),
+            identity = FakePatientIdentity(failure = SessionChangedException()),
+        )
+
+        repository.restoreSession()
+
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertEquals(
+            AuthOperationState.Error("登录账号已变更，请重新操作"),
+            repository.operation.value,
+        )
+        assertNull(repository.currentAuthenticatedLease())
     }
 
     @Test

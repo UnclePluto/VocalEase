@@ -12,6 +12,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -84,6 +85,32 @@ class AuthInterceptorTest {
         client.newCall(request).execute().close()
 
         assertNull(server.takeRequest().getHeader("Authorization"))
+    }
+
+    @Test
+    fun `刷新重试override只允许首个物理请求且不会进入自动重定向`() {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(302)
+                .setHeader("Location", server.url("/redirected")),
+        )
+        server.enqueue(MockResponse().setResponseCode(200))
+        val client = NetworkModule.createAuthenticatedHttpClient(
+            InterceptorTokenVault("captured-a-access", 7),
+        )
+        val request = Request.Builder()
+            .url(server.url("/api/v1/patient/me/"))
+            .tag(
+                AuthRequestContext::class.java,
+                AuthRequestContext.Retry("captured-a-access", expectedEpoch = 7),
+            )
+            .build()
+
+        val failure = runCatching { client.newCall(request).execute().close() }.exceptionOrNull()
+
+        assertTrue(failure is SessionChangedException)
+        assertEquals(1, server.requestCount)
+        assertEquals("Bearer captured-a-access", server.takeRequest().getHeader("Authorization"))
     }
 }
 
