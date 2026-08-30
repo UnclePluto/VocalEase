@@ -8,6 +8,7 @@ import com.vocaease.patient.feature.training.RecordingStateMachine
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -81,13 +82,14 @@ class DefaultRecordingCoordinator(
     private val stopIssued = AtomicBoolean()
     private val closed = AtomicBoolean()
     private val publicationAllowed = AtomicBoolean(true)
+    private val terminalDurationMillis = AtomicLong()
     private val mutableState = MutableStateFlow<RecordingState>(machine.state)
     override val state: StateFlow<RecordingState> = mutableState.asStateFlow()
     override val playbackPositionMillis: Long get() = playback.currentPositionMillis.coerceAtLeast(0)
     override val recordingDurationMillis: Long
-        get() = (machine.state as? RecordingState.Recording)?.let {
+        get() = (mutableState.value as? RecordingState.Recording)?.let {
             ((clockNanos() - it.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
-        } ?: 0
+        } ?: terminalDurationMillis.get()
     private var draftId: String? = null
     private var video: File? = null
     private var audio: File? = null
@@ -152,8 +154,7 @@ class DefaultRecordingCoordinator(
             }
             is CaptureEvent.Failure -> {
                 playback.stop()
-                update(RecordingEvent.Failed(event.reason))
-                cleanupPlaintext()
+                interruptInternal(event.reason)
             }
             is CaptureEvent.Finalized -> {
                 if (!publicationAllowed.get() || machine.state !== RecordingState.Finalizing) {
@@ -171,6 +172,7 @@ class DefaultRecordingCoordinator(
                         publicationAllowed::get,
                     )
                     if (!publicationAllowed.get()) throw RecordingPublicationCancelledException()
+                    terminalDurationMillis.set(event.durationMillis.coerceAtLeast(0))
                     update(RecordingEvent.Finalized(event.durationMillis))
                 } catch (_: MediaValidationException) {
                     interruptInternal(RecordingInterruption.VALIDATION)
@@ -191,6 +193,7 @@ class DefaultRecordingCoordinator(
 
     private fun requestStop(playbackEnded: Boolean = false) {
         if (machine.state !is RecordingState.Recording && machine.state !== RecordingState.Finalizing) return
+        snapshotRecordingDuration()
         update(if (playbackEnded) RecordingEvent.PlaybackEnded else RecordingEvent.StopRequested)
         if (stopIssued.compareAndSet(false, true)) {
             playback.stop()
@@ -199,8 +202,16 @@ class DefaultRecordingCoordinator(
     }
 
     private fun interruptInternal(reason: RecordingInterruption) {
+        snapshotRecordingDuration()
         runCatching { update(RecordingEvent.Failed(reason)) }
         cleanupPlaintext()
+    }
+
+    private fun snapshotRecordingDuration() {
+        val recording = mutableState.value as? RecordingState.Recording ?: return
+        terminalDurationMillis.set(
+            ((clockNanos() - recording.startedAtNanos) / 1_000_000L).coerceAtLeast(0),
+        )
     }
 
     private fun cleanupPlaintext() {

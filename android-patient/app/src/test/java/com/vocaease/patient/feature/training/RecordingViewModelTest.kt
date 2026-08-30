@@ -3,7 +3,12 @@ package com.vocaease.patient.feature.training
 import com.vocaease.patient.core.media.RecordingCoordinator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -128,6 +133,33 @@ class RecordingViewModelTest {
         assertNull(gateway.interruption)
         assertEquals(1, coordinator.closeCount)
     }
+
+    @Test
+    fun `ticker捕获旧录制态后Finalize仍不得覆盖Reviewable导航与常亮终态`() = runBlocking {
+        val coordinator = FakeRecordingSession()
+        val viewModel = RecordingViewModel(
+            "draft-1",
+            coordinator,
+            FakeRecordingDraftGateway(),
+            {},
+            kotlinx.coroutines.Dispatchers.Default,
+        )
+        viewModel.start()
+        coordinator.emit(RecordingState.Recording(1L, 0L))
+        withTimeout(2_000) { viewModel.state.first { it.recordingState is RecordingState.Recording } }
+        coordinator.blockNextDurationRead.set(true)
+        assertTrue(coordinator.durationReadEntered.await(2, TimeUnit.SECONDS))
+
+        coordinator.emit(RecordingState.Reviewable(2_000))
+        withTimeout(2_000) { viewModel.state.first { it.recordingState is RecordingState.Reviewable } }
+        coordinator.releaseDurationRead.countDown()
+        kotlinx.coroutines.delay(300)
+
+        assertEquals(RecordingState.Reviewable(2_000), viewModel.state.value.recordingState)
+        assertEquals("draft-1", viewModel.state.value.navigateReviewDraftId)
+        assertFalse(viewModel.state.value.keepScreenOn)
+        viewModel.disposeRoute()
+    }
 }
 
 private class FakeRecordingSession : RecordingCoordinator {
@@ -136,6 +168,17 @@ private class FakeRecordingSession : RecordingCoordinator {
     var stopCount = 0
     var closeCount = 0
     val interruptions = mutableListOf<RecordingInterruption>()
+    val blockNextDurationRead = AtomicBoolean()
+    val durationReadEntered = CountDownLatch(1)
+    val releaseDurationRead = CountDownLatch(1)
+    override val recordingDurationMillis: Long
+        get() {
+            if (blockNextDurationRead.compareAndSet(true, false)) {
+                durationReadEntered.countDown()
+                check(releaseDurationRead.await(2, TimeUnit.SECONDS))
+            }
+            return 1_000L
+        }
     override suspend fun takeOver(draftId: String) = Unit
     override suspend fun onCountdownFinished() = Unit
     override suspend fun stop() { stopCount += 1 }

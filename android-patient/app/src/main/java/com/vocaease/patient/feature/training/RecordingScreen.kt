@@ -23,6 +23,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -60,7 +62,13 @@ fun RecordingScreen(
             modifier = Modifier.fillMaxWidth().height(64.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.size(48.dp).semantics {
+                    contentDescription = "关闭并取消录制"
+                    role = Role.Button
+                },
+            ) {
                 Text("×", color = Color(0xFFF2FBF6), fontSize = 26.sp)
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {

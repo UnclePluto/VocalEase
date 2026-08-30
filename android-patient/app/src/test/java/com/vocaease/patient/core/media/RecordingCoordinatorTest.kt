@@ -170,6 +170,59 @@ class RecordingCoordinatorTest {
         assertEquals(RecordingState.Interrupted(RecordingInterruption.CANCELLED), coordinator.state.value)
     }
 
+    @Test
+    fun `stop离开Recording时冻结单调时长且Finalize后保留最终时长`() = runBlocking {
+        var now = 1_000_000_000L
+        val capture = FakeCapture()
+        val coordinator = DefaultRecordingCoordinator(
+            capture, FakePlayback(), { now }, FakeTempFiles(), FakePublisher(),
+        )
+        coordinator.takeOver("draft-1")
+        coordinator.onCountdownFinished()
+        capture.emit(CaptureEvent.Started)
+        now = 1_275_000_000L
+
+        coordinator.stop()
+
+        assertEquals(275L, coordinator.recordingDurationMillis)
+        now = 9_000_000_000L
+        assertEquals(275L, coordinator.recordingDurationMillis)
+        capture.emit(CaptureEvent.Finalized(270L))
+        assertEquals(RecordingState.Reviewable(270L), coordinator.state.value)
+        assertEquals(270L, coordinator.recordingDurationMillis)
+    }
+
+    @Test
+    fun `录制开始后的错误与取消持久保留各自真实单调时长而Starting失败为零`() = runBlocking {
+        suspend fun interruptedDuration(reason: RecordingInterruption, elapsedMillis: Long): Long {
+            var now = 2_000_000_000L
+            val capture = FakeCapture()
+            val coordinator = DefaultRecordingCoordinator(
+                capture, FakePlayback(), { now }, FakeTempFiles(), FakePublisher(),
+            )
+            coordinator.takeOver("draft-1")
+            coordinator.onCountdownFinished()
+            capture.emit(CaptureEvent.Started)
+            now += elapsedMillis * 1_000_000L
+            if (reason == RecordingInterruption.CANCELLED) coordinator.interrupt(reason)
+            else capture.emit(CaptureEvent.Failure(reason))
+            return coordinator.recordingDurationMillis
+        }
+
+        assertEquals(321L, interruptedDuration(RecordingInterruption.CANCELLED, 321L))
+        assertEquals(432L, interruptedDuration(RecordingInterruption.CAMERA, 432L))
+        assertEquals(543L, interruptedDuration(RecordingInterruption.AUDIO, 543L))
+
+        val startingCapture = FakeCapture()
+        val starting = DefaultRecordingCoordinator(
+            startingCapture, FakePlayback(), { 99_000_000_000L }, FakeTempFiles(), FakePublisher(),
+        )
+        starting.takeOver("draft-1")
+        starting.onCountdownFinished()
+        startingCapture.emit(CaptureEvent.Failure(RecordingInterruption.CAMERA))
+        assertEquals(0L, starting.recordingDurationMillis)
+    }
+
     private fun coordinator(capture: FakeCapture) = DefaultRecordingCoordinator(
         capture, FakePlayback(), { 1L }, FakeTempFiles(), FakePublisher(),
     )

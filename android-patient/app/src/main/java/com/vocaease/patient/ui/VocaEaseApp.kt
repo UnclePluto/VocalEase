@@ -88,6 +88,7 @@ import com.vocaease.patient.feature.training.VocaEaseTrainingSessionCreator
 import com.vocaease.patient.feature.training.AccountScopedRecordingDraftGateway
 import com.vocaease.patient.feature.training.RecordingScreen
 import com.vocaease.patient.feature.training.RecordingViewModel
+import com.vocaease.patient.feature.training.RecordingSystemChrome
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
@@ -466,6 +467,7 @@ private fun RecordingRoute(
     val container = LocalAppContainer.current
     val context = LocalContext.current
     val activity = requireNotNull(context.findActivity()) { "演唱录制页需要 Activity 上下文" }
+    RecordingSystemChrome(activity.window)
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }

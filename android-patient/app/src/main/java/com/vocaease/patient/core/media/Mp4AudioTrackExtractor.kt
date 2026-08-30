@@ -3,18 +3,22 @@ package com.vocaease.patient.core.media
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.Locale
 import kotlin.math.abs
 
 class MediaValidationException internal constructor() : java.io.IOException("录制媒体校验失败")
 
 data class ExtractedAudioTrack(
-    val videoMimeType: String,
-    val audioMimeType: String,
+    val videoContainerMimeType: String,
+    val audioContainerMimeType: String,
+    val videoCodecMimeType: String,
+    val audioCodecMimeType: String,
     val sourceDurationUs: Long,
     val audioDurationUs: Long,
     val sampleCount: Int,
@@ -35,12 +39,17 @@ class Mp4AudioTrackExtractor {
         var muxerStarted = false
         try {
             source.setDataSource(sourceVideo.absolutePath)
+            val videoContainerMime = containerMime(sourceVideo)
+            if (videoContainerMime != VIDEO_CONTAINER_MIME) fail(outputAudio)
             val tracks = (0 until source.trackCount).map { index -> index to source.getTrackFormat(index) }
             val audioTracks = tracks.filter { (_, format) -> format.mime().startsWith("audio/") }
             val videoTracks = tracks.filter { (_, format) -> format.mime().startsWith("video/") }
             if (audioTracks.size != 1 || videoTracks.size != 1 || tracks.size != 2) fail(outputAudio)
             val (audioIndex, audioFormat) = audioTracks.single()
-            if (audioFormat.mime() != AAC_MIME) fail(outputAudio)
+            val audioCodecMime = audioFormat.mime()
+            val videoCodecMime = videoTracks.single().second.mime()
+            if (audioCodecMime != AAC_MIME) fail(outputAudio)
+            if (videoCodecMime != AVC_MIME) fail(outputAudio)
             val videoDurationUs = videoTracks.single().second.requiredDurationUs()
             val audioDurationUs = audioFormat.requiredDurationUs()
             if (videoDurationUs <= 0 || audioDurationUs <= 0 ||
@@ -94,12 +103,16 @@ class Mp4AudioTrackExtractor {
             muxer = null
             securePlaintext(outputAudio)
             val output = inspectAudioOnly(outputAudio)
+            val audioContainerMime = containerMime(outputAudio)
+            if (audioContainerMime != AUDIO_CONTAINER_MIME) fail(outputAudio)
             if (abs(videoDurationUs - output.durationUs) > DURATION_TOLERANCE_US) fail(outputAudio)
             if (output.sampleCount != sampleCount) fail(outputAudio)
             if (outputAudio.length() <= 0) fail(outputAudio)
             return ExtractedAudioTrack(
-                videoMimeType = "video/mp4",
-                audioMimeType = "audio/mp4",
+                videoContainerMimeType = videoContainerMime,
+                audioContainerMimeType = audioContainerMime,
+                videoCodecMimeType = videoCodecMime,
+                audioCodecMimeType = audioCodecMime,
                 sourceDurationUs = videoDurationUs,
                 audioDurationUs = output.durationUs,
                 sampleCount = sampleCount,
@@ -134,6 +147,9 @@ class Mp4AudioTrackExtractor {
     }
 
     private fun MediaFormat.mime(): String = getString(MediaFormat.KEY_MIME).orEmpty()
+        .substringBefore(';')
+        .trim()
+        .lowercase(Locale.ROOT)
     private fun MediaFormat.requiredDurationUs(): Long =
         if (containsKey(MediaFormat.KEY_DURATION)) getLong(MediaFormat.KEY_DURATION) else -1L
     private fun MediaFormat.maxInputSize(): Int =
@@ -175,6 +191,19 @@ class Mp4AudioTrackExtractor {
         Os.chmod(file.absolutePath, OsConstants.S_IRUSR or OsConstants.S_IWUSR)
     }
 
+    private fun containerMime(file: File): String {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE).orEmpty()
+                .substringBefore(';')
+                .trim()
+                .lowercase(Locale.ROOT)
+        } finally {
+            retriever.release()
+        }
+    }
+
     private data class AudioInfo(val durationUs: Long, val sampleCount: Int)
 
     private companion object {
@@ -182,6 +211,9 @@ class Mp4AudioTrackExtractor {
         const val MIN_BUFFER_BYTES = 64 * 1024
         const val MAX_BUFFER_BYTES = 4 * 1024 * 1024
         const val AAC_MIME = "audio/mp4a-latm"
+        const val AVC_MIME = "video/avc"
+        const val VIDEO_CONTAINER_MIME = "video/mp4"
+        const val AUDIO_CONTAINER_MIME = "audio/mp4"
     }
 }
 

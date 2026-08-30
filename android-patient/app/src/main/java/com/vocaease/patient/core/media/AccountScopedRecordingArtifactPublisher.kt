@@ -16,7 +16,12 @@ class AccountScopedRecordingArtifactPublisher(
     ) {
         if (!publicationActive()) throw RecordingPublicationCancelledException()
         val extracted = extractor.extract(video, audio, durationMillis)
-        if (extracted.videoMimeType != "video/mp4" || extracted.audioMimeType != "audio/mp4") {
+        if (
+            extracted.videoContainerMimeType != "video/mp4" ||
+            extracted.audioContainerMimeType != "audio/mp4" ||
+            extracted.videoCodecMimeType != "video/avc" ||
+            extracted.audioCodecMimeType != "audio/mp4a-latm"
+        ) {
             throw MediaValidationException()
         }
         if (!publicationActive()) throw RecordingPublicationCancelledException()

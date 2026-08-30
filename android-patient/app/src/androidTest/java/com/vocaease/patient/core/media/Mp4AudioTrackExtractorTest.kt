@@ -29,8 +29,10 @@ class Mp4AudioTrackExtractorTest {
         val sourceFlags = audioSampleFlags(source)
         val outputFlags = audioSampleFlags(output)
 
-        assertEquals("video/mp4", result.videoMimeType)
-        assertEquals("audio/mp4", result.audioMimeType)
+        assertEquals("video/mp4", result.videoContainerMimeType)
+        assertEquals("audio/mp4", result.audioContainerMimeType)
+        assertEquals("video/avc", result.videoCodecMimeType)
+        assertEquals("audio/mp4a-latm", result.audioCodecMimeType)
         assertEquals(1, outputTracks.size)
         assertEquals("audio/mp4a-latm", outputTracks.single().mime)
         assertTrue(kotlin.math.abs(sourceVideo.durationUs - outputTracks.single().durationUs) <= 50_000)
@@ -84,7 +86,7 @@ class Mp4AudioTrackExtractorTest {
 
         val result = Mp4AudioTrackExtractor().extract(source, output)
 
-        assertEquals("audio/mp4", result.audioMimeType)
+        assertEquals("audio/mp4", result.audioContainerMimeType)
         assertTrue(output.length() > 0)
         assertEquals(OsConstants.S_IRUSR or OsConstants.S_IWUSR, Os.stat(output.absolutePath).st_mode and 0x1ff)
         output.delete()
@@ -98,6 +100,19 @@ class Mp4AudioTrackExtractorTest {
 
         assertThrows(MediaValidationException::class.java) {
             Mp4AudioTrackExtractor().extract(source, output, Long.MAX_VALUE)
+        }
+
+        assertTrue(!output.exists())
+        source.delete()
+    }
+
+    @Test
+    fun HEVC加AAC即使容器与时长可读也必须在发布前拒绝() {
+        val source = asset("sample_hevc_aac.mp4")
+        val output = File(context.cacheDir, "hevc-output-${System.nanoTime()}.recording")
+
+        assertThrows(MediaValidationException::class.java) {
+            Mp4AudioTrackExtractor().extract(source, output)
         }
 
         assertTrue(!output.exists())

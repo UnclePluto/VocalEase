@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -89,10 +90,10 @@ class RecordingViewModel(
         if (left.get() || mutableState.value.songTitle.isNotEmpty()) return@withLock
         try {
             val info = gateway.load(draftId)
-            mutableState.value = mutableState.value.copy(
+            updateState { it.copy(
                 songTitle = info.songTitle,
                 totalDurationMillis = info.totalDurationMillis,
-            )
+            ) }
             coordinator.takeOver(draftId)
             for (second in 3 downTo 1) countdownTick(second)
             coordinator.onCountdownFinished()
@@ -135,7 +136,7 @@ class RecordingViewModel(
     }
 
     fun consumeReviewNavigation() {
-        mutableState.value = mutableState.value.copy(navigateReviewDraftId = null)
+        updateState { it.copy(navigateReviewDraftId = null) }
     }
 
     override fun onCleared() {
@@ -160,13 +161,15 @@ class RecordingViewModel(
     }
 
     private suspend fun onRecordingState(recordingState: RecordingState) {
-        mutableState.value = mutableState.value.copy(
-            recordingState = recordingState,
-            keepScreenOn = recordingState === RecordingState.Starting ||
-                recordingState is RecordingState.Recording || recordingState === RecordingState.Finalizing,
-            recordingDurationMillis = coordinator.recordingDurationMillis,
-            playbackPositionMillis = coordinator.playbackPositionMillis,
-        )
+        updateState {
+            it.copy(
+                recordingState = recordingState,
+                keepScreenOn = recordingState === RecordingState.Starting ||
+                    recordingState is RecordingState.Recording || recordingState === RecordingState.Finalizing,
+                recordingDurationMillis = coordinator.recordingDurationMillis,
+                playbackPositionMillis = coordinator.playbackPositionMillis,
+            )
+        }
         when (recordingState) {
             is RecordingState.Recording -> {
                 if (acknowledged.compareAndSet(false, true)) {
@@ -182,34 +185,44 @@ class RecordingViewModel(
                         return
                     }
                 }
-                startTicker()
+                startTicker(recordingState)
             }
             is RecordingState.Reviewable -> {
                 ticker?.cancel()
-                mutableState.value = mutableState.value.copy(
-                    recordingDurationMillis = recordingState.durationMillis,
-                    navigateReviewDraftId = draftId,
-                )
+                updateState {
+                    it.copy(
+                        recordingDurationMillis = recordingState.durationMillis,
+                        navigateReviewDraftId = draftId,
+                    )
+                }
             }
             is RecordingState.Interrupted -> {
                 ticker?.cancel()
                 runCatching {
                     gateway.markInterrupted(draftId, recordingState.reason, coordinator.recordingDurationMillis)
                 }
-                mutableState.value = mutableState.value.copy(errorMessage = recordingState.reason.patientMessage())
+                updateState { it.copy(errorMessage = recordingState.reason.patientMessage()) }
             }
             else -> Unit
         }
     }
 
-    private fun startTicker() {
+    private fun startTicker(generation: RecordingState.Recording) {
         if (ticker?.isActive == true) return
         ticker = scope.launch {
             while (coordinator.state.value is RecordingState.Recording) {
-                mutableState.value = mutableState.value.copy(
-                    recordingDurationMillis = coordinator.recordingDurationMillis,
-                    playbackPositionMillis = coordinator.playbackPositionMillis,
-                )
+                val duration = coordinator.recordingDurationMillis
+                val playbackPosition = coordinator.playbackPositionMillis
+                updateState { current ->
+                    if (current.recordingState == generation && coordinator.state.value == generation) {
+                        current.copy(
+                            recordingDurationMillis = duration,
+                            playbackPositionMillis = playbackPosition,
+                        )
+                    } else {
+                        current
+                    }
+                }
                 delay(200)
             }
         }
@@ -217,11 +230,17 @@ class RecordingViewModel(
 
     private suspend fun interruptLocally(reason: RecordingInterruption) {
         runCatching { gateway.markInterrupted(draftId, reason, coordinator.recordingDurationMillis) }
-        mutableState.value = mutableState.value.copy(
-            recordingState = RecordingState.Interrupted(reason),
-            keepScreenOn = false,
-            errorMessage = reason.patientMessage(),
-        )
+        updateState {
+            it.copy(
+                recordingState = RecordingState.Interrupted(reason),
+                keepScreenOn = false,
+                errorMessage = reason.patientMessage(),
+            )
+        }
+    }
+
+    private inline fun updateState(transform: (RecordingUiState) -> RecordingUiState) {
+        mutableState.update(transform)
     }
 }
 
