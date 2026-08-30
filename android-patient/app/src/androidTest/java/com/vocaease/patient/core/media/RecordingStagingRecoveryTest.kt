@@ -47,6 +47,8 @@ class RecordingStagingRecoveryTest {
     @After
     fun tearDown() {
         database.close()
+        runCatching { fileStore.destroyAccountEncryption(PATIENT_A) }
+        runCatching { fileStore.destroyAccountEncryption(PATIENT_B) }
         File(context.filesDir, "recordings/plaintext").deleteRecursively()
         encryptedRoot.deleteRecursively()
     }
@@ -137,6 +139,100 @@ class RecordingStagingRecoveryTest {
         assertEquals(DraftState.RECORDING, provider.current().findDraft("switch")?.state)
     }
 
+    @Test
+    fun 无效媒体标记中断的数据库失败必须保留sidecar并报告可重试() = runBlocking {
+        sessions.authenticate(PATIENT_A)
+        val storage = provider.current()
+        insertDraft(storage, "db-first")
+        val video = staging.createVideo(identity(storage, "db-first")).apply { writeText("not-mp4") }
+        val metadata = staging.listRecoverable(storage.accountScopeHash).single().metadata
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_recovery_state BEFORE UPDATE OF state ON drafts " +
+                "WHEN NEW.draft_id='db-first' AND NEW.state='INTERRUPTED' " +
+                "BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END",
+        )
+
+        val failed = RecordingStagingRecovery(staging, nowMillis = { NOW }).recover(storage)
+
+        assertEquals(1, failed.retryableFailures)
+        assertEquals(0, failed.discarded)
+        assertEquals(DraftState.RECORDING, storage.findDraft("db-first")?.state)
+        assertTrue(video.exists())
+        assertTrue(metadata.exists())
+
+        database.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_recovery_state")
+        val retried = RecordingStagingRecovery(staging, nowMillis = { NOW }).recover(storage)
+        assertEquals(1, retried.discarded)
+        assertEquals(DraftState.INTERRUPTED, storage.findDraft("db-first")?.state)
+        assertFalse(video.exists())
+        assertFalse(metadata.exists())
+    }
+
+    @Test
+    fun 绑定失效与过期标记中断的数据库失败也必须先保留恢复文件() = runBlocking {
+        sessions.authenticate(PATIENT_A)
+        val storage = provider.current()
+        insertDraft(storage, "binding-db-first")
+        insertDraft(storage, "expired-db-first")
+        val bindingFiles = PrivateRecordingTempFiles(context, nowMillis = { NOW })
+        val bindingVideo = bindingFiles.createVideo(
+            identity(storage, "binding-db-first").copy(sessionId = "wrong-session"),
+        ).also { copyAsset("sample_avc_aac.mp4", it) }
+        val expiredFiles = PrivateRecordingTempFiles(context, nowMillis = { 0L })
+        val expiredVideo = expiredFiles.createVideo(identity(storage, "expired-db-first"))
+            .also { copyAsset("sample_avc_aac.mp4", it) }
+        val metadata = File(plaintextRoot(), bindingVideo.nameWithoutExtension + ".recovery") to
+            File(plaintextRoot(), expiredVideo.nameWithoutExtension + ".recovery")
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_binding_expired_recovery BEFORE UPDATE OF state ON drafts " +
+                "WHEN NEW.draft_id IN ('binding-db-first','expired-db-first') AND NEW.state='INTERRUPTED' " +
+                "BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END",
+        )
+
+        val failed = RecordingStagingRecovery(staging, nowMillis = { NOW }).recover(storage)
+
+        assertEquals(2, failed.retryableFailures)
+        assertEquals(0, failed.discarded)
+        listOf(bindingVideo, expiredVideo, metadata.first, metadata.second).forEach { assertTrue(it.exists()) }
+        assertEquals(DraftState.RECORDING, storage.findDraft("binding-db-first")?.state)
+        assertEquals(DraftState.RECORDING, storage.findDraft("expired-db-first")?.state)
+
+        database.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_binding_expired_recovery")
+        val retried = RecordingStagingRecovery(staging, nowMillis = { NOW }).recover(storage)
+        assertEquals(2, retried.discarded)
+        listOf(bindingVideo, expiredVideo, metadata.first, metadata.second).forEach { assertFalse(it.exists()) }
+        assertEquals(DraftState.INTERRUPTED, storage.findDraft("binding-db-first")?.state)
+        assertEquals(DraftState.INTERRUPTED, storage.findDraft("expired-db-first")?.state)
+    }
+
+    @Test
+    fun 恢复窗口精确区分24小时减一毫秒等于24小时超一毫秒与未来时间() = runBlocking {
+        sessions.authenticate(PATIENT_A)
+        val storage = provider.current()
+        val maxAge = 24L * 60L * 60L * 1_000L
+        listOf(
+            "inside" to (NOW - maxAge + 1L),
+            "exact" to (NOW - maxAge),
+            "expired" to (NOW - maxAge - 1L),
+            "future" to (NOW + 1L),
+        ).forEach { (id, createdAt) ->
+            insertDraft(storage, id)
+            PrivateRecordingTempFiles(context, nowMillis = { createdAt })
+                .createVideo(identity(storage, id))
+                .also { copyAsset("sample_avc_aac.mp4", it) }
+        }
+
+        val result = RecordingStagingRecovery(staging, nowMillis = { NOW }).recover(storage)
+
+        assertEquals(1, result.recovered)
+        assertEquals(3, result.discarded)
+        assertEquals(2, storage.loadReviewDraft("inside").media.size)
+        listOf("exact", "expired", "future").forEach { id ->
+            assertEquals(DraftState.INTERRUPTED, storage.findDraft(id)?.state)
+            assertTrue(storage.loadReviewDraft(id).media.isEmpty())
+        }
+    }
+
     private suspend fun insertDraft(storage: AccountScopedDraftStorage, id: String) = storage.insertDraft(
         id, "song", "session-$id", "create-$id", DraftState.RECORDING, 0, 0,
         DraftEntity.MAX_RETENTION_MILLIS, null,
@@ -151,6 +247,8 @@ class RecordingStagingRecoveryTest {
             target.outputStream().use(input::copyTo)
         }
     }
+
+    private fun plaintextRoot() = File(context.filesDir, "recordings/plaintext")
 
     private companion object {
         const val PATIENT_A = "123e4567-e89b-12d3-a456-426614174000"

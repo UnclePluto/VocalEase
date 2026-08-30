@@ -189,13 +189,18 @@ private fun MediaChoice(
 ) {
     val selected = state.selectedMedia == kind
     Box(
-        modifier = modifier.fillMaxSize().padding(4.dp).clip(RoundedCornerShape(12.dp))
-            .background(if (selected) Color(0xFFDDF3E7) else Color.Transparent)
+        modifier = modifier.fillMaxSize()
             .clickable(enabled = state.canPlayback && !state.busy, role = Role.Tab) { onSwitchMedia(kind) }
             .semantics { contentDescription = "切换到$label" },
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = if (selected) BrandGreen else TextSecondary, fontSize = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+        Box(
+            modifier = Modifier.fillMaxSize().padding(4.dp).clip(RoundedCornerShape(12.dp))
+                .background(if (selected) Color(0xFFDDF3E7) else Color.Transparent),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(label, color = if (selected) BrandGreen else TextSecondary, fontSize = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+        }
     }
 }
 

@@ -83,6 +83,40 @@ class RecordingCoordinatorTest {
     }
 
     @Test
+    fun `宿主停止或音频焦点丢失会尝试发布可解析中断录制而明确取消仍销毁`() = runBlocking {
+        for (reason in listOf(RecordingInterruption.CAMERA, RecordingInterruption.AUDIO)) {
+            val capture = FakeCapture()
+            val files = FakeTempFiles()
+            val publisher = FakePublisher()
+            val coordinator = DefaultRecordingCoordinator(capture, FakePlayback(), { 1L }, files, publisher)
+            coordinator.takeOver("draft-$reason")
+            coordinator.onCountdownFinished()
+            capture.emit(CaptureEvent.Started)
+
+            coordinator.interrupt(reason)
+            capture.emit(CaptureEvent.Finalized(1_000))
+
+            assertEquals(RecordingState.Reviewable(1_000), coordinator.state.value)
+            assertEquals(listOf(reason), publisher.interruptions)
+        }
+
+        val cancelledCapture = FakeCapture()
+        val cancelledFiles = FakeTempFiles()
+        val cancelledPublisher = FakePublisher()
+        val cancelled = DefaultRecordingCoordinator(
+            cancelledCapture, FakePlayback(), { 1L }, cancelledFiles, cancelledPublisher,
+        )
+        cancelled.takeOver("cancelled")
+        cancelled.onCountdownFinished()
+        cancelledCapture.emit(CaptureEvent.Started)
+        cancelled.interrupt(RecordingInterruption.CANCELLED)
+        cancelledCapture.emit(CaptureEvent.Finalized(1_000))
+        assertEquals(RecordingState.Interrupted(RecordingInterruption.CANCELLED), cancelled.state.value)
+        assertEquals(0, cancelledPublisher.calls)
+        assertTrue(cancelledFiles.cleaned)
+    }
+
+    @Test
     fun `CameraX启动异常立即中断并清除已创建明文`() = runBlocking {
         val capture = FakeCapture().apply { startFailure = IllegalStateException("camera unavailable") }
         val files = FakeTempFiles()
@@ -162,6 +196,7 @@ class RecordingCoordinatorTest {
                 audio: File,
                 durationMillis: Long,
                 publicationActive: () -> Boolean,
+                interruption: RecordingInterruption?,
             ) {
                 publishEntered.complete(Unit)
                 continuePublish.await()
@@ -282,14 +317,17 @@ private class FakeTempFiles : RecordingTempFiles {
 
 private class FakePublisher(private val error: Exception? = null) : RecordingArtifactPublisher {
     var calls = 0
+    val interruptions = mutableListOf<RecordingInterruption?>()
     override suspend fun publish(
         draftId: String,
         video: File,
         audio: File,
         durationMillis: Long,
         publicationActive: () -> Boolean,
+        interruption: RecordingInterruption?,
     ) {
         calls += 1
+        interruptions += interruption
         error?.let { throw it }
     }
 }

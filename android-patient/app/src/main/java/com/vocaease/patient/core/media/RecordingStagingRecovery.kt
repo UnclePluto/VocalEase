@@ -38,11 +38,17 @@ class RecordingStagingRecovery internal constructor(
                 draft.creationKey == entry.identity.creationKey
             if (!identityMatches) {
                 if (!storage.isLeaseActive()) break
-                files.cleanup(entry)
-                if (draft.state == DraftState.RECORDING) {
-                    runCatching { storage.markRecordingInterrupted(draft.draftId, 0, BINDING_INVALID_REASON) }
+                try {
+                    if (draft.state == DraftState.RECORDING) {
+                        storage.markRecordingInterrupted(draft.draftId, 0, BINDING_INVALID_REASON)
+                    }
+                    files.cleanup(entry)
+                    discarded += 1
+                } catch (_: StaleAccountScopeException) {
+                    break
+                } catch (_: Exception) {
+                    retryable += 1
                 }
-                discarded += 1
                 continue
             }
             if (draft.state != DraftState.RECORDING) {
@@ -51,11 +57,20 @@ class RecordingStagingRecovery internal constructor(
                 discarded += 1
                 continue
             }
-            if (entry.createdAtMillis < 0 || nowMillis() - entry.createdAtMillis > MAX_RECOVERY_AGE_MILLIS) {
+            val now = nowMillis()
+            val recoverableAge = entry.createdAtMillis in 0..now &&
+                now - entry.createdAtMillis < MAX_RECOVERY_AGE_MILLIS
+            if (!recoverableAge) {
                 if (!storage.isLeaseActive()) break
-                files.cleanup(entry)
-                runCatching { storage.markRecordingInterrupted(draft.draftId, 0, EXPIRED_REASON) }
-                discarded += 1
+                try {
+                    storage.markRecordingInterrupted(draft.draftId, 0, EXPIRED_REASON)
+                    files.cleanup(entry)
+                    discarded += 1
+                } catch (_: StaleAccountScopeException) {
+                    break
+                } catch (_: Exception) {
+                    retryable += 1
+                }
                 continue
             }
 
@@ -80,10 +95,18 @@ class RecordingStagingRecovery internal constructor(
                     files.cleanup(audio)
                     break
                 }
-                files.cleanup(entry)
-                files.cleanup(audio)
-                runCatching { storage.markRecordingInterrupted(draft.draftId, 0, INVALID_MEDIA_REASON) }
-                discarded += 1
+                try {
+                    storage.markRecordingInterrupted(draft.draftId, 0, INVALID_MEDIA_REASON)
+                    files.cleanup(entry)
+                    files.cleanup(audio)
+                    discarded += 1
+                } catch (_: StaleAccountScopeException) {
+                    files.cleanup(audio)
+                    break
+                } catch (_: Exception) {
+                    files.cleanup(audio)
+                    retryable += 1
+                }
             } catch (_: Exception) {
                 // 加密/Room/lease故障由发布仓储回滚新密文；保留原视频+sidecar供重试。
                 files.cleanup(audio)

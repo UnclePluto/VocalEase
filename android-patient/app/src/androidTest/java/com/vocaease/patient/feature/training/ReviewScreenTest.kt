@@ -59,6 +59,10 @@ class ReviewScreenTest {
             .assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
         composeRule.onNodeWithContentDescription("播放录制")
             .assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
+        listOf("切换到视频", "切换到仅听音频").forEach { description ->
+            composeRule.onNodeWithContentDescription(description)
+                .assertWidthIsAtLeast(48.dp).assertHeightIsAtLeast(48.dp)
+        }
     }
 
     @Test

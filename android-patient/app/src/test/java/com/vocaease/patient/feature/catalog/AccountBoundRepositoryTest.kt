@@ -1,6 +1,7 @@
 package com.vocaease.patient.feature.catalog
 
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
+import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
 import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import java.util.UUID
@@ -242,9 +243,12 @@ internal class TestAuthenticatedAccountSession : AuthenticatedAccountSession {
 
     override fun current(): AuthenticatedAccountLease? = lease
 
-    override fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) {
+    override fun addLeaseChangedListener(
+        listener: (AuthenticatedAccountLease?) -> Unit,
+    ): AccountLeaseListenerRegistration {
         listeners += listener
         listener(lease)
+        return AccountLeaseListenerRegistration { listeners.remove(listener) }
     }
 
     override suspend fun <T> withCurrentLease(

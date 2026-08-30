@@ -26,6 +26,7 @@ import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.TokenVault
 import com.vocaease.patient.core.security.VaultInvalidatedException
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
+import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.ProviderException
@@ -405,7 +406,9 @@ class AuthRepository(
     internal fun isCurrentAuthenticatedLease(lease: AuthenticatedAccountLease): Boolean =
         sessionArbiter.currentAuthenticatedAccountLease() === lease
 
-    internal fun addAuthenticatedLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) =
+    internal fun addAuthenticatedLeaseChangedListener(
+        listener: (AuthenticatedAccountLease?) -> Unit,
+    ): AccountLeaseListenerRegistration =
         sessionArbiter.addAuthenticatedAccountLeaseListener(listener)
 
     internal suspend fun <T> withAuthenticatedLease(

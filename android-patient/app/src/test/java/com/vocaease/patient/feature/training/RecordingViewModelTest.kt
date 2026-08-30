@@ -87,6 +87,24 @@ class RecordingViewModelTest {
     }
 
     @Test
+    fun `宿主停止与音频焦点丢失交给可恢复中断而非显式取消`() = runBlocking {
+        val coordinator = FakeRecordingSession()
+        val viewModel = RecordingViewModel(
+            "draft-1", coordinator, FakeRecordingDraftGateway(), {}, kotlinx.coroutines.Dispatchers.Unconfined,
+        )
+        viewModel.start()
+
+        viewModel.onHostStopped()
+        viewModel.onAudioFocusLost()
+
+        assertEquals(
+            listOf(RecordingInterruption.CAMERA, RecordingInterruption.AUDIO),
+            coordinator.interruptions,
+        )
+        assertFalse(coordinator.interruptions.contains(RecordingInterruption.CANCELLED))
+    }
+
+    @Test
     fun `handoff确认失败主动中断并阻止迟到Finalize发布`() = runBlocking {
         val coordinator = FakeRecordingSession()
         val gateway = FakeRecordingDraftGateway().apply { ackFailure = true }

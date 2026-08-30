@@ -308,6 +308,122 @@ class AuthenticatedDraftStorageTest {
     }
 
     @Test
+    fun 重录A只撤销A的双媒体reader而B继续可读() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "reader-a")
+        insertDraft(storage, "reader-b")
+        storage.publishRecordingMedia(
+            "reader-a", plainFile("reader-a-video", 257), plainFile("reader-a-audio", 129), 2_000,
+        )
+        storage.publishRecordingMedia(
+            "reader-b", plainFile("reader-b-video", 257), plainFile("reader-b-audio", 129), 2_000,
+        )
+        val mediaA = database.mediaDao().findAll(PATIENT_A_UUID, "reader-a")
+        val mediaB = database.mediaDao().findAll(PATIENT_A_UUID, "reader-b")
+        val readersA = mediaA.map { media ->
+            storage.encryptedMediaDataSource(media.encryptedRelativePath).also { source ->
+                source.open(androidx.media3.datasource.DataSpec(android.net.Uri.parse("vocaease://review/a/${media.type}")))
+            }
+        }
+        val readersB = mediaB.map { media ->
+            storage.encryptedMediaDataSource(media.encryptedRelativePath).also { source ->
+                source.open(androidx.media3.datasource.DataSpec(android.net.Uri.parse("vocaease://review/b/${media.type}")))
+            }
+        }
+
+        storage.prepareRerecord("reader-a")
+
+        readersA.forEach { source ->
+            assertThrows(Exception::class.java) { source.read(ByteArray(1), 0, 1) }
+            source.close()
+        }
+        readersB.forEach { source ->
+            assertEquals(1, source.read(ByteArray(1), 0, 1))
+            source.close()
+        }
+        assertTrue(mediaB.all { fileStore.encryptedMediaExists(PATIENT_A_UUID, it.encryptedRelativePath) })
+        Unit
+    }
+
+    @Test
+    fun 完整准备交接后的正常与中断草稿都可安全重录且非法SQL转换仍被拒绝() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+
+        suspend fun exercise(draftId: String, songId: String, interrupted: Boolean) {
+            val creationKey = "session-create:${storage.accountScopeHash}:$draftId"
+            val sessionId = "session-$draftId"
+            storage.insertPreparationDraft(
+                PreparationDraftSnapshot(
+                    accountScopeHash = storage.accountScopeHash,
+                    draftId = draftId,
+                    songId = songId,
+                    songTitle = "练习歌曲",
+                    songArtist = "本地歌手",
+                    songDurationSeconds = 120,
+                    serverSessionId = null,
+                    creationKey = creationKey,
+                    status = PreparationDraftStatus.PENDING,
+                    activeSongId = songId,
+                    createdAt = 0,
+                    expiresAt = DraftEntity.MAX_RETENTION_MILLIS,
+                ),
+            )
+            storage.bindPreparationSession(
+                draftId, PATIENT_A_UUID, sessionId, songId, "练习歌曲", "本地歌手", 120,
+            )
+            storage.markPreparationHandoffPending(draftId, sessionId) {}
+            assertTrue(storage.acknowledgePreparationHandoff(draftId))
+            val video = plainFile("$draftId-video", 257)
+            val audio = plainFile("$draftId-audio", 129)
+            if (interrupted) {
+                storage.publishInterruptedRecordingMedia(
+                    draftId, video, audio, 2_000, "录制被系统中断",
+                )
+            } else {
+                storage.publishRecordingMedia(draftId, video, audio, 2_000)
+            }
+            val before = requireNotNull(storage.findDraft(draftId))
+            val oldMedia = database.mediaDao().findAll(PATIENT_A_UUID, draftId)
+            val oldReaders = oldMedia.associateWith { media ->
+                storage.encryptedMediaDataSource(media.encryptedRelativePath).also { source ->
+                    source.open(androidx.media3.datasource.DataSpec(android.net.Uri.parse("vocaease://review/$draftId/${media.type}")))
+                }
+            }
+
+            val reset = storage.prepareRerecord(draftId)
+
+            assertEquals(DraftState.RECORDING, reset.state)
+            assertEquals(before.draftId, reset.draftId)
+            assertEquals(before.songId, reset.songId)
+            assertEquals(before.sessionId, reset.sessionId)
+            assertEquals(before.creationKey, reset.creationKey)
+            val preparation = requireNotNull(storage.findPreparationDraft(draftId))
+            assertEquals(PreparationDraftStatus.BOUND, preparation.status)
+            assertEquals(songId, preparation.activeSongId)
+            assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, draftId).isEmpty())
+            oldReaders.forEach { (media, source) ->
+                assertThrows(Exception::class.java) { source.read(ByteArray(1), 0, 1) }
+                source.close()
+                assertFalse(fileStore.encryptedMediaExists(PATIENT_A_UUID, media.encryptedRelativePath))
+            }
+        }
+
+        exercise("chain-review", "song-review", interrupted = false)
+        exercise("chain-interrupted", "song-interrupted", interrupted = true)
+
+        assertThrows(android.database.sqlite.SQLiteConstraintException::class.java) {
+            database.openHelper.writableDatabase.execSQL(
+                "UPDATE preparation_drafts SET status='PENDING', server_session_id=NULL " +
+                    "WHERE account_scope=? AND draft_id='chain-review'",
+                arrayOf(PATIENT_A_UUID),
+            )
+        }
+        Unit
+    }
+
+    @Test
     fun 重录第二个密文删除失败时全部reader先撤销且可幂等重试() = runBlocking {
         sessions.authenticate(PATIENT_A_UUID)
         var deletes = 0

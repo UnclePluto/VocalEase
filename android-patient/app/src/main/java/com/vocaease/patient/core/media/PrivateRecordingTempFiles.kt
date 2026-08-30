@@ -118,15 +118,23 @@ class PrivateRecordingTempFiles internal constructor(
      */
     fun cleanupOrphans() {
         ensureDirectory()
-        val threshold = nowMillis() - orphanMaxAgeMillis
+        val now = nowMillis()
+        directory.listFiles().orEmpty()
+            .filter { it.isFile && METADATA_NAME.matches(it.name) && isOlderThan(it.lastModified(), now) }
+            .filter { readMetadata(it) == null }
+            .forEach { metadata ->
+                val base = metadata.name.removeSuffix(METADATA_SUFFIX)
+                metadata.delete()
+                File(directory, "$base$RECORDING_SUFFIX").delete()
+            }
         directory.listFiles().orEmpty().forEach { file ->
             if (!file.isFile || !file.name.endsWith(RECORDING_SUFFIX)) return@forEach
             val base = file.name.removeSuffix(RECORDING_SUFFIX)
             val paired = File(directory, "$base$METADATA_SUFFIX").isFile
-            if (!paired && (orphanMaxAgeMillis == 0L || file.lastModified() <= threshold)) file.delete()
+            if (!paired && isOlderThan(file.lastModified(), now)) file.delete()
         }
         directory.listFiles().orEmpty()
-            .filter { it.isFile && it.name.endsWith(PENDING_SUFFIX) && it.lastModified() <= threshold }
+            .filter { it.isFile && it.name.endsWith(PENDING_SUFFIX) && isOlderThan(it.lastModified(), now) }
             .forEach(File::delete)
     }
 
@@ -148,13 +156,10 @@ class PrivateRecordingTempFiles internal constructor(
             if (!isDirectChild(video) || !video.isFile) throw IOException("录制文件不存在")
             RecoverableRecording(identity, video, metadata, createdAtMillis)
         }
-    } catch (_: Exception) {
-        // 文件名由严格正则限定，因此只清理同 basename 的文件，绝不采用元数据内路径。
-        val base = metadata.name.removeSuffix(METADATA_SUFFIX)
-        File(directory, "$base$RECORDING_SUFFIX").delete()
-        metadata.delete()
-        null
-    }
+    } catch (_: Exception) { null }
+
+    private fun isOlderThan(lastModified: Long, now: Long): Boolean =
+        lastModified in 0..now && now - lastModified > orphanMaxAgeMillis
 
     private fun create(prefix: String): File = createExact("$prefix${randomHex(16)}$RECORDING_SUFFIX")
 

@@ -191,6 +191,10 @@ CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_update_v2 BEFORE UPDATE ON
         AND NEW.server_session_id IS OLD.server_session_id AND NEW.active_song_id IS NULL
         AND NEW.song_title = OLD.song_title AND NEW.song_artist = OLD.song_artist
         AND NEW.song_duration_seconds = OLD.song_duration_seconds)
+      OR (OLD.status = 'HANDED_OFF' AND NEW.status = 'BOUND'
+        AND NEW.server_session_id IS OLD.server_session_id AND NEW.active_song_id = OLD.song_id
+        AND NEW.song_title = OLD.song_title AND NEW.song_artist = OLD.song_artist
+        AND NEW.song_duration_seconds = OLD.song_duration_seconds)
       OR (OLD.status IN ('PENDING','BOUND','HANDOFF_PENDING') AND NEW.status = 'ABANDONED'
         AND NEW.server_session_id IS OLD.server_session_id AND NEW.active_song_id IS NULL
         AND NEW.song_title = OLD.song_title AND NEW.song_artist = OLD.song_artist

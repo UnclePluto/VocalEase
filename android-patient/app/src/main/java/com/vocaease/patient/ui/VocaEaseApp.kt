@@ -73,12 +73,14 @@ import com.vocaease.patient.feature.profile.ProfileScreen
 import com.vocaease.patient.feature.profile.ProfileViewModel
 import com.vocaease.patient.core.media.PreviewPlayer
 import com.vocaease.patient.core.media.AccountScopedRecordingArtifactPublisher
+import com.vocaease.patient.core.media.AndroidRecordingAudioFocus
 import com.vocaease.patient.core.media.CameraXRecordingCapture
 import com.vocaease.patient.core.media.DefaultRecordingCoordinator
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingPlayback
 import com.vocaease.patient.core.media.LinearizedReviewPlayer
 import com.vocaease.patient.core.media.Media3ReviewPlayerEngine
+import com.vocaease.patient.core.media.RecordingEnvironmentInterruptionCoordinator
 import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
 import com.vocaease.patient.feature.training.AndroidReadinessSource
 import com.vocaease.patient.feature.training.AndroidPreparationEnvironmentMonitor
@@ -558,6 +560,32 @@ private fun RecordingRoute(
     }
     val recordingViewModel: RecordingViewModel = viewModel(key = "recording:$draftId", factory = factory)
     val state by recordingViewModel.state.collectAsState()
+
+    val interruptionCoordinator = remember(recordingViewModel, context, scope) {
+        RecordingEnvironmentInterruptionCoordinator(
+            scope = scope,
+            dispatcher = container.dispatchers.io,
+            audioFocus = AndroidRecordingAudioFocus(context),
+            interrupt = { reason ->
+                when (reason) {
+                    com.vocaease.patient.feature.training.RecordingInterruption.AUDIO ->
+                        recordingViewModel.onAudioFocusLost()
+                    else -> recordingViewModel.onHostStopped()
+                }
+            },
+        )
+    }
+    DisposableEffect(lifecycleOwner, interruptionCoordinator) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) interruptionCoordinator.onHostStopped()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        interruptionCoordinator.start()
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            interruptionCoordinator.close()
+        }
+    }
 
     LaunchedEffect(recordingViewModel) { recordingViewModel.start() }
     LaunchedEffect(state.navigateReviewDraftId) {

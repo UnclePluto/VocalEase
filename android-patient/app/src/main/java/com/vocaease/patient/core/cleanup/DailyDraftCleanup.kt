@@ -52,20 +52,28 @@ class DailyDraftCleanupScheduler internal constructor(
 ) {
     constructor(context: Context) : this(WorkManager.getInstance(context.applicationContext))
 
-    @Synchronized
     fun replaceFor(storage: AccountScopedDraftStorage?) {
-        workManager.cancelAllWorkByTag(DraftCleanupWorkContract.WORK_TAG)
-        if (storage == null || !storage.isLeaseActive()) return
-        val contract = DraftCleanupWorkContract(storage.accountScopeHash, storage.cleanupScopeToken)
-        workManager.enqueueUniqueWork(contract.uniqueWorkName, ExistingWorkPolicy.REPLACE, contract.request())
+        synchronized(coordinationLock) {
+            activeContract = null
+            workManager.cancelAllWorkByTag(DraftCleanupWorkContract.WORK_TAG)
+            if (storage == null || !storage.isLeaseActive()) return
+            val contract = DraftCleanupWorkContract(storage.accountScopeHash, storage.cleanupScopeToken)
+            activeContract = contract
+            workManager.enqueueUniqueWork(contract.uniqueWorkName, ExistingWorkPolicy.REPLACE, contract.request())
+        }
     }
 
-    internal fun appendNext(contract: DraftCleanupWorkContract) {
+    internal fun appendNext(contract: DraftCleanupWorkContract): Boolean = synchronized(coordinationLock) {
+        if (activeContract != contract) return@synchronized false
         workManager.enqueueUniqueWork(
-            contract.uniqueWorkName,
-            ExistingWorkPolicy.APPEND_OR_REPLACE,
-            contract.request(),
+            contract.uniqueWorkName, ExistingWorkPolicy.APPEND_OR_REPLACE, contract.request(),
         )
+        true
+    }
+
+    private companion object {
+        val coordinationLock = Any()
+        var activeContract: DraftCleanupWorkContract? = null
     }
 }
 

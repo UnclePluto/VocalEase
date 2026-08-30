@@ -46,6 +46,7 @@ class LinearizedReviewPlayer(
     private val eventChannel = Channel<ReviewPlayerEvent>(Channel.UNLIMITED)
     override val events: Flow<ReviewPlayerEvent> = eventChannel.receiveAsFlow()
     @Volatile private var currentSourceId: String? = null
+    private var loadGeneration = 0L
 
     init {
         engine.setListener { event ->
@@ -67,8 +68,10 @@ class LinearizedReviewPlayer(
         positionMillis: Long,
         playWhenReady: Boolean,
     ) = onMain {
-        currentSourceId = source.opaqueId
-        engine.load(source, positionMillis.coerceAtLeast(0), playWhenReady)
+        val sourceGeneration = ++loadGeneration
+        val boundSource = source.copy(opaqueId = "${source.opaqueId}#review-$sourceGeneration")
+        currentSourceId = boundSource.opaqueId
+        engine.load(boundSource, positionMillis.coerceAtLeast(0), playWhenReady)
     }
 
     override suspend fun play() = onMain { engine.play() }

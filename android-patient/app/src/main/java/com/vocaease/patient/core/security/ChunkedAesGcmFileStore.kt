@@ -167,9 +167,10 @@ internal class ChunkedAesGcmFileStore(
     fun open(accountScope: String, encryptedRelativePath: String): EncryptedFileReader {
         if (accountScope.isBlank()) failOpen()
         val scopeHash = sha256(accountScope)
-        val registryKey = registryKey(scopeHash)
+        val accountRegistryKey = registryKey(scopeHash)
         return synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
             val source = resolveAccountRelative(accountScope, encryptedRelativePath, OPEN_ERROR)
+            val mediaRegistryKey = mediaRegistryKey(accountRegistryKey, encryptedRelativePath)
             var file: RandomAccessFile? = null
             var master: MasterKeyLease? = null
             try {
@@ -179,7 +180,8 @@ internal class ChunkedAesGcmFileStore(
                 val parsed = parseAndValidateHeader(header, file.length())
                 validateUniqueNonces(file, parsed.chunkCount)
                 master = loadMaster(accountScope, createIfMissing = false)
-                val generation = accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.get()
+                val accountGeneration = accountGenerations.computeIfAbsent(accountRegistryKey) { AtomicLong() }.get()
+                val mediaGeneration = mediaGenerations.computeIfAbsent(mediaRegistryKey) { AtomicLong() }.get()
                 lateinit var reader: EncryptedFileReader
                 reader = EncryptedFileReader(
                     file = file,
@@ -189,14 +191,18 @@ internal class ChunkedAesGcmFileStore(
                     chunkCount = parsed.chunkCount,
                     cipherObserver = chunkCipherObserver,
                     generationValid = {
-                        accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.get() == generation
+                        accountGenerations.computeIfAbsent(accountRegistryKey) { AtomicLong() }.get() == accountGeneration &&
+                            mediaGenerations.computeIfAbsent(mediaRegistryKey) { AtomicLong() }.get() == mediaGeneration
                     },
                     closeObserver = {
-                        activeReaders[registryKey]?.remove(reader)
+                        activeReaders[mediaRegistryKey]?.let { readers ->
+                            readers.remove(reader)
+                            if (readers.isEmpty()) activeReaders.remove(mediaRegistryKey, readers)
+                        }
                         readerCloseObserver()
                     },
                 )
-                activeReaders.computeIfAbsent(registryKey) { ConcurrentHashMap.newKeySet() }.add(reader)
+                activeReaders.computeIfAbsent(mediaRegistryKey) { ConcurrentHashMap.newKeySet() }.add(reader)
                 reader
             } catch (error: MediaKeyInvalidatedException) {
                 file?.closeQuietly(); master?.close(); throw error
@@ -247,7 +253,22 @@ internal class ChunkedAesGcmFileStore(
         synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
             val registryKey = registryKey(scopeHash)
             accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.incrementAndGet()
-            activeReaders.remove(registryKey)?.toList()?.forEach(EncryptedFileReader::revoke)
+            revokeAllAccountReaders(registryKey)
+        }
+    }
+
+    internal fun revokeEncryptedMediaReaders(accountScope: String, encryptedRelativePaths: Set<String>) {
+        if (accountScope.isBlank()) failOpen()
+        if (encryptedRelativePaths.isEmpty()) return
+        val scopeHash = sha256(accountScope)
+        synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+            val accountRegistryKey = registryKey(scopeHash)
+            encryptedRelativePaths.forEach { relativePath ->
+                resolveAccountRelative(accountScope, relativePath, OPEN_ERROR)
+                val mediaRegistryKey = mediaRegistryKey(accountRegistryKey, relativePath)
+                mediaGenerations.computeIfAbsent(mediaRegistryKey) { AtomicLong() }.incrementAndGet()
+                activeReaders.remove(mediaRegistryKey)?.toList()?.forEach(EncryptedFileReader::revoke)
+            }
         }
     }
 
@@ -258,7 +279,7 @@ internal class ChunkedAesGcmFileStore(
             synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
                 val registryKey = registryKey(scopeHash)
                 accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.incrementAndGet()
-                activeReaders.remove(registryKey)?.toList()?.forEach(EncryptedFileReader::revoke)
+                revokeAllAccountReaders(registryKey)
                 val directory = accountDirectory(scopeHash)
                 if (directory.exists()) {
                     directory.walkBottomUp().forEach { if (it.exists() && !it.delete()) failWrite() }
@@ -379,6 +400,15 @@ internal class ChunkedAesGcmFileStore(
 
     private fun accountDirectory(scopeHash: String) = File(rootDirectory, scopeHash)
     private fun registryKey(scopeHash: String): String = rootDirectory.canonicalPath + '\u0000' + scopeHash
+    private fun mediaRegistryKey(accountRegistryKey: String, relativePath: String): String =
+        accountRegistryKey + '\u0000' + relativePath
+
+    private fun revokeAllAccountReaders(accountRegistryKey: String) {
+        val prefix = "$accountRegistryKey\u0000"
+        activeReaders.keys.filter { it.startsWith(prefix) }.forEach { key ->
+            activeReaders.remove(key)?.toList()?.forEach(EncryptedFileReader::revoke)
+        }
+    }
 
     private fun ensurePrivateDirectory(target: File) {
         val root = rootDirectory.canonicalFile
@@ -510,6 +540,7 @@ internal class ChunkedAesGcmFileStore(
         private val accountLocks = ConcurrentHashMap<String, Any>()
         private val publicationLocks = ConcurrentHashMap<String, Any>()
         private val accountGenerations = ConcurrentHashMap<String, AtomicLong>()
+        private val mediaGenerations = ConcurrentHashMap<String, AtomicLong>()
         private val activeReaders = ConcurrentHashMap<String, MutableSet<EncryptedFileReader>>()
 
         internal fun chunkAad(header: ByteArray, chunkIndex: Int, plainLength: Int): ByteArray =

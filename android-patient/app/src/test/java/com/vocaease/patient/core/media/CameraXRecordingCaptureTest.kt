@@ -47,6 +47,27 @@ class CameraXRecordingCaptureTest {
     }
 
     @Test
+    fun `CameraX带错误Finalize保留时长和中断原因以尝试恢复可解析文件`() = runBlocking {
+        val backend = FakeCameraXBackend()
+        val capture = CameraXRecordingCapture(backend, kotlinx.coroutines.Dispatchers.Unconfined)
+        val events = mutableListOf<CaptureEvent>()
+        capture.listener = { events += it }
+        capture.bindFrontCamera()
+        capture.start(File("build/camera-x-error.recording"))
+
+        backend.emit(CameraXBackendEvent.Started)
+        backend.emit(CameraXBackendEvent.Finalized(1_234, RecordingInterruption.CAMERA))
+
+        assertEquals(
+            listOf(
+                CaptureEvent.Started,
+                CaptureEvent.Finalized(1_234, RecordingInterruption.CAMERA),
+            ),
+            events,
+        )
+    }
+
+    @Test
     fun `录音权限在启动瞬间被撤销时安全映射为音频中断`() = runBlocking {
         val backend = FakeCameraXBackend().apply { startFailure = SecurityException("revoked") }
         val capture = CameraXRecordingCapture(backend, kotlinx.coroutines.Dispatchers.Unconfined)

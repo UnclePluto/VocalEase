@@ -30,47 +30,26 @@ class Media3ReviewPlayerEngine(
     private val player = ExoPlayer.Builder(context.applicationContext).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var positionTicker: Job? = null
-    private var currentSourceId: String? = null
+    private var sourceListener: Player.Listener? = null
+    private var activeSourceId: String? = null
     private var listener: ((ReviewEngineEvent) -> Unit)? = null
     private val released = AtomicBoolean()
+    private val leaseRegistration = storage.onLeaseInvalidated {
+        scope.launch {
+            if (!released.get()) {
+                val id = activeSourceId
+                player.stop()
+                player.clearMediaItems()
+                detachSourceListener()
+                id?.let { listener?.invoke(ReviewEngineEvent.Failed(it)) }
+            }
+        }
+    }
 
     init {
         playerView?.apply {
             player = this@Media3ReviewPlayerEngine.player
             useController = false
-        }
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                val id = currentSourceId ?: return
-                listener?.invoke(ReviewEngineEvent.Playing(id, isPlaying, player.currentPosition.coerceAtLeast(0)))
-                positionTicker?.cancel()
-                positionTicker = if (isPlaying) scope.launch {
-                    while (player.isPlaying && currentSourceId == id && storage.isLeaseActive()) {
-                        listener?.invoke(ReviewEngineEvent.Position(id, player.currentPosition.coerceAtLeast(0)))
-                        delay(POSITION_INTERVAL_MILLIS)
-                    }
-                } else null
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                val id = currentSourceId ?: return
-                if (playbackState == Player.STATE_ENDED) listener?.invoke(ReviewEngineEvent.Ended(id))
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                currentSourceId?.let { listener?.invoke(ReviewEngineEvent.Failed(it)) }
-            }
-        })
-        storage.onLeaseInvalidated {
-            scope.launch {
-                if (!released.get()) {
-                    val id = currentSourceId
-                    player.stop()
-                    player.clearMediaItems()
-                    currentSourceId = null
-                    id?.let { listener?.invoke(ReviewEngineEvent.Failed(it)) }
-                }
-            }
         }
     }
 
@@ -81,7 +60,42 @@ class Media3ReviewPlayerEngine(
     override fun load(source: ReviewMediaSource, positionMillis: Long, playWhenReady: Boolean) {
         check(storage.isLeaseActive()) { "当前账户回看已失效" }
         val relativePath = requireNotNull(source.encryptedRelativePath) { "加密媒体绑定缺失" }
-        currentSourceId = source.opaqueId
+        detachSourceListener()
+        activeSourceId = source.opaqueId
+        val immutableSourceId = source.opaqueId
+        lateinit var boundListener: Player.Listener
+        boundListener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                listener?.invoke(
+                    ReviewEngineEvent.Playing(
+                        immutableSourceId,
+                        isPlaying,
+                        player.currentPosition.coerceAtLeast(0),
+                    ),
+                )
+                positionTicker?.cancel()
+                positionTicker = if (isPlaying) scope.launch {
+                    while (player.isPlaying && sourceListener === boundListener && storage.isLeaseActive()) {
+                        listener?.invoke(
+                            ReviewEngineEvent.Position(immutableSourceId, player.currentPosition.coerceAtLeast(0)),
+                        )
+                        delay(POSITION_INTERVAL_MILLIS)
+                    }
+                } else null
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    listener?.invoke(ReviewEngineEvent.Ended(immutableSourceId))
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                listener?.invoke(ReviewEngineEvent.Failed(immutableSourceId))
+            }
+        }
+        sourceListener = boundListener
+        player.addListener(boundListener)
         val dataSourceFactory = DataSource.Factory { storage.encryptedMediaDataSource(relativePath) }
         val mediaItem = MediaItem.Builder()
             .setMediaId(source.opaqueId)
@@ -104,11 +118,19 @@ class Media3ReviewPlayerEngine(
 
     override fun release() {
         if (!released.compareAndSet(false, true)) return
-        currentSourceId = null
+        leaseRegistration.unregister()
+        detachSourceListener()
         listener = null
-        positionTicker?.cancel()
         player.release()
         scope.cancel()
+    }
+
+    private fun detachSourceListener() {
+        positionTicker?.cancel()
+        positionTicker = null
+        sourceListener?.let(player::removeListener)
+        sourceListener = null
+        activeSourceId = null
     }
 
     private companion object {

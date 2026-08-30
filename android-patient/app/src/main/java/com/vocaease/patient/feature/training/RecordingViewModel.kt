@@ -124,6 +124,10 @@ class RecordingViewModel(
 
     suspend fun stop() = coordinator.stop()
 
+    suspend fun onHostStopped() = coordinator.interrupt(RecordingInterruption.CAMERA)
+
+    suspend fun onAudioFocusLost() = coordinator.interrupt(RecordingInterruption.AUDIO)
+
     suspend fun leave() {
         if (!left.compareAndSet(false, true)) {
             cleanupJob?.join()

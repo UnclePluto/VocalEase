@@ -6,6 +6,7 @@ import com.vocaease.patient.BuildConfig
 import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AuthenticatedAccountSession
+import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.cleanup.DailyDraftCleanupScheduler
 import com.vocaease.patient.core.media.ExoPreviewEngine
@@ -84,7 +85,9 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val patientApi = sessionGraph.patientApi
     private val accountSession = object : AuthenticatedAccountSession {
         override fun current(): AuthenticatedAccountLease? = authRepository.currentAuthenticatedLease()
-        override fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) =
+        override fun addLeaseChangedListener(
+            listener: (AuthenticatedAccountLease?) -> Unit,
+        ): AccountLeaseListenerRegistration =
             authRepository.addAuthenticatedLeaseChangedListener(listener)
         override suspend fun <T> withCurrentLease(
             expected: AuthenticatedAccountLease,

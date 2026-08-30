@@ -6,6 +6,7 @@ import android.system.OsConstants
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
+import java.io.RandomAccessFile
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -73,17 +74,47 @@ class RecordingStagingMetadataTest {
     }
 
     @Test
-    fun 恶意或损坏sidecar不会返回路径并只删除同basename文件() {
+    fun 恶意或损坏sidecar不会返回路径且只由超时全局清理删除同basename文件() {
         val outside = File(context.filesDir, "must-stay-${System.nanoTime()}").apply { writeText("safe") }
         val base = "video-${"d".repeat(32)}"
-        File(root, "$base.recording").writeBytes(byteArrayOf(1))
-        File(root, "$base.recovery").writeText("../../${outside.name}")
+        val video = File(root, "$base.recording").apply { writeBytes(byteArrayOf(1)) }
+        val metadata = File(root, "$base.recovery").apply { writeText("../../${outside.name}") }
 
         val entries = files.listRecoverable("a".repeat(64))
 
         assertTrue(entries.isEmpty())
         assertTrue(outside.exists())
-        assertFalse(File(root, "$base.recording").exists())
+        assertTrue(video.exists())
+        assertTrue(metadata.exists())
+
+        video.setLastModified(0)
+        metadata.setLastModified(0)
+        files.cleanupOrphans()
+
+        assertFalse(video.exists())
+        assertFalse(metadata.exists())
+        assertTrue(outside.exists())
         outside.delete()
+    }
+
+    @Test
+    fun 当前账户扫描不得删除其他账户被截断或带尾随字节的sidecar与视频() {
+        val other = RecordingStagingIdentity("b".repeat(64), "draft-b", "session-b", "create-b")
+        val tailedVideo = files.createVideo(other).apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val tailedMetadata = files.listRecoverable(other.accountScopeHash).single().metadata
+        tailedMetadata.appendBytes(byteArrayOf(9))
+
+        val truncatedVideo = files.createVideo(other.copy(draftId = "draft-b2")).apply {
+            writeBytes(byteArrayOf(4, 5, 6))
+        }
+        val truncatedMetadata = files.listRecoverable(other.accountScopeHash)
+            .single { it.identity.draftId == "draft-b2" }.metadata
+        RandomAccessFile(truncatedMetadata, "rw").use { file -> file.setLength(file.length() - 3L) }
+
+        assertTrue(files.listRecoverable("a".repeat(64)).isEmpty())
+
+        listOf(tailedVideo, tailedMetadata, truncatedVideo, truncatedMetadata).forEach { file ->
+            assertTrue("其他账户的损坏恢复文件必须保留", file.exists())
+        }
     }
 }

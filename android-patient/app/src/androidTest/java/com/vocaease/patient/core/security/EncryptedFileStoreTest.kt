@@ -143,6 +143,30 @@ class EncryptedFileStoreTest {
     }
 
     @Test
+    fun 路径级撤销只关闭目标媒体reader且账户key销毁仍关闭全部reader() = runBlocking {
+        val mediaA = store.encrypt(ACCOUNT_A, ByteArrayInputStream(byteArrayOf(1, 2, 3)), 3)
+        val mediaB = store.encrypt(ACCOUNT_A, ByteArrayInputStream(byteArrayOf(4, 5, 6)), 3)
+        val readerA = store.open(ACCOUNT_A, mediaA.relativePath)
+        val readerB = store.open(ACCOUNT_A, mediaB.relativePath)
+
+        store.revokeEncryptedMediaReaders(ACCOUNT_A, setOf(mediaA.relativePath))
+
+        assertThrows(EncryptedMediaException::class.java) {
+            readerA.read(0, ByteArray(1), 0, 1)
+        }
+        val one = ByteArray(1)
+        assertEquals(1, readerB.read(0, one, 0, 1))
+        assertArrayEquals(byteArrayOf(4), one)
+
+        store.destroyAccountEncryption(ACCOUNT_A)
+        assertThrows(EncryptedMediaException::class.java) {
+            readerB.read(1, ByteArray(1), 0, 1)
+        }
+        readerA.close()
+        readerB.close()
+    }
+
+    @Test
     fun dataSourceClosesReaderWhenTransferStartedCallbackThrows() = runBlocking {
         var closeCount = 0
         val observedStore = ChunkedAesGcmFileStore(context, root, readerCloseObserver = { closeCount++ })

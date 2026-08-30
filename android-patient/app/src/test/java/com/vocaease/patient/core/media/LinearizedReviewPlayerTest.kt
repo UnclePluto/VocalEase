@@ -13,6 +13,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,7 +31,9 @@ class LinearizedReviewPlayerTest {
         player.seekTo(42_000)
         player.load(audio, ReviewMediaKind.AUDIO, 42_000, true)
 
-        assertEquals(listOf("video", "audio"), engine.loadedIds)
+        assertEquals(2, engine.loadedIds.size)
+        assertTrue(engine.loadedIds[0].startsWith("video#review-"))
+        assertTrue(engine.loadedIds[1].startsWith("audio#review-"))
         assertEquals(42_000L, engine.lastPosition)
         assertTrue(engine.lastPlayWhenReady)
         assertTrue(engine.threads.all { it.startsWith("review-main") })
@@ -42,11 +45,13 @@ class LinearizedReviewPlayerTest {
         val engine = FakeReviewEngine()
         val player = LinearizedReviewPlayer(engine, kotlinx.coroutines.Dispatchers.Unconfined)
         player.load(ReviewMediaSource("video", "video/mp4", 10), ReviewMediaKind.VIDEO, 0, false)
+        val videoGeneration = engine.loadedIds.last()
         player.load(ReviewMediaSource("audio", "audio/mp4", 5), ReviewMediaKind.AUDIO, 0, false)
+        val audioGeneration = engine.loadedIds.last()
 
-        engine.emit(ReviewEngineEvent.Playing("video", true, 9_000))
+        engine.emit(ReviewEngineEvent.Playing(videoGeneration, true, 9_000))
         assertFalse(player.events.tryFirstPlaying())
-        engine.emit(ReviewEngineEvent.Playing("audio", true, 1_000))
+        engine.emit(ReviewEngineEvent.Playing(audioGeneration, true, 1_000))
         assertEquals(1_000L, withTimeout(1_000) { (player.events.first() as ReviewPlayerEvent.Playing).positionMillis })
 
         val release = async(kotlinx.coroutines.Dispatchers.Default) { player.releaseAndAwait() }
@@ -54,9 +59,35 @@ class LinearizedReviewPlayerTest {
         assertFalse(release.isCompleted)
         engine.releaseGate.countDown()
         release.await()
-        engine.emit(ReviewEngineEvent.Playing("audio", true, 2_000))
+        engine.emit(ReviewEngineEvent.Playing(audioGeneration, true, 2_000))
         assertFalse(player.events.tryFirstPlaying())
         assertEquals(1, engine.releaseCount)
+    }
+
+    @Test
+    fun `视频切音频再切视频时两代旧回调都不能冒充当前来源`() = runBlocking {
+        val engine = FakeReviewEngine()
+        val player = LinearizedReviewPlayer(engine, kotlinx.coroutines.Dispatchers.Unconfined)
+        val video = ReviewMediaSource("video", "video/mp4", 10)
+        val audio = ReviewMediaSource("audio", "audio/mp4", 5)
+
+        player.load(video, ReviewMediaKind.VIDEO, 0, false)
+        val firstVideoGeneration = engine.loadedIds.last()
+        player.load(audio, ReviewMediaKind.AUDIO, 0, false)
+        val audioGeneration = engine.loadedIds.last()
+        player.load(video, ReviewMediaKind.VIDEO, 0, false)
+        val currentVideoGeneration = engine.loadedIds.last()
+
+        assertNotEquals(firstVideoGeneration, currentVideoGeneration)
+        engine.emit(ReviewEngineEvent.Failed(firstVideoGeneration))
+        engine.emit(ReviewEngineEvent.Ended(audioGeneration))
+        engine.emit(ReviewEngineEvent.Playing(firstVideoGeneration, true, 8_000))
+        assertFalse(player.events.tryFirstPlaying())
+
+        engine.emit(ReviewEngineEvent.Playing(currentVideoGeneration, true, 1_234))
+        assertEquals(1_234L, withTimeout(1_000) {
+            (player.events.first() as ReviewPlayerEvent.Playing).positionMillis
+        })
     }
 }
 

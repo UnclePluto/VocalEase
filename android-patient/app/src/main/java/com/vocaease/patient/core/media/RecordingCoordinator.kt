@@ -22,7 +22,10 @@ import kotlinx.coroutines.launch
 
 sealed interface CaptureEvent {
     data object Started : CaptureEvent
-    data class Finalized(val durationMillis: Long) : CaptureEvent
+    data class Finalized(
+        val durationMillis: Long,
+        val interruption: RecordingInterruption? = null,
+    ) : CaptureEvent
     data class Failure(val reason: RecordingInterruption) : CaptureEvent
 }
 
@@ -55,6 +58,7 @@ fun interface RecordingArtifactPublisher {
         audio: File,
         durationMillis: Long,
         publicationActive: () -> Boolean,
+        interruption: RecordingInterruption?,
     )
 }
 
@@ -96,6 +100,7 @@ class DefaultRecordingCoordinator(
     private var stagingIdentity: RecordingStagingIdentity? = null
     private var video: File? = null
     private var audio: File? = null
+    private var pendingInterruption: RecordingInterruption? = null
 
     init {
         capture.listener = ::onCaptureEvent
@@ -135,12 +140,19 @@ class DefaultRecordingCoordinator(
     override suspend fun onPlaybackEnded() = mutex.withLock { requestStop(playbackEnded = true) }
 
     override suspend fun interrupt(reason: RecordingInterruption) {
-        publicationAllowed.set(false)
+        if (!reason.isRecoverableSystemInterruption()) publicationAllowed.set(false)
         mutex.withLock {
-            interruptInternal(reason)
-            if (stopIssued.compareAndSet(false, true)) {
-                playback.stop()
-                capture.stop()
+            if (reason.isRecoverableSystemInterruption() && machine.state is RecordingState.Recording) {
+                pendingInterruption = pendingInterruption ?: reason
+                requestStop()
+            } else if (reason.isRecoverableSystemInterruption() && machine.state === RecordingState.Finalizing) {
+                pendingInterruption = pendingInterruption ?: reason
+            } else {
+                interruptInternal(reason)
+                if (stopIssued.compareAndSet(false, true)) {
+                    playback.stop()
+                    capture.stop()
+                }
             }
         }
     }
@@ -170,6 +182,10 @@ class DefaultRecordingCoordinator(
                 interruptInternal(event.reason)
             }
             is CaptureEvent.Finalized -> {
+                if (event.interruption != null && machine.state is RecordingState.Recording) {
+                    pendingInterruption = pendingInterruption ?: event.interruption
+                    requestStop()
+                }
                 if (!publicationAllowed.get() || machine.state !== RecordingState.Finalizing) {
                     cleanupPlaintext()
                     return@withLock
@@ -183,6 +199,7 @@ class DefaultRecordingCoordinator(
                         currentAudio,
                         event.durationMillis,
                         publicationAllowed::get,
+                        pendingInterruption ?: event.interruption,
                     )
                     if (!publicationAllowed.get()) throw RecordingPublicationCancelledException()
                     terminalDurationMillis.set(event.durationMillis.coerceAtLeast(0))
@@ -241,3 +258,15 @@ class DefaultRecordingCoordinator(
 }
 
 internal class RecordingPublicationCancelledException : IllegalStateException()
+
+private fun RecordingInterruption.isRecoverableSystemInterruption(): Boolean = when (this) {
+    RecordingInterruption.CAMERA,
+    RecordingInterruption.AUDIO,
+    RecordingInterruption.FINALIZE,
+    -> true
+    RecordingInterruption.VALIDATION,
+    RecordingInterruption.STORAGE,
+    RecordingInterruption.ACCOUNT_CHANGED,
+    RecordingInterruption.CANCELLED,
+    -> false
+}

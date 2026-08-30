@@ -1,6 +1,7 @@
 package com.vocaease.patient.core.network
 
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
+import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import com.vocaease.patient.core.network.dto.AuthSession
 import com.vocaease.patient.core.security.RefreshTokenRead
@@ -51,9 +52,12 @@ class SessionLifecycleArbiter(
 
     internal fun currentAuthenticatedAccountLease(): AuthenticatedAccountLease? = authenticatedAccountLease
 
-    internal fun addAuthenticatedAccountLeaseListener(listener: (AuthenticatedAccountLease?) -> Unit) {
+    internal fun addAuthenticatedAccountLeaseListener(
+        listener: (AuthenticatedAccountLease?) -> Unit,
+    ): AccountLeaseListenerRegistration {
         authenticatedAccountLeaseListeners += listener
         listener(authenticatedAccountLease)
+        return AccountLeaseListenerRegistration { authenticatedAccountLeaseListeners.remove(listener) }
     }
 
     fun addSessionExpiredListener(listener: (SessionInvalidation) -> Unit) {

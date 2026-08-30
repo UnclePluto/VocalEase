@@ -34,7 +34,10 @@ import kotlin.coroutines.resumeWithException
 
 internal sealed interface CameraXBackendEvent {
     data object Started : CameraXBackendEvent
-    data class Finalized(val durationMillis: Long) : CameraXBackendEvent
+    data class Finalized(
+        val durationMillis: Long,
+        val interruption: RecordingInterruption? = null,
+    ) : CameraXBackendEvent
     data class Failed(val reason: RecordingInterruption) : CameraXBackendEvent
 }
 
@@ -79,7 +82,10 @@ class CameraXRecordingCapture internal constructor(
             backend.start(output, audioEnabled = true) { event ->
                 val mapped = when (event) {
                     CameraXBackendEvent.Started -> CaptureEvent.Started
-                    is CameraXBackendEvent.Finalized -> CaptureEvent.Finalized(event.durationMillis)
+                    is CameraXBackendEvent.Finalized -> CaptureEvent.Finalized(
+                        event.durationMillis,
+                        event.interruption,
+                    )
                     is CameraXBackendEvent.Failed -> CaptureEvent.Failure(event.reason)
                 }
                 events.trySend(mapped)
@@ -146,15 +152,17 @@ private class AndroidCameraXBackend(
                         is VideoRecordEvent.Start -> callback(CameraXBackendEvent.Started)
                         is VideoRecordEvent.Finalize -> {
                             activeRecording = null
+                            val durationMillis = event.recordingStats.recordedDurationNanos / 1_000_000L
                             if (!event.hasError()) {
-                                callback(CameraXBackendEvent.Finalized(event.recordingStats.recordedDurationNanos / 1_000_000L))
+                                callback(CameraXBackendEvent.Finalized(durationMillis))
                             } else {
-                                val reason = when (event.error) {
+                                val interruption = when (event.error) {
                                     VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE -> RecordingInterruption.CAMERA
                                     VideoRecordEvent.Finalize.ERROR_ENCODING_FAILED -> RecordingInterruption.AUDIO
                                     else -> RecordingInterruption.FINALIZE
                                 }
-                                callback(CameraXBackendEvent.Failed(reason))
+                                // CameraX 已经交付 Finalize 事件；将已写文件交给解析/校验层决定能否恢复。
+                                callback(CameraXBackendEvent.Finalized(durationMillis, interruption))
                             }
                         }
                     }

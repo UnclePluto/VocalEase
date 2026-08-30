@@ -19,9 +19,14 @@ class AuthenticatedAccountLease internal constructor(
     internal val incarnationId: String = UUID.randomUUID().toString(),
 )
 
+fun interface AccountLeaseListenerRegistration {
+    fun unregister()
+}
+
 interface AuthenticatedAccountSession {
     fun current(): AuthenticatedAccountLease?
-    fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) = Unit
+    fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit): AccountLeaseListenerRegistration =
+        AccountLeaseListenerRegistration {}
     suspend fun <T> withCurrentLease(
         expected: AuthenticatedAccountLease,
         operation: suspend () -> T,
@@ -45,9 +50,12 @@ internal class MutableAuthenticatedAccountSession : AuthenticatedAccountSession 
     }
 
     override fun current(): AuthenticatedAccountLease? = lease
-    override fun addLeaseChangedListener(listener: (AuthenticatedAccountLease?) -> Unit) {
+    override fun addLeaseChangedListener(
+        listener: (AuthenticatedAccountLease?) -> Unit,
+    ): AccountLeaseListenerRegistration {
         listeners += listener
         listener(lease)
+        return AccountLeaseListenerRegistration { listeners.remove(listener) }
     }
     override suspend fun <T> withCurrentLease(
         expected: AuthenticatedAccountLease,
@@ -92,9 +100,8 @@ class AccountScopedDraftStorage internal constructor(
 
     fun isLeaseActive(): Boolean = session.current() === lease
 
-    fun onLeaseInvalidated(listener: () -> Unit) {
+    fun onLeaseInvalidated(listener: () -> Unit): AccountLeaseListenerRegistration =
         session.addLeaseChangedListener { if (session.current() !== lease) listener() }
-    }
 
     suspend fun encryptMedia(plaintext: InputStream, originalLength: Long): EncryptedMediaAsset = checked {
         fileStore.encrypt(lease.patientId, plaintext, originalLength).let {
@@ -260,7 +267,7 @@ class AccountScopedDraftStorage internal constructor(
             database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
             database.mediaDao().findAll(lease.patientId, draftId)
         }
-        fileStore.revokeEncryptedMediaReaders(lease.patientId)
+        fileStore.revokeEncryptedMediaReaders(lease.patientId, media.map { it.encryptedRelativePath }.toSet())
         media.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it.encryptedRelativePath) }
         database.withTransaction {
             val current = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
@@ -292,7 +299,7 @@ class AccountScopedDraftStorage internal constructor(
             database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
             database.mediaDao().findAll(lease.patientId, draftId)
         }
-        fileStore.revokeEncryptedMediaReaders(lease.patientId)
+        fileStore.revokeEncryptedMediaReaders(lease.patientId, media.map { it.encryptedRelativePath }.toSet())
         media.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it.encryptedRelativePath) }
         database.withTransaction {
             val current = database.draftDao().find(lease.patientId, draftId) ?: return@withTransaction
@@ -583,7 +590,7 @@ class AccountScopedDraftStorage internal constructor(
             database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
             database.mediaDao().findAll(lease.patientId, draftId).map { it.encryptedRelativePath }
         }
-        fileStore.revokeEncryptedMediaReaders(lease.patientId)
+        fileStore.revokeEncryptedMediaReaders(lease.patientId, encryptedToDelete.toSet())
         encryptedToDelete.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
         database.withTransaction {
             val draft = database.draftDao().find(lease.patientId, draftId) ?: error("草稿不存在")
