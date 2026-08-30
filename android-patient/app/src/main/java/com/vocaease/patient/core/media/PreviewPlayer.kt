@@ -16,12 +16,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
@@ -59,7 +60,7 @@ interface PreviewEngine {
     fun seekTo(positionMillis: Long)
     fun play()
     fun pause()
-    fun release()
+    suspend fun releaseAndAwait()
 }
 
 interface PreviewSession {
@@ -76,6 +77,9 @@ internal enum class PreviewAdmissionPoint {
     PUBLISH_ERROR,
     GRANT_RESULT,
     GRANT_APPLICATION,
+    PREPARE_APPLICATION,
+    CANCEL_APPLICATION,
+    ACTOR_COMPLETION,
 }
 
 internal fun interface PreviewAdmissionProbe {
@@ -88,9 +92,11 @@ class PreviewPlayer internal constructor(
     private val admissionProbe: PreviewAdmissionProbe = PreviewAdmissionProbe {},
 ) : PreviewSession {
     private val commands = Channel<PreviewCommand>(Channel.UNLIMITED)
-    private val actorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val ownedJob = SupervisorJob()
+    private val actorScope = CoroutineScope(ownedJob + Dispatchers.Default)
     private val submissionLock = Any()
     private val releaseCompletion = CompletableDeferred<Unit>()
+    private val actorJob: Job
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Idle)
     override val state: StateFlow<PreviewState> = mutableState.asStateFlow()
     private var acceptingCommands = true
@@ -102,9 +108,18 @@ class PreviewPlayer internal constructor(
     private var mediaLoaded = false
     private var activePreparationToken: PreparationToken? = null
     private var pendingPreparation: CompletableDeferred<Result<Unit>>? = null
+    private val grantJobs = mutableListOf<Job>()
 
     init {
-        actorScope.launch { runActor() }
+        actorJob = actorScope.launch { runActor() }
+        actorJob.invokeOnCompletion { error ->
+            ownedJob.cancel()
+            if (error == null || error is CancellationException) {
+                releaseCompletion.complete(Unit)
+            } else {
+                releaseCompletion.completeExceptionally(error)
+            }
+        }
     }
 
     override suspend fun prepare(songId: String) {
@@ -150,26 +165,39 @@ class PreviewPlayer internal constructor(
     }
 
     private suspend fun runActor() {
-        for (command in commands) {
-            when (command) {
-                is PreviewCommand.Prepare -> beginPreparation(command)
-                is PreviewCommand.GrantResolved -> applyGrant(command)
-                is PreviewCommand.EngineEvent -> applyEngineEvent(command)
-                is PreviewCommand.Play -> applyPlay(command)
-                is PreviewCommand.Pause -> applyPause(command)
-                is PreviewCommand.CancelPreparation -> applyPreparationCancellation(command)
-                PreviewCommand.Release -> {
-                    applyRelease()
-                    return
+        try {
+            for (command in commands) {
+                when (command) {
+                    is PreviewCommand.Prepare -> {
+                        admissionProbe.afterAdmission(PreviewAdmissionPoint.PREPARE_APPLICATION)
+                        beginPreparation(command)
+                    }
+                    is PreviewCommand.GrantResolved -> applyGrant(command)
+                    is PreviewCommand.EngineEvent -> applyEngineEvent(command)
+                    is PreviewCommand.Play -> applyPlay(command)
+                    is PreviewCommand.Pause -> applyPause(command)
+                    is PreviewCommand.CancelPreparation -> {
+                        admissionProbe.afterAdmission(PreviewAdmissionPoint.CANCEL_APPLICATION)
+                        applyPreparationCancellation(command)
+                    }
+                    PreviewCommand.Release -> {
+                        applyRelease()
+                        return
+                    }
                 }
             }
+        } finally {
+            admissionProbe.afterAdmission(PreviewAdmissionPoint.ACTOR_COMPLETION)
         }
     }
 
     private fun beginPreparation(command: PreviewCommand.Prepare) {
-        activePreparationToken?.cancel()
-        pendingPreparation?.complete(Result.success(Unit))
-        if (!command.token.withActive { beginActivePreparation(command) }) {
+        val claimed = command.token.withActive {
+            activePreparationToken?.cancel()
+            pendingPreparation?.complete(Result.success(Unit))
+            beginActivePreparation(command)
+        }
+        if (!claimed) {
             command.completion.complete(Result.success(Unit))
         }
     }
@@ -330,11 +358,11 @@ class PreviewPlayer internal constructor(
         pendingPreparation?.complete(Result.success(Unit))
         pendingPreparation = null
         try {
-            engine.release()
+            grantJobs.forEach { it.cancel() }
+            grantJobs.joinAll()
+            engine.releaseAndAwait()
         } finally {
             commands.close()
-            actorScope.cancel()
-            releaseCompletion.complete(Unit)
         }
     }
 
@@ -370,6 +398,7 @@ class PreviewPlayer internal constructor(
             )
         }
         token.attachGrantJob(job)
+        grantJobs += job
     }
 
     private fun submit(command: PreviewCommand): Boolean = synchronized(submissionLock) {
@@ -442,7 +471,8 @@ private fun Throwable.isRecoverablePreviewFailure(): Boolean =
     this is IOException || this is HttpException || this is SerializationException || this is NetworkContractException
 
 class ExoPreviewEngine(context: Context) : PreviewEngine {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val engineJob = SupervisorJob()
+    private val scope = CoroutineScope(engineJob + Dispatchers.Main.immediate)
     private val player = ExoPlayer.Builder(context.applicationContext).build()
     @Volatile
     private var positionSnapshotMillis = 0L
@@ -501,12 +531,12 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
         scope.launch { player.pause() }
     }
 
-    override fun release() {
-        listener = null
-        scope.launch {
+    override suspend fun releaseAndAwait() {
+        withContext(Dispatchers.Main.immediate) {
+            listener = null
             player.release()
-            scope.cancel()
         }
+        engineJob.cancelAndJoin()
     }
 
     private fun dispatch(event: PreviewEngineEvent) {
