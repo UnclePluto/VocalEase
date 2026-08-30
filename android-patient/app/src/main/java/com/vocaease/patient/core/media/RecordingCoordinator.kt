@@ -32,7 +32,7 @@ sealed interface CaptureEvent {
 interface RecordingCapture {
     var listener: suspend (CaptureEvent) -> Unit
     suspend fun bindFrontCamera()
-    suspend fun start(output: File)
+    fun start(output: File)
     fun stop()
     fun release() = Unit
 }
@@ -85,10 +85,12 @@ class DefaultRecordingCoordinator(
     private val callbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val machine = RecordingStateMachine()
     private val mutex = Mutex()
+    private val captureGate = Any()
     private val stopIssued = AtomicBoolean()
     private val closed = AtomicBoolean()
     private val publicationAllowed = AtomicBoolean(true)
     private val terminalDurationMillis = AtomicLong()
+    private val nextOperationGeneration = AtomicLong()
     private val mutableState = MutableStateFlow<RecordingState>(machine.state)
     override val state: StateFlow<RecordingState> = mutableState.asStateFlow()
     override val playbackPositionMillis: Long get() = playback.currentPositionMillis.coerceAtLeast(0)
@@ -101,6 +103,10 @@ class DefaultRecordingCoordinator(
     private var video: File? = null
     private var audio: File? = null
     private var pendingInterruption: RecordingInterruption? = null
+    private var operationGeneration = 0L
+    private var captureStartGeneration = 0L
+    private var acceptedStartedGeneration = 0L
+    private var lateStartFallbackStoppedGeneration = 0L
 
     init {
         capture.listener = ::onCaptureEvent
@@ -121,17 +127,30 @@ class DefaultRecordingCoordinator(
         check(this.draftId == null) { "录制协调器已接管" }
         this.draftId = draftId
         this.stagingIdentity = stagingIdentity
+        operationGeneration = nextOperationGeneration.incrementAndGet()
         capture.bindFrontCamera()
     }
 
     override suspend fun onCountdownFinished() = mutex.withLock {
+        val generation = operationGeneration
+        if (
+            closed.get() ||
+            generation == 0L ||
+            machine.state !is RecordingState.Countdown
+        ) return@withLock
         repeat(3) { update(RecordingEvent.CountdownTick) }
-        val output = stagingIdentity?.let(tempFiles::createVideo) ?: tempFiles.createVideo()
-        video = output
+        if (machine.state !== RecordingState.Starting || generation != operationGeneration) return@withLock
         try {
-            capture.start(output)
+            synchronized(captureGate) {
+                if (closed.get() || generation != operationGeneration) return@withLock
+                val output = stagingIdentity?.let(tempFiles::createVideo) ?: tempFiles.createVideo()
+                video = output
+                captureStartGeneration = generation
+                capture.start(output)
+            }
         } catch (_: Exception) {
             interruptInternal(RecordingInterruption.CAMERA)
+            issueStopOnce()
         }
     }
 
@@ -149,22 +168,18 @@ class DefaultRecordingCoordinator(
                 pendingInterruption = pendingInterruption ?: reason
             } else {
                 interruptInternal(reason)
-                if (stopIssued.compareAndSet(false, true)) {
-                    playback.stop()
-                    capture.stop()
-                }
+                issueStopOnce()
             }
         }
     }
 
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        publicationAllowed.set(false)
-        if (stopIssued.compareAndSet(false, true)) {
-            playback.stop()
-            capture.stop()
+        synchronized(captureGate) {
+            if (!closed.compareAndSet(false, true)) return
+            publicationAllowed.set(false)
+            issueStopOnce()
+            capture.release()
         }
-        capture.release()
         cleanupPlaintext()
         callbackScope.cancel()
     }
@@ -172,10 +187,31 @@ class DefaultRecordingCoordinator(
     private suspend fun onCaptureEvent(event: CaptureEvent) = mutex.withLock {
         when (event) {
             CaptureEvent.Started -> {
-                val now = clockNanos()
-                val offset = playback.currentPositionMillis.coerceAtLeast(0)
-                update(RecordingEvent.CaptureStarted(now, offset))
-                playback.play()
+                synchronized(captureGate) {
+                    val generation = captureStartGeneration
+                    if (
+                        closed.get() ||
+                        generation == 0L ||
+                        generation != operationGeneration ||
+                        machine.state !== RecordingState.Starting
+                    ) {
+                        if (
+                            generation != 0L &&
+                            generation != acceptedStartedGeneration &&
+                            lateStartFallbackStoppedGeneration != generation
+                        ) {
+                            lateStartFallbackStoppedGeneration = generation
+                            playback.stop()
+                            capture.stop()
+                        }
+                    } else {
+                        val now = clockNanos()
+                        val offset = playback.currentPositionMillis.coerceAtLeast(0)
+                        update(RecordingEvent.CaptureStarted(now, offset))
+                        acceptedStartedGeneration = generation
+                        playback.play()
+                    }
+                }
             }
             is CaptureEvent.Failure -> {
                 playback.stop()
@@ -225,10 +261,13 @@ class DefaultRecordingCoordinator(
         if (machine.state !is RecordingState.Recording && machine.state !== RecordingState.Finalizing) return
         snapshotRecordingDuration()
         update(if (playbackEnded) RecordingEvent.PlaybackEnded else RecordingEvent.StopRequested)
-        if (stopIssued.compareAndSet(false, true)) {
-            playback.stop()
-            capture.stop()
-        }
+        issueStopOnce()
+    }
+
+    private fun issueStopOnce() {
+        if (!stopIssued.compareAndSet(false, true)) return
+        playback.stop()
+        capture.stop()
     }
 
     private fun interruptInternal(reason: RecordingInterruption) {

@@ -18,7 +18,7 @@ class RecordingEnvironmentInterruptionCoordinatorTest {
             interrupt = { interruptions += it },
         )
 
-        coordinator.start()
+        coordinator.startAndAwaitReady()
         coordinator.onHostStopped()
         focus.lose()
         assertEquals(
@@ -32,12 +32,43 @@ class RecordingEnvironmentInterruptionCoordinatorTest {
         assertEquals(2, interruptions.size)
         assertEquals(1, focus.closeCount)
     }
+
+    @Test
+    fun `同步音频焦点拒绝必须在录制启动ready gate前完成裁决`() = runBlocking {
+        val order = mutableListOf<String>()
+        val focus = FakeRecordingAudioFocus(rejectSynchronously = true)
+        val coordinator = RecordingEnvironmentInterruptionCoordinator(
+            scope = this,
+            dispatcher = Dispatchers.Default,
+            audioFocus = focus,
+            interrupt = { order += "interrupt:$it" },
+        )
+
+        coordinator.onHostStopped()
+        coordinator.startAndAwaitReady()
+        order += "view-model-start"
+
+        assertEquals(
+            listOf(
+                "interrupt:${RecordingInterruption.CAMERA}",
+                "interrupt:${RecordingInterruption.AUDIO}",
+                "view-model-start",
+            ),
+            order,
+        )
+        coordinator.close()
+    }
 }
 
-private class FakeRecordingAudioFocus : RecordingAudioFocus {
+private class FakeRecordingAudioFocus(
+    private val rejectSynchronously: Boolean = false,
+) : RecordingAudioFocus {
     private var listener: () -> Unit = {}
     var closeCount = 0
-    override fun start(onLost: () -> Unit) { listener = onLost }
+    override fun start(onLost: () -> Unit) {
+        listener = onLost
+        if (rejectSynchronously) onLost()
+    }
     override fun close() { closeCount += 1; listener = {} }
     fun lose() = listener()
 }

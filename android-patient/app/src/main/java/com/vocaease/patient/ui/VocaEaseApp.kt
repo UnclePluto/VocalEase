@@ -580,14 +580,16 @@ private fun RecordingRoute(
             if (event == Lifecycle.Event.ON_STOP) interruptionCoordinator.onHostStopped()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        interruptionCoordinator.start()
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             interruptionCoordinator.close()
         }
     }
 
-    LaunchedEffect(recordingViewModel) { recordingViewModel.start() }
+    LaunchedEffect(recordingViewModel, interruptionCoordinator) {
+        interruptionCoordinator.startAndAwaitReady()
+        recordingViewModel.start()
+    }
     LaunchedEffect(state.navigateReviewDraftId) {
         state.navigateReviewDraftId?.let { id ->
             recordingViewModel.consumeReviewNavigation()

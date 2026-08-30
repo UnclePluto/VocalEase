@@ -6,6 +6,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import com.vocaease.patient.feature.training.RecordingInterruption
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -25,24 +26,33 @@ class RecordingEnvironmentInterruptionCoordinator(
 ) : AutoCloseable {
     private val started = AtomicBoolean()
     private val closed = AtomicBoolean()
-    private val events = Channel<RecordingInterruption>(Channel.UNLIMITED)
+    private val events = Channel<EnvironmentCommand>(Channel.UNLIMITED)
     private val actor: Job = scope.launch(dispatcher) {
-        for (reason in events) {
-            if (!closed.get()) interrupt(reason)
+        for (command in events) {
+            when (command) {
+                is EnvironmentCommand.Interrupt -> if (!closed.get()) interrupt(command.reason)
+                is EnvironmentCommand.Ready -> command.ack.complete(Unit)
+            }
         }
     }
 
-    fun start() {
-        if (!started.compareAndSet(false, true) || closed.get()) return
-        audioFocus.start(::onAudioFocusLost)
+    /**
+     * 在返回前处理监听启用前后已经排队的宿主/焦点中断，调用方随后才可启动录制。
+     */
+    suspend fun startAndAwaitReady() {
+        if (closed.get()) return
+        if (started.compareAndSet(false, true)) audioFocus.start(::onAudioFocusLost)
+        val ready = CompletableDeferred<Unit>()
+        if (!events.trySend(EnvironmentCommand.Ready(ready)).isSuccess) return
+        ready.await()
     }
 
     fun onHostStopped() {
-        if (!closed.get()) events.trySend(RecordingInterruption.CAMERA)
+        if (!closed.get()) events.trySend(EnvironmentCommand.Interrupt(RecordingInterruption.CAMERA))
     }
 
     private fun onAudioFocusLost() {
-        if (!closed.get()) events.trySend(RecordingInterruption.AUDIO)
+        if (!closed.get()) events.trySend(EnvironmentCommand.Interrupt(RecordingInterruption.AUDIO))
     }
 
     override fun close() {
@@ -51,6 +61,11 @@ class RecordingEnvironmentInterruptionCoordinator(
         events.close()
         actor.cancel()
     }
+}
+
+private sealed interface EnvironmentCommand {
+    data class Interrupt(val reason: RecordingInterruption) : EnvironmentCommand
+    data class Ready(val ack: CompletableDeferred<Unit>) : EnvironmentCommand
 }
 
 class AndroidRecordingAudioFocus(context: Context) : RecordingAudioFocus {

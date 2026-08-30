@@ -15,6 +15,85 @@ import org.junit.Test
 
 class RecordingCoordinatorTest {
     @Test
+    fun `Countdown中断后倒计时协程迟到不得创建暂存启动采集或播放`() = runBlocking {
+        for (reason in listOf(RecordingInterruption.AUDIO, RecordingInterruption.CAMERA)) {
+            val capture = FakeCapture()
+            val playback = FakePlayback()
+            val files = FakeTempFiles()
+            val coordinator = DefaultRecordingCoordinator(
+                capture, playback, { 1L }, files, FakePublisher(),
+            )
+            coordinator.takeOver("draft-$reason")
+
+            coordinator.interrupt(reason)
+            assertEquals(RecordingState.Interrupted(reason), coordinator.state.value)
+            assertEquals(1, capture.stopCount)
+
+            // 模拟已经恢复执行的旧 countdown 协程，以及不可信 backend 的迟到回调。
+            coordinator.onCountdownFinished()
+            capture.emit(CaptureEvent.Started)
+            coordinator.stop()
+            coordinator.interrupt(RecordingInterruption.CAMERA)
+
+            assertEquals(0, files.videoCreateCount)
+            assertEquals(0, capture.startCount)
+            assertEquals(0, playback.playCount)
+            assertEquals(1, capture.stopCount)
+        }
+    }
+
+    @Test
+    fun `Starting中断后迟到Started不得播放且会补发有效停止`() = runBlocking {
+        val capture = FakeCapture()
+        val playback = FakePlayback()
+        val coordinator = DefaultRecordingCoordinator(
+            capture, playback, { 1L }, FakeTempFiles(), FakePublisher(),
+        )
+        coordinator.takeOver("draft-1")
+        coordinator.onCountdownFinished()
+        assertEquals(RecordingState.Starting, coordinator.state.value)
+        assertEquals(1, capture.startCount)
+
+        coordinator.interrupt(RecordingInterruption.AUDIO)
+        assertEquals(1, capture.stopCount)
+        capture.emit(CaptureEvent.Started)
+
+        assertEquals(RecordingState.Interrupted(RecordingInterruption.AUDIO), coordinator.state.value)
+        assertEquals(0, playback.playCount)
+        // 第一次 stop 可能发生在 CameraX 真正 active 前；Started 迟到时必须再兜底一次。
+        assertEquals(2, capture.stopCount)
+    }
+
+    @Test
+    fun `关闭或Reviewable后迟到Started绝不重新播放`() = runBlocking {
+        val closedCapture = FakeCapture()
+        val closedPlayback = FakePlayback()
+        val closed = DefaultRecordingCoordinator(
+            closedCapture, closedPlayback, { 1L }, FakeTempFiles(), FakePublisher(),
+        )
+        closed.takeOver("closed")
+        closed.onCountdownFinished()
+        closed.close()
+        closedCapture.emit(CaptureEvent.Started)
+        assertEquals(0, closedPlayback.playCount)
+
+        val reviewedCapture = FakeCapture()
+        val reviewedPlayback = FakePlayback()
+        val reviewed = DefaultRecordingCoordinator(
+            reviewedCapture, reviewedPlayback, { 1L }, FakeTempFiles(), FakePublisher(),
+        )
+        reviewed.takeOver("reviewed")
+        reviewed.onCountdownFinished()
+        reviewedCapture.emit(CaptureEvent.Started)
+        reviewed.stop()
+        reviewedCapture.emit(CaptureEvent.Finalized(1_000))
+        val playsBeforeLateEvent = reviewedPlayback.playCount
+        reviewedCapture.emit(CaptureEvent.Started)
+        assertEquals(RecordingState.Reviewable(1_000), reviewed.state.value)
+        assertEquals(playsBeforeLateEvent, reviewedPlayback.playCount)
+    }
+
+    @Test
     fun `带账户绑定接管会为视频创建可恢复暂存`() = runBlocking {
         val identity = RecordingStagingIdentity("a".repeat(64), "draft-1", "session-1", "create-1")
         val capture = FakeCapture()
@@ -282,12 +361,14 @@ private class FakeCapture(private val calls: MutableList<String> = mutableListOf
     var frontCamera = false
     var audioEnabled = false
     var stopCount = 0
+    var startCount = 0
     var releaseCount = 0
     var startFailure: Exception? = null
 
     override suspend fun bindFrontCamera() { frontCamera = true; calls += "bind-front" }
-    override suspend fun start(output: File) {
+    override fun start(output: File) {
         startFailure?.let { throw it }
+        startCount += 1
         audioEnabled = true
         calls += "start-with-audio"
     }
@@ -299,14 +380,19 @@ private class FakeCapture(private val calls: MutableList<String> = mutableListOf
 private class FakePlayback(private val calls: MutableList<String> = mutableListOf()) : RecordingPlayback {
     override val currentPositionMillis: Long = 0
     var playing = false
-    override fun play() { playing = true; calls += "play" }
+    var playCount = 0
+    override fun play() { playing = true; playCount += 1; calls += "play" }
     override fun stop() { playing = false }
 }
 
 private class FakeTempFiles : RecordingTempFiles {
     var cleaned = false
+    var videoCreateCount = 0
     var stagingIdentity: RecordingStagingIdentity? = null
-    override fun createVideo(): File = File("build/test-recording.recording")
+    override fun createVideo(): File {
+        videoCreateCount += 1
+        return File("build/test-recording.recording")
+    }
     override fun createVideo(identity: RecordingStagingIdentity): File {
         stagingIdentity = identity
         return createVideo()

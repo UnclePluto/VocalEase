@@ -76,7 +76,7 @@ class CameraXRecordingCapture internal constructor(
         backend.bind(CameraSelector.DEFAULT_FRONT_CAMERA)
     }
 
-    override suspend fun start(output: File) {
+    override fun start(output: File) {
         check(!released.get())
         try {
             backend.start(output, audioEnabled = true) { event ->
@@ -91,7 +91,7 @@ class CameraXRecordingCapture internal constructor(
                 events.trySend(mapped)
             }
         } catch (_: SecurityException) {
-            events.send(CaptureEvent.Failure(RecordingInterruption.AUDIO))
+            events.trySend(CaptureEvent.Failure(RecordingInterruption.AUDIO))
         }
     }
 
