@@ -80,15 +80,21 @@ class DatabaseConstraintTest {
                 "0".repeat(64), MediaValidationState.VALID,
             ),
         )
-        database.uploadDao().insert(UploadJobEntity.newPending("a", "d", "audio", "video", "submit"))
+        database.uploadDao().insert(UploadJobEntity.newPending("a", "d", "grant:d:audio", "grant:d:video", "submit:d"))
         val db = database.openHelper.writableDatabase
+        db.execSQL("UPDATE upload_jobs SET progress_percent=10,attempt_count=1 WHERE account_scope='a' AND draft_id='d'")
 
         listOf(
             "UPDATE upload_jobs SET overall_state='UNKNOWN' WHERE account_scope='a' AND draft_id='d'",
             "UPDATE upload_jobs SET audio_grant_key=' ' WHERE account_scope='a' AND draft_id='d'",
             "UPDATE upload_jobs SET audio_grant_key='audio-2' WHERE account_scope='a' AND draft_id='d'",
             "UPDATE upload_jobs SET last_safe_error='${"x".repeat(257)}' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET pipeline_stage='UPLOADING_AUDIO',overall_state='UPLOADING',audio_asset_key='asset',audio_object_key='object',audio_grant_state='GRANT_READY',audio_upload_state='UPLOADING' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET audio_grant_state='SUBMITTED' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET overall_state='ANALYZING' WHERE account_scope='a' AND draft_id='d'",
             "UPDATE upload_jobs SET audio_confirm_state='CONFIRMED' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET progress_percent=9 WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET attempt_count=0 WHERE account_scope='a' AND draft_id='d'",
             "UPDATE media SET encrypted_relative_path='media/v1/${"b".repeat(32)}.vef' WHERE account_scope='a' AND draft_id='d' AND type='AUDIO'",
         ).forEach { sql -> assertThrows(SQLiteConstraintException::class.java) { db.execSQL(sql) } }
         Unit
@@ -99,7 +105,7 @@ class DatabaseConstraintTest {
         database.draftDao().insert(validDraft("a", "d1"))
         database.draftDao().insert(validDraft("a", "d2"))
         database.draftDao().insert(validDraft("b", "d1"))
-        database.uploadDao().insert(UploadJobEntity.newPending("a", "d1", "audio-key", "video-key", "submit-key"))
+        database.uploadDao().insert(UploadJobEntity.newPending("a", "d1", "grant:d1:audio", "grant:d1:video", "submit:d1"))
         val db = database.openHelper.writableDatabase
 
         listOf(
@@ -121,8 +127,8 @@ class DatabaseConstraintTest {
             }
         }
 
-        database.uploadDao().insert(UploadJobEntity.newPending("b", "d1", "audio-key", "video-key", "submit-key"))
-        assertEquals("audio-key", database.uploadDao().find("b", "d1")?.audioGrantKey)
+        database.uploadDao().insert(UploadJobEntity.newPending("b", "d1", "grant:d1:audio", "grant:d1:video", "submit:d1"))
+        assertEquals("grant:d1:audio", database.uploadDao().find("b", "d1")?.audioGrantKey)
     }
 
     private fun cloneUploadJobRaw(

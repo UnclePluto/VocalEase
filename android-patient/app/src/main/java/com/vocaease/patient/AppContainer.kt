@@ -26,6 +26,9 @@ import com.vocaease.patient.feature.catalog.VocaEasePatientRemoteDataSource
 import com.vocaease.patient.feature.catalog.VocaEaseSongRemoteDataSource
 import com.vocaease.patient.feature.profile.PendingUploadCounter
 import com.vocaease.patient.feature.profile.AccountScopedPendingUploadCounter
+import com.vocaease.patient.feature.training.LocalUploadQueueSignals
+import com.vocaease.patient.feature.upload.UploadCoordinator
+import com.vocaease.patient.feature.upload.VocaEaseUploadRemote
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -33,6 +36,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 fun interface AppClock {
     fun nowEpochMilliseconds(): Long
@@ -123,20 +127,43 @@ class AndroidAppContainer(context: Context) : AppContainer {
         }
     }
     override val mediaFactory = MediaFactory { ExoPreviewEngine(context.applicationContext) }
-    override val uploadFactory = UploadFactory { error("上传能力将在后续任务中提供") }
+    private val uploadCoordinator = UploadCoordinator(
+        context = context,
+        storageProvider = draftStorage,
+        remoteFactory = { scopeHash -> VocaEaseUploadRemote(patientApi, scopeHash) },
+        nowEpochMillis = clock::nowEpochMilliseconds,
+    )
+    override val uploadFactory = UploadFactory { uploadCoordinator }
 
     init {
         val cleanupScheduler = DailyDraftCleanupScheduler(context)
         val tempFiles = PrivateRecordingTempFiles(context)
         val stagingRecovery = RecordingStagingRecovery(tempFiles)
         var recoveryJob: Job? = null
+        var uploadRecoveryJob: Job? = null
+        var previousUploadScope: String? = null
         accountSession.addLeaseChangedListener {
             recordingPlaybackHandoff.discardAll()
+            previousUploadScope?.let(uploadCoordinator::cancelAccount)
             val storage = runCatching { draftStorage.current() }.getOrNull()
+            previousUploadScope = storage?.accountScopeHash
             cleanupScheduler.replaceFor(storage)
             recoveryJob?.cancel()
+            uploadRecoveryJob?.cancel()
             recoveryJob = storage?.let { current ->
                 applicationScope.launch { stagingRecovery.recover(current) }
+            }
+            uploadRecoveryJob = storage?.let { current ->
+                applicationScope.launch {
+                    current.observeUploadJobs().first().forEach { job ->
+                        runCatching { uploadCoordinator.schedule(job.draftId) }
+                    }
+                }
+            }
+        }
+        applicationScope.launch {
+            LocalUploadQueueSignals.signals.collect { draftId ->
+                runCatching { uploadCoordinator.schedule(draftId) }
             }
         }
         tempFiles.cleanupOrphans()

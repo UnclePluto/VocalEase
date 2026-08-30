@@ -82,7 +82,7 @@ class DatabaseIsolationTest {
         assertNull(database.uploadDao().find("patient-a", "shared"))
         assertEquals("song-b", database.draftDao().find("patient-b", "shared")?.songId)
         assertEquals(MediaType.VIDEO, database.mediaDao().find("patient-b", "shared", MediaType.VIDEO)?.type)
-        assertEquals("submit-key", database.uploadDao().find("patient-b", "shared")?.submitKey)
+        assertEquals("submit:shared", database.uploadDao().find("patient-b", "shared")?.submitKey)
     }
 
     @Test
@@ -200,9 +200,9 @@ class DatabaseIsolationTest {
         audioUploadState = UploadStepState.PENDING,
         videoUploadState = UploadStepState.PENDING,
         submitState = UploadStepState.PENDING,
-        audioGrantKey = "audio-grant",
-        videoGrantKey = "video-grant",
-        submitKey = "submit-key",
+        audioGrantKey = "grant:$draftId:audio",
+        videoGrantKey = "grant:$draftId:video",
+        submitKey = "submit:$draftId",
         audioAssetKey = null,
         videoAssetKey = null,
         audioObjectKey = null,

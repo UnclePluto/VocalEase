@@ -41,6 +41,12 @@ class DatabaseConverters {
     fun toUploadOverallState(value: String): UploadOverallState = enumValueOrReject(value)
 
     @TypeConverter
+    fun fromUploadPipelineStage(value: UploadPipelineStage): String = value.name
+
+    @TypeConverter
+    fun toUploadPipelineStage(value: String): UploadPipelineStage = enumValueOrReject(value)
+
+    @TypeConverter
     fun fromPreparationDraftStatus(value: PreparationDraftStatus): String = value.name
 
     @TypeConverter
@@ -53,7 +59,7 @@ class DatabaseConverters {
 
 @Database(
     entities = [DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -72,6 +78,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
             val builder = Room.databaseBuilder(context.applicationContext, VocaEaseDatabase::class.java, name)
                 .addMigrations(MIGRATION_1_2)
                 .addMigrations(MIGRATION_2_3)
+                .addMigrations(MIGRATION_3_4)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -124,16 +131,16 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `preparation_drafts` ADD COLUMN `active_song_id` TEXT")
                 db.execSQL(
                     """
-                    UPDATE preparation_drafts AS candidate
+                    UPDATE preparation_drafts
                     SET status = CASE WHEN server_session_id IS NULL THEN 'PENDING' ELSE 'BOUND' END,
                         active_song_id = song_id
                     WHERE NOT EXISTS (
                       SELECT 1 FROM preparation_drafts AS older
-                      WHERE older.account_scope = candidate.account_scope
-                        AND older.song_id = candidate.song_id
+                      WHERE older.account_scope = preparation_drafts.account_scope
+                        AND older.song_id = preparation_drafts.song_id
                         AND (
-                          older.created_at < candidate.created_at OR
-                          (older.created_at = candidate.created_at AND older.draft_id < candidate.draft_id)
+                          older.created_at < preparation_drafts.created_at OR
+                          (older.created_at = preparation_drafts.created_at AND older.draft_id < preparation_drafts.draft_id)
                         )
                     )
                     """.trimIndent(),
@@ -142,6 +149,17 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                     "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_active_song_id` " +
                         "ON `preparation_drafts` (`account_scope`, `active_song_id`)",
                 )
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TRIGGER IF EXISTS upload_jobs_guard_insert_v1")
+                db.execSQL("DROP TRIGGER IF EXISTS upload_jobs_guard_update_v1")
+                db.execSQL("ALTER TABLE `upload_jobs` ADD COLUMN `pipeline_stage` TEXT NOT NULL DEFAULT 'PAUSED'")
+                db.execSQL("ALTER TABLE `upload_jobs` ADD COLUMN `progress_percent` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `upload_jobs` ADD COLUMN `receipt_wait_attempt` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE upload_jobs SET audio_grant_key='grant:' || draft_id || ':audio', video_grant_key='grant:' || draft_id || ':video', submit_key='submit:' || draft_id")
             }
         }
     }

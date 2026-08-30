@@ -17,6 +17,9 @@ internal interface UploadDao {
     @Query("SELECT * FROM upload_jobs WHERE account_scope = :accountScope AND draft_id = :draftId")
     fun observe(accountScope: String, draftId: String): Flow<UploadJobEntity?>
 
+    @Query("SELECT * FROM upload_jobs WHERE account_scope = :accountScope ORDER BY draft_id")
+    fun observeAll(accountScope: String): Flow<List<UploadJobEntity>>
+
     @Query(
         """
         SELECT COUNT(*) FROM upload_jobs
@@ -41,6 +44,7 @@ internal interface UploadDao {
         """
         UPDATE upload_jobs SET
             overall_state = :overallState,
+            pipeline_stage = :pipelineStage,
             audio_grant_state = :audioGrantState, video_grant_state = :videoGrantState,
             audio_upload_state = :audioUploadState, video_upload_state = :videoUploadState,
             audio_receipt_state = :audioReceiptState, video_receipt_state = :videoReceiptState,
@@ -51,7 +55,8 @@ internal interface UploadDao {
             audio_object_key = :audioObjectKey, video_object_key = :videoObjectKey,
             audio_receipt = :audioReceipt, video_receipt = :videoReceipt,
             audio_confirmed_at = :audioConfirmedAt, video_confirmed_at = :videoConfirmedAt,
-            attempt_count = :attemptCount, next_retry_at = :nextRetryAt, last_safe_error = :lastSafeError
+            attempt_count = :attemptCount, next_retry_at = :nextRetryAt, last_safe_error = :lastSafeError,
+            progress_percent = :progressPercent, receipt_wait_attempt = :receiptWaitAttempt
         WHERE account_scope = :accountScope AND draft_id = :draftId
         """,
     )
@@ -59,6 +64,7 @@ internal interface UploadDao {
         accountScope: String,
         draftId: String,
         overallState: UploadOverallState,
+        pipelineStage: UploadPipelineStage,
         audioGrantState: UploadStepState,
         videoGrantState: UploadStepState,
         audioUploadState: UploadStepState,
@@ -82,6 +88,8 @@ internal interface UploadDao {
         attemptCount: Int,
         nextRetryAt: Long?,
         lastSafeError: String?,
+        progressPercent: Int,
+        receiptWaitAttempt: Int,
     ): Int
 
     @Query("DELETE FROM upload_jobs WHERE account_scope = :accountScope AND draft_id = :draftId")

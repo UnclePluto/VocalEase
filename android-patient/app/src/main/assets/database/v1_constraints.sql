@@ -58,7 +58,21 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_insert_v1 BEFORE INSERT ON upload
   SELECT CASE WHEN trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = ''
     OR trim(NEW.audio_grant_key) = '' OR trim(NEW.video_grant_key) = '' OR trim(NEW.submit_key) = ''
     OR length(NEW.audio_grant_key) > 128 OR length(NEW.video_grant_key) > 128 OR length(NEW.submit_key) > 128
+    OR NEW.audio_grant_key != 'grant:' || NEW.draft_id || ':audio'
+    OR NEW.video_grant_key != 'grant:' || NEW.draft_id || ':video'
+    OR NEW.submit_key != 'submit:' || NEW.draft_id
     OR NEW.overall_state NOT IN ('PAUSED','WAITING_NETWORK','UPLOADING','WAITING_CALLBACK','CONFIRMING','READY_TO_SUBMIT','SUBMITTING','ANALYZING','FAILED','CANCELLED','COMPLETED')
+    OR NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING','FAILED')
+    OR NOT (
+      (NEW.pipeline_stage = 'PAUSED' AND NEW.overall_state IN ('PAUSED','CANCELLED'))
+      OR (NEW.pipeline_stage = 'WAITING_NETWORK' AND NEW.overall_state = 'WAITING_NETWORK')
+      OR (NEW.pipeline_stage IN ('REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO') AND NEW.overall_state = 'UPLOADING')
+      OR (NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','WAITING_VIDEO_RECEIPT') AND NEW.overall_state = 'WAITING_CALLBACK')
+      OR (NEW.pipeline_stage IN ('CONFIRMING_AUDIO','CONFIRMING_VIDEO') AND NEW.overall_state = 'CONFIRMING')
+      OR (NEW.pipeline_stage = 'SUBMITTING' AND NEW.overall_state = 'SUBMITTING')
+      OR (NEW.pipeline_stage = 'ANALYZING' AND NEW.overall_state IN ('ANALYZING','COMPLETED'))
+      OR (NEW.pipeline_stage = 'FAILED' AND NEW.overall_state = 'FAILED')
+    )
     OR NEW.audio_grant_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
     OR NEW.video_grant_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
     OR NEW.audio_upload_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
@@ -71,6 +85,8 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_insert_v1 BEFORE INSERT ON upload
     OR typeof(NEW.attempt_count) != 'integer' OR NEW.attempt_count < 0
     OR (NEW.next_retry_at IS NOT NULL AND (typeof(NEW.next_retry_at) != 'integer' OR NEW.next_retry_at < 0))
     OR (NEW.last_safe_error IS NOT NULL AND length(NEW.last_safe_error) > 256)
+    OR typeof(NEW.progress_percent) != 'integer' OR NEW.progress_percent < 0 OR NEW.progress_percent > 100
+    OR typeof(NEW.receipt_wait_attempt) != 'integer' OR NEW.receipt_wait_attempt < 0 OR NEW.receipt_wait_attempt > 4
     OR (NEW.audio_asset_key IS NOT NULL AND (trim(NEW.audio_asset_key) = '' OR length(NEW.audio_asset_key) > 512))
     OR (NEW.video_asset_key IS NOT NULL AND (trim(NEW.video_asset_key) = '' OR length(NEW.video_asset_key) > 512))
     OR (NEW.audio_object_key IS NOT NULL AND (trim(NEW.audio_object_key) = '' OR length(NEW.audio_object_key) > 512))
@@ -92,6 +108,13 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_insert_v1 BEFORE INSERT ON upload
     OR (NEW.audio_confirm_state != 'CONFIRMED' AND NEW.audio_confirmed_at IS NOT NULL)
     OR (NEW.video_confirm_state != 'CONFIRMED' AND NEW.video_confirmed_at IS NOT NULL)
     OR (NEW.overall_state = 'READY_TO_SUBMIT' AND (NEW.audio_confirm_state != 'CONFIRMED' OR NEW.video_confirm_state != 'CONFIRMED'))
+    OR (NEW.pipeline_stage IN ('UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND (NEW.audio_asset_key IS NULL OR NEW.audio_object_key IS NULL))
+    OR (NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND NEW.audio_upload_state != 'UPLOADED')
+    OR (NEW.pipeline_stage IN ('REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND NEW.audio_confirm_state != 'CONFIRMED')
+    OR (NEW.pipeline_stage IN ('UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND (NEW.video_asset_key IS NULL OR NEW.video_object_key IS NULL))
+    OR (NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND NEW.video_upload_state != 'UPLOADED')
+    OR (NEW.pipeline_stage IN ('SUBMITTING','ANALYZING') AND NEW.video_confirm_state != 'CONFIRMED')
+    OR (NEW.pipeline_stage = 'ANALYZING' AND NEW.submit_state NOT IN ('SUBMITTED','ANALYZING'))
     OR NEW.audio_grant_key = NEW.video_grant_key OR NEW.audio_grant_key = NEW.submit_key OR NEW.video_grant_key = NEW.submit_key
     OR EXISTS (
       SELECT 1 FROM upload_jobs AS existing
@@ -109,7 +132,45 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     OR trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = ''
     OR trim(NEW.audio_grant_key) = '' OR trim(NEW.video_grant_key) = '' OR trim(NEW.submit_key) = ''
     OR length(NEW.audio_grant_key) > 128 OR length(NEW.video_grant_key) > 128 OR length(NEW.submit_key) > 128
+    OR NEW.audio_grant_key != 'grant:' || NEW.draft_id || ':audio'
+    OR NEW.video_grant_key != 'grant:' || NEW.draft_id || ':video'
+    OR NEW.submit_key != 'submit:' || NEW.draft_id
     OR NEW.overall_state NOT IN ('PAUSED','WAITING_NETWORK','UPLOADING','WAITING_CALLBACK','CONFIRMING','READY_TO_SUBMIT','SUBMITTING','ANALYZING','FAILED','CANCELLED','COMPLETED')
+    OR NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING','FAILED')
+    OR NOT (
+      (NEW.pipeline_stage = 'PAUSED' AND NEW.overall_state IN ('PAUSED','CANCELLED'))
+      OR (NEW.pipeline_stage = 'WAITING_NETWORK' AND NEW.overall_state = 'WAITING_NETWORK')
+      OR (NEW.pipeline_stage IN ('REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO') AND NEW.overall_state = 'UPLOADING')
+      OR (NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','WAITING_VIDEO_RECEIPT') AND NEW.overall_state = 'WAITING_CALLBACK')
+      OR (NEW.pipeline_stage IN ('CONFIRMING_AUDIO','CONFIRMING_VIDEO') AND NEW.overall_state = 'CONFIRMING')
+      OR (NEW.pipeline_stage = 'SUBMITTING' AND NEW.overall_state = 'SUBMITTING')
+      OR (NEW.pipeline_stage = 'ANALYZING' AND NEW.overall_state IN ('ANALYZING','COMPLETED'))
+      OR (NEW.pipeline_stage = 'FAILED' AND NEW.overall_state = 'FAILED')
+    )
+    OR NOT (
+      NEW.pipeline_stage = OLD.pipeline_stage
+      OR (OLD.pipeline_stage = 'PAUSED' AND NEW.pipeline_stage IN ('WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING'))
+      OR (OLD.pipeline_stage = 'WAITING_NETWORK' AND NEW.pipeline_stage IN ('REQUESTING_AUDIO_GRANT','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'REQUESTING_AUDIO_GRANT' AND NEW.pipeline_stage IN ('UPLOADING_AUDIO','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'UPLOADING_AUDIO' AND NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'WAITING_AUDIO_RECEIPT' AND NEW.pipeline_stage IN ('CONFIRMING_AUDIO','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'CONFIRMING_AUDIO' AND NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','REQUESTING_VIDEO_GRANT','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'REQUESTING_VIDEO_GRANT' AND NEW.pipeline_stage IN ('UPLOADING_VIDEO','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'UPLOADING_VIDEO' AND NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'WAITING_VIDEO_RECEIPT' AND NEW.pipeline_stage IN ('CONFIRMING_VIDEO','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'CONFIRMING_VIDEO' AND NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','SUBMITTING','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'SUBMITTING' AND NEW.pipeline_stage IN ('ANALYZING','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'FAILED' AND NEW.pipeline_stage IN ('WAITING_NETWORK','PAUSED'))
+    )
+    OR (NEW.audio_grant_state != OLD.audio_grant_state AND instr(',PENDING>REQUESTING_GRANT,REQUESTING_GRANT>GRANT_READY,', ',' || OLD.audio_grant_state || '>' || NEW.audio_grant_state || ',') = 0 AND NEW.audio_grant_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.video_grant_state != OLD.video_grant_state AND instr(',PENDING>REQUESTING_GRANT,REQUESTING_GRANT>GRANT_READY,', ',' || OLD.video_grant_state || '>' || NEW.video_grant_state || ',') = 0 AND NEW.video_grant_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.audio_upload_state != OLD.audio_upload_state AND instr(',PENDING>UPLOADING,UPLOADING>UPLOADED,', ',' || OLD.audio_upload_state || '>' || NEW.audio_upload_state || ',') = 0 AND NEW.audio_upload_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.video_upload_state != OLD.video_upload_state AND instr(',PENDING>UPLOADING,UPLOADING>UPLOADED,', ',' || OLD.video_upload_state || '>' || NEW.video_upload_state || ',') = 0 AND NEW.video_upload_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.audio_receipt_state != OLD.audio_receipt_state AND instr(',PENDING>WAITING_RECEIPT,WAITING_RECEIPT>RECEIPT_RECEIVED,', ',' || OLD.audio_receipt_state || '>' || NEW.audio_receipt_state || ',') = 0 AND NEW.audio_receipt_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.video_receipt_state != OLD.video_receipt_state AND instr(',PENDING>WAITING_RECEIPT,WAITING_RECEIPT>RECEIPT_RECEIVED,', ',' || OLD.video_receipt_state || '>' || NEW.video_receipt_state || ',') = 0 AND NEW.video_receipt_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.audio_confirm_state != OLD.audio_confirm_state AND instr(',PENDING>CONFIRMING,CONFIRMING>CONFIRMED,', ',' || OLD.audio_confirm_state || '>' || NEW.audio_confirm_state || ',') = 0 AND NEW.audio_confirm_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.video_confirm_state != OLD.video_confirm_state AND instr(',PENDING>CONFIRMING,CONFIRMING>CONFIRMED,', ',' || OLD.video_confirm_state || '>' || NEW.video_confirm_state || ',') = 0 AND NEW.video_confirm_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
+    OR (NEW.submit_state != OLD.submit_state AND instr(',PENDING>SUBMITTING,SUBMITTING>SUBMITTED,SUBMITTED>ANALYZING,ANALYZING>SUCCEEDED,', ',' || OLD.submit_state || '>' || NEW.submit_state || ',') = 0 AND NEW.submit_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
     OR NEW.audio_grant_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
     OR NEW.video_grant_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
     OR NEW.audio_upload_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
@@ -119,9 +180,11 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     OR NEW.audio_confirm_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
     OR NEW.video_confirm_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
     OR NEW.submit_state NOT IN ('PENDING','REQUESTING_GRANT','GRANT_READY','UPLOADING','UPLOADED','WAITING_RECEIPT','RECEIPT_RECEIVED','CONFIRMING','CONFIRMED','SUBMITTING','SUBMITTED','ANALYZING','SUCCEEDED','RETRYABLE_FAILURE','TERMINAL_FAILURE')
-    OR typeof(NEW.attempt_count) != 'integer' OR NEW.attempt_count < 0
+    OR typeof(NEW.attempt_count) != 'integer' OR NEW.attempt_count < OLD.attempt_count
     OR (NEW.next_retry_at IS NOT NULL AND (typeof(NEW.next_retry_at) != 'integer' OR NEW.next_retry_at < 0))
     OR (NEW.last_safe_error IS NOT NULL AND length(NEW.last_safe_error) > 256)
+    OR typeof(NEW.progress_percent) != 'integer' OR NEW.progress_percent < OLD.progress_percent OR NEW.progress_percent > 100
+    OR typeof(NEW.receipt_wait_attempt) != 'integer' OR NEW.receipt_wait_attempt < 0 OR NEW.receipt_wait_attempt > 4
     OR (NEW.audio_asset_key IS NOT NULL AND (trim(NEW.audio_asset_key) = '' OR length(NEW.audio_asset_key) > 512))
     OR (NEW.video_asset_key IS NOT NULL AND (trim(NEW.video_asset_key) = '' OR length(NEW.video_asset_key) > 512))
     OR (NEW.audio_object_key IS NOT NULL AND (trim(NEW.audio_object_key) = '' OR length(NEW.audio_object_key) > 512))
@@ -143,6 +206,13 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     OR (NEW.audio_confirm_state != 'CONFIRMED' AND NEW.audio_confirmed_at IS NOT NULL)
     OR (NEW.video_confirm_state != 'CONFIRMED' AND NEW.video_confirmed_at IS NOT NULL)
     OR (NEW.overall_state = 'READY_TO_SUBMIT' AND (NEW.audio_confirm_state != 'CONFIRMED' OR NEW.video_confirm_state != 'CONFIRMED'))
+    OR (NEW.pipeline_stage IN ('UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND (NEW.audio_asset_key IS NULL OR NEW.audio_object_key IS NULL))
+    OR (NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND NEW.audio_upload_state != 'UPLOADED')
+    OR (NEW.pipeline_stage IN ('REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND NEW.audio_confirm_state != 'CONFIRMED')
+    OR (NEW.pipeline_stage IN ('UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND (NEW.video_asset_key IS NULL OR NEW.video_object_key IS NULL))
+    OR (NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING') AND NEW.video_upload_state != 'UPLOADED')
+    OR (NEW.pipeline_stage IN ('SUBMITTING','ANALYZING') AND NEW.video_confirm_state != 'CONFIRMED')
+    OR (NEW.pipeline_stage = 'ANALYZING' AND NEW.submit_state NOT IN ('SUBMITTED','ANALYZING'))
     OR NEW.audio_grant_key = NEW.video_grant_key OR NEW.audio_grant_key = NEW.submit_key OR NEW.video_grant_key = NEW.submit_key
     OR EXISTS (
       SELECT 1 FROM upload_jobs AS existing

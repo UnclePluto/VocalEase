@@ -73,10 +73,36 @@ class PendingUploadCounterIntegrationTest {
             interruptionReason = null,
         )
         val scope = session.current()!!.patientId
-        database.uploadDao().insert(
-            UploadJobEntity.newPending(scope, id, "audio-$id", "video-$id", "submit-$id")
-                .copy(overallState = state),
-        )
+        val pending = UploadJobEntity.newPending(scope, id, "grant:$id:audio", "grant:$id:video", "submit:$id")
+        val job = when (state) {
+            UploadOverallState.PAUSED -> pending
+            UploadOverallState.WAITING_NETWORK -> pending.copy(
+                overallState = state, pipelineStage = UploadPipelineStage.WAITING_NETWORK,
+            )
+            UploadOverallState.FAILED -> pending.copy(
+                overallState = state, pipelineStage = UploadPipelineStage.FAILED,
+            )
+            UploadOverallState.CANCELLED -> pending.copy(overallState = state)
+            UploadOverallState.COMPLETED -> pending.copy(
+                overallState = state,
+                pipelineStage = UploadPipelineStage.ANALYZING,
+                audioGrantState = UploadStepState.GRANT_READY,
+                videoGrantState = UploadStepState.GRANT_READY,
+                audioUploadState = UploadStepState.UPLOADED,
+                videoUploadState = UploadStepState.UPLOADED,
+                audioReceiptState = UploadStepState.RECEIPT_RECEIVED,
+                videoReceiptState = UploadStepState.RECEIPT_RECEIVED,
+                audioConfirmState = UploadStepState.CONFIRMED,
+                videoConfirmState = UploadStepState.CONFIRMED,
+                submitState = UploadStepState.SUBMITTED,
+                audioAssetKey = "asset-a", videoAssetKey = "asset-v",
+                audioObjectKey = "object-a", videoObjectKey = "object-v",
+                audioReceipt = "receipt-a", videoReceipt = "receipt-v",
+                audioConfirmedAt = 1, videoConfirmedAt = 1,
+            )
+            else -> error("测试未覆盖该状态：$state")
+        }
+        database.uploadDao().insert(job)
     }
 
     private companion object {

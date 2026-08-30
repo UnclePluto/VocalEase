@@ -111,7 +111,7 @@ class AuthenticatedDraftStorageTest {
         linearSession.authenticate(PATIENT_A_UUID)
         var storage = linearProvider.current()
         insertDraft(storage, "linear")
-        storage.insertUploadJob("linear", "audio-linear", "video-linear", "submit-linear")
+        storage.insertUploadJob("linear", "grant:linear:audio", "grant:linear:video", "submit:linear")
 
         suspend fun runWhileSwitchWaits(operation: suspend (AccountScopedDraftStorage) -> Unit) = coroutineScope {
             val oldStorage = storage
@@ -278,9 +278,9 @@ class AuthenticatedDraftStorageTest {
 
         assertEquals(DraftState.READY_TO_UPLOAD, storage.findDraft("enqueue")?.state)
         val job = database.uploadDao().find(PATIENT_A_UUID, "enqueue")
-        assertEquals("upload-audio:enqueue", job?.audioGrantKey)
-        assertEquals("upload-video:enqueue", job?.videoGrantKey)
-        assertEquals("upload-submit:enqueue", job?.submitKey)
+        assertEquals("grant:enqueue:audio", job?.audioGrantKey)
+        assertEquals("grant:enqueue:video", job?.videoGrantKey)
+        assertEquals("submit:enqueue", job?.submitKey)
         Unit
     }
 

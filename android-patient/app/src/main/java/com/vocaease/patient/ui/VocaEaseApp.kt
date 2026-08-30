@@ -55,6 +55,9 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.view.WindowManager
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.camera.view.PreviewView
 import androidx.media3.ui.PlayerView
 import androidx.navigation.NavDestination
@@ -99,6 +102,10 @@ import com.vocaease.patient.feature.training.DraftRepository
 import com.vocaease.patient.feature.training.LocalUploadQueueSignals
 import com.vocaease.patient.feature.training.ReviewScreen
 import com.vocaease.patient.feature.training.ReviewViewModel
+import com.vocaease.patient.feature.upload.PendingUploadsScreen
+import com.vocaease.patient.feature.upload.PendingUploadsViewModel
+import com.vocaease.patient.feature.upload.UploadCoordinator
+import com.vocaease.patient.feature.upload.UploadNotificationPermission
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
@@ -341,7 +348,7 @@ private fun AppNavHost(
                 },
             )
         }
-        composable<AppRoute.PendingUploads> { PlaceholderScreen("待上传记录") }
+        composable<AppRoute.PendingUploads> { PendingUploadsRoute { navController.popBackStack() } }
         composable<AppRoute.TreatmentPlan> { PlaceholderScreen("治疗计划") }
         composable<AppRoute.History> { PlaceholderScreen("演唱记录") }
         composable<AppRoute.Result> { PlaceholderScreen("分析结果") }
@@ -384,6 +391,26 @@ private fun ProfileRoute(navigation: ProfileNavigation) {
         onPendingUploadsClick = navigation.openPendingUploads,
         onSettingsClick = navigation.openSettings,
         onRetry = { scope.launch { profileViewModel.refresh() } },
+    )
+}
+
+@Composable
+private fun PendingUploadsRoute(onBack: () -> Unit) {
+    val container = LocalAppContainer.current
+    val storage = remember(container) { container.draftStorage.current() }
+    val coordinator = remember(container) { container.uploadFactory.create() as UploadCoordinator }
+    val pendingViewModel: PendingUploadsViewModel = viewModel(
+        key = "pending-uploads:${storage.accountScopeHash}",
+        factory = PendingUploadsViewModel.factory(storage, coordinator),
+    )
+    val state by pendingViewModel.state.collectAsState()
+    PendingUploadsScreen(
+        state = state,
+        onBack = onBack,
+        onPause = pendingViewModel::pause,
+        onResume = pendingViewModel::resume,
+        onRetry = pendingViewModel::retry,
+        onDelete = pendingViewModel::delete,
     )
 }
 
@@ -655,6 +682,9 @@ private fun ReviewRoute(
     }
     val reviewViewModel: ReviewViewModel = viewModel(key = "review:$draftId", factory = factory)
     val state by reviewViewModel.state.collectAsState()
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
 
     LaunchedEffect(reviewViewModel) { reviewViewModel.load() }
     LaunchedEffect(
@@ -670,6 +700,13 @@ private fun ReviewRoute(
             }
             state.navigatePendingUploadDraftId != null -> {
                 val id = requireNotNull(state.navigatePendingUploadDraftId)
+                val granted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (UploadNotificationPermission.shouldRequest(Build.VERSION.SDK_INT, true, granted)) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
                 reviewViewModel.consumeNavigation()
                 onPendingUploads(id)
             }

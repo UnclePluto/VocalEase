@@ -36,7 +36,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(3, reopened.openHelper.readableDatabase.version)
+            assertEquals(4, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
@@ -48,6 +48,42 @@ class DatabaseSchemaTest {
                         "VALUES(' ','d','s','session','key','RECORDING',0,0,1,NULL)",
                 )
             }
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun versionThreeUploadJobsMigrateToExactKeysAndDurablePipelineColumns() {
+        migrationHelper.createDatabase(DATABASE_NAME, 3).use { sqlite ->
+            insertDraft(sqlite, "account-a", "draft-legacy")
+            sqlite.execSQL(
+                """
+                INSERT INTO upload_jobs(
+                  account_scope,draft_id,overall_state,audio_grant_state,video_grant_state,
+                  audio_upload_state,video_upload_state,audio_receipt_state,video_receipt_state,
+                  audio_confirm_state,video_confirm_state,submit_state,audio_grant_key,video_grant_key,
+                  submit_key,audio_asset_key,video_asset_key,audio_object_key,video_object_key,
+                  audio_receipt,video_receipt,audio_confirmed_at,video_confirmed_at,attempt_count,next_retry_at,last_safe_error
+                ) VALUES(
+                  'account-a','draft-legacy','PAUSED','PENDING','PENDING','PENDING','PENDING','PENDING','PENDING',
+                  'PENDING','PENDING','PENDING','legacy-a','legacy-v','legacy-submit',NULL,NULL,NULL,NULL,
+                  NULL,NULL,NULL,NULL,0,NULL,NULL
+                )
+                """.trimIndent(),
+            )
+        }
+
+        val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
+        try {
+            val job = kotlinx.coroutines.runBlocking { reopened.uploadDao().find("account-a", "draft-legacy") }
+            assertEquals("grant:draft-legacy:audio", job?.audioGrantKey)
+            assertEquals("grant:draft-legacy:video", job?.videoGrantKey)
+            assertEquals("submit:draft-legacy", job?.submitKey)
+            assertEquals(UploadPipelineStage.PAUSED, job?.pipelineStage)
+            assertEquals(0, job?.progressPercent)
+            assertEquals(0, job?.receiptWaitAttempt)
         } finally {
             reopened.close()
         }
@@ -79,7 +115,7 @@ class DatabaseSchemaTest {
             insertDraft(sqlite, "account-a", "draft-1")
             insertDraft(sqlite, "account-a", "draft-2")
             insertDraft(sqlite, "account-b", "draft-1")
-            insertPendingUpload(sqlite, "account-a", "draft-1", "audio-1", "video-1", "submit-1")
+            insertPendingUpload(sqlite, "account-a", "draft-1", "grant:draft-1:audio", "grant:draft-1:video", "submit:draft-1")
 
             listOf(
                 "UPDATE upload_jobs SET audio_confirmed_at=-1 WHERE account_scope='account-a' AND draft_id='draft-1'",
@@ -96,7 +132,7 @@ class DatabaseSchemaTest {
             assertThrows(android.database.sqlite.SQLiteConstraintException::class.java) {
                 insertPendingUpload(sqlite, "account-a", "draft-2", "audio-2", "submit-1", "submit-2")
             }
-            insertPendingUpload(sqlite, "account-b", "draft-1", "audio-1", "video-1", "submit-1")
+            insertPendingUpload(sqlite, "account-b", "draft-1", "grant:draft-1:audio", "grant:draft-1:video", "submit:draft-1")
         } finally {
             reopened.close()
         }

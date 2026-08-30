@@ -26,25 +26,62 @@ class UploadRecoveryTest {
     fun checkpointsResumeFromLastDurableSafePointAfterProcessReopen() = runBlocking {
         var database = VocaEaseDatabase.create(context, databaseName, allowMainThreadQueries = true)
         database.draftDao().insert(draft())
-        val checkpoints = listOf(
-            job("uploaded", UploadOverallState.WAITING_CALLBACK, UploadStepState.UPLOADED, UploadStepState.PENDING, UploadStepState.PENDING),
-            job("receipt", UploadOverallState.CONFIRMING, UploadStepState.UPLOADED, UploadStepState.RECEIPT_RECEIVED, UploadStepState.PENDING, audioReceipt = "etag-a"),
-            job("one-confirmed", UploadOverallState.CONFIRMING, UploadStepState.UPLOADED, UploadStepState.RECEIPT_RECEIVED, UploadStepState.CONFIRMED, audioReceipt = "etag-a", audioConfirmedAt = 10),
-            job(
-                "ready",
-                UploadOverallState.READY_TO_SUBMIT,
-                UploadStepState.UPLOADED,
-                UploadStepState.RECEIPT_RECEIVED,
-                UploadStepState.CONFIRMED,
-                audioReceipt = "etag-a",
-                videoReceipt = "etag-v",
-                audioConfirmedAt = 10,
-                videoConfirmedAt = 11,
-                videoConfirmed = true,
-            ),
+        val initial = UploadJobEntity.newPending("a", "d", "grant:d:audio", "grant:d:video", "submit:d")
+        database.uploadDao().insert(initial)
+        val waitingNetwork = initial.copy(overallState = UploadOverallState.WAITING_NETWORK, pipelineStage = UploadPipelineStage.WAITING_NETWORK)
+        val requestingAudio = waitingNetwork.copy(
+            overallState = UploadOverallState.UPLOADING, pipelineStage = UploadPipelineStage.REQUESTING_AUDIO_GRANT,
+            audioGrantState = UploadStepState.REQUESTING_GRANT,
         )
-        database.uploadDao().insert(checkpoints.first())
-        checkpoints.drop(1).forEach { expected ->
+        val uploadingAudio = requestingAudio.copy(
+            pipelineStage = UploadPipelineStage.UPLOADING_AUDIO,
+            audioGrantState = UploadStepState.GRANT_READY, audioUploadState = UploadStepState.UPLOADING,
+            audioAssetKey = "asset-a", audioObjectKey = "object-a",
+        )
+        val waitingAudio = uploadingAudio.copy(
+            overallState = UploadOverallState.WAITING_CALLBACK, pipelineStage = UploadPipelineStage.WAITING_AUDIO_RECEIPT,
+            audioUploadState = UploadStepState.UPLOADED, audioReceiptState = UploadStepState.WAITING_RECEIPT,
+            progressPercent = 50,
+        )
+        val confirmingAudio = waitingAudio.copy(
+            overallState = UploadOverallState.CONFIRMING, pipelineStage = UploadPipelineStage.CONFIRMING_AUDIO,
+            audioConfirmState = UploadStepState.CONFIRMING,
+        )
+        val requestingVideo = confirmingAudio.copy(
+            overallState = UploadOverallState.UPLOADING, pipelineStage = UploadPipelineStage.REQUESTING_VIDEO_GRANT,
+            audioReceiptState = UploadStepState.RECEIPT_RECEIVED, audioConfirmState = UploadStepState.CONFIRMED,
+            audioReceipt = "trusted-callback", audioConfirmedAt = 10,
+            videoGrantState = UploadStepState.REQUESTING_GRANT,
+        )
+        val uploadingVideo = requestingVideo.copy(
+            pipelineStage = UploadPipelineStage.UPLOADING_VIDEO,
+            videoGrantState = UploadStepState.GRANT_READY, videoUploadState = UploadStepState.UPLOADING,
+            videoAssetKey = "asset-v", videoObjectKey = "object-v",
+        )
+        val waitingVideo = uploadingVideo.copy(
+            overallState = UploadOverallState.WAITING_CALLBACK, pipelineStage = UploadPipelineStage.WAITING_VIDEO_RECEIPT,
+            videoUploadState = UploadStepState.UPLOADED, videoReceiptState = UploadStepState.WAITING_RECEIPT,
+            progressPercent = 100,
+        )
+        val confirmingVideo = waitingVideo.copy(
+            overallState = UploadOverallState.CONFIRMING, pipelineStage = UploadPipelineStage.CONFIRMING_VIDEO,
+            videoConfirmState = UploadStepState.CONFIRMING,
+        )
+        val submitting = confirmingVideo.copy(
+            overallState = UploadOverallState.SUBMITTING, pipelineStage = UploadPipelineStage.SUBMITTING,
+            videoReceiptState = UploadStepState.RECEIPT_RECEIVED, videoConfirmState = UploadStepState.CONFIRMED,
+            videoReceipt = "trusted-callback", videoConfirmedAt = 11,
+            submitState = UploadStepState.SUBMITTING,
+        )
+        val analyzing = submitting.copy(
+            overallState = UploadOverallState.ANALYZING, pipelineStage = UploadPipelineStage.ANALYZING,
+            submitState = UploadStepState.SUBMITTED,
+        )
+        listOf(
+            waitingNetwork, requestingAudio, uploadingAudio, waitingAudio, confirmingAudio,
+            requestingVideo, uploadingVideo, waitingVideo, confirmingVideo, submitting, analyzing,
+        ).forEachIndexed { index, durable ->
+            val expected = durable.copy(attemptCount = index + 1)
             assertEquals(1, checkpoint(database.uploadDao(), expected))
             database.close()
             database = VocaEaseDatabase.create(context, databaseName, allowMainThreadQueries = true)
@@ -55,6 +92,7 @@ class UploadRecoveryTest {
 
     private suspend fun checkpoint(dao: UploadDao, job: UploadJobEntity): Int = dao.checkpoint(
         accountScope = job.accountScope, draftId = job.draftId, overallState = job.overallState,
+        pipelineStage = job.pipelineStage,
         audioGrantState = job.audioGrantState, videoGrantState = job.videoGrantState,
         audioUploadState = job.audioUploadState, videoUploadState = job.videoUploadState,
         audioReceiptState = job.audioReceiptState, videoReceiptState = job.videoReceiptState,
@@ -65,6 +103,7 @@ class UploadRecoveryTest {
         audioReceipt = job.audioReceipt, videoReceipt = job.videoReceipt,
         audioConfirmedAt = job.audioConfirmedAt, videoConfirmedAt = job.videoConfirmedAt,
         attemptCount = job.attemptCount, nextRetryAt = job.nextRetryAt, lastSafeError = job.lastSafeError,
+        progressPercent = job.progressPercent, receiptWaitAttempt = job.receiptWaitAttempt,
     )
 
     private fun draft() = DraftEntity(
@@ -73,29 +112,4 @@ class UploadRecoveryTest {
         interruptionReason = null,
     )
 
-    private fun job(
-        marker: String,
-        overall: UploadOverallState,
-        upload: UploadStepState,
-        receipt: UploadStepState,
-        confirm: UploadStepState,
-        audioReceipt: String? = null,
-        videoReceipt: String? = null,
-        audioConfirmedAt: Long? = null,
-        videoConfirmedAt: Long? = null,
-        videoConfirmed: Boolean = false,
-    ) = UploadJobEntity(
-        accountScope = "a", draftId = "d", overallState = overall,
-        audioGrantState = UploadStepState.GRANT_READY, videoGrantState = UploadStepState.GRANT_READY,
-        audioUploadState = upload, videoUploadState = if (videoConfirmed) UploadStepState.UPLOADED else UploadStepState.PENDING,
-        audioReceiptState = receipt, videoReceiptState = if (videoConfirmed) UploadStepState.RECEIPT_RECEIVED else UploadStepState.PENDING,
-        audioConfirmState = confirm, videoConfirmState = if (videoConfirmed) UploadStepState.CONFIRMED else UploadStepState.PENDING,
-        submitState = UploadStepState.PENDING,
-        audioGrantKey = "audio-grant", videoGrantKey = "video-grant", submitKey = "submit",
-        audioAssetKey = "asset-a", videoAssetKey = if (videoConfirmed) "asset-v" else null,
-        audioObjectKey = "object-a", videoObjectKey = if (videoConfirmed) "object-v" else null,
-        audioReceipt = audioReceipt, videoReceipt = videoReceipt,
-        audioConfirmedAt = audioConfirmedAt, videoConfirmedAt = videoConfirmedAt,
-        attemptCount = marker.length, nextRetryAt = null, lastSafeError = null,
-    )
 }

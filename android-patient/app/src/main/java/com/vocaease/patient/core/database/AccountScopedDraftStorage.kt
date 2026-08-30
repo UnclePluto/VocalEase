@@ -5,6 +5,7 @@ import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import com.vocaease.patient.core.media.EncryptedMediaDataSource
 import java.io.InputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
@@ -617,10 +618,95 @@ class AccountScopedDraftStorage internal constructor(
         database.uploadDao().countPending(lease.patientId)
     }
 
+    suspend fun loadUploadBundle(draftId: String): AccountScopedUploadBundle = checked {
+        val draft = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+        require(draft.state in setOf(DraftState.READY_TO_UPLOAD, DraftState.UPLOADING, DraftState.SUBMITTED, DraftState.FAILED))
+        val job = database.uploadDao().find(lease.patientId, draftId) ?: error("上传任务不存在")
+        val preparation = database.preparationDraftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+        require(preparation.serverSessionId == draft.sessionId)
+        val media = database.mediaDao().findAll(lease.patientId, draftId)
+        require(media.size == 2 && media.map { it.type }.toSet() == setOf(MediaType.AUDIO, MediaType.VIDEO))
+        require(media.all { it.validationState == MediaValidationState.VALID && it.sizeBytes > 0 })
+        AccountScopedUploadBundle(
+            accountScopeHash = accountScopeHash,
+            draftId = draft.draftId,
+            sessionId = draft.sessionId,
+            songTitle = preparation.songTitle,
+            job = job,
+            media = media.map { AccountScopedUploadMedia(it.type, it.mimeType, it.sizeBytes, it.encryptedRelativePath) },
+        )
+    }
+
+    fun observeUploadJobs(): kotlinx.coroutines.flow.Flow<List<UploadJobEntity>> {
+        if (!isLeaseActive()) throw StaleAccountScopeException()
+        return database.uploadDao().observeAll(lease.patientId)
+    }
+
+    suspend fun findUploadJob(draftId: String): UploadJobEntity? = checked {
+        database.uploadDao().find(lease.patientId, draftId)
+    }
+
+    suspend fun copyUploadMediaTo(draftId: String, type: MediaType, destination: File): Long = checked {
+        require(destination.isFile && !java.nio.file.Files.isSymbolicLink(destination.toPath()))
+        val media = database.mediaDao().find(lease.patientId, draftId, type) ?: throw ReviewMediaInvalidException()
+        require(media.validationState == MediaValidationState.VALID && media.sizeBytes > 0)
+        fileStore.open(lease.patientId, media.encryptedRelativePath).use { reader ->
+            require(reader.length == media.sizeBytes)
+            FileOutputStream(destination, false).buffered().use { output ->
+                val buffer = ByteArray(64 * 1024)
+                var position = 0L
+                while (position < reader.length) {
+                    val read = reader.read(position, buffer, 0, minOf(buffer.size.toLong(), reader.length - position).toInt())
+                    check(read > 0)
+                    output.write(buffer, 0, read)
+                    position += read
+                }
+                buffer.fill(0)
+                output.flush()
+            }
+            require(destination.length() == media.sizeBytes)
+            media.sizeBytes
+        }
+    }
+
+    suspend fun deleteSubmittedUploadMedia(draftId: String) = checked {
+        val paths = database.withTransaction {
+            val job = database.uploadDao().find(lease.patientId, draftId) ?: return@withTransaction emptyList()
+            require(job.pipelineStage == UploadPipelineStage.ANALYZING)
+            val draft = database.draftDao().find(lease.patientId, draftId) ?: return@withTransaction emptyList()
+            database.draftDao().updateState(lease.patientId, draftId, DraftState.SUBMITTED, draft.durationMs, null)
+            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
+            database.mediaDao().findAll(lease.patientId, draftId).map { it.encryptedRelativePath }
+        }
+        fileStore.revokeEncryptedMediaReaders(lease.patientId, paths.toSet())
+        paths.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
+        database.withTransaction { database.mediaDao().deleteAll(lease.patientId, draftId) }
+    }
+
+    suspend fun deleteQueuedUploadDraft(draftId: String) = checked {
+        val paths = database.withTransaction {
+            val job = database.uploadDao().find(lease.patientId, draftId) ?: return@withTransaction emptyList()
+            require(job.pipelineStage !in setOf(UploadPipelineStage.SUBMITTING, UploadPipelineStage.ANALYZING)) {
+                "任务已经提交，不能删除"
+            }
+            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
+            database.mediaDao().findAll(lease.patientId, draftId).map { it.encryptedRelativePath }
+        }
+        fileStore.revokeEncryptedMediaReaders(lease.patientId, paths.toSet())
+        paths.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
+        database.withTransaction {
+            val job = database.uploadDao().find(lease.patientId, draftId) ?: return@withTransaction
+            require(job.pipelineStage !in setOf(UploadPipelineStage.SUBMITTING, UploadPipelineStage.ANALYZING))
+            database.draftDao().delete(lease.patientId, draftId)
+            database.preparationDraftDao().delete(lease.patientId, draftId)
+        }
+    }
+
     suspend fun checkpointUpload(draftId: String, checkpoint: UploadCheckpoint): Int = checked {
         database.withTransaction {
             val current = database.uploadDao().find(lease.patientId, draftId) ?: error("上传任务不存在")
             require(allowedTransition(current.overallState, checkpoint.overallState)) { "非法上传状态转换" }
+            require(allowedPipelineTransition(current.pipelineStage, checkpoint.pipelineStage)) { "非法上传管线状态转换" }
             require(
                 listOf(
                     current.audioGrantState to checkpoint.audioGrantState,
@@ -635,10 +721,12 @@ class AccountScopedDraftStorage internal constructor(
                 ).all { (from, to) -> allowedStepTransition(from, to) },
             ) { "非法上传步骤状态转换" }
             require(checkpoint.attemptCount >= current.attemptCount) { "上传尝试次数不能回退" }
+            require(checkpoint.progressPercent >= current.progressPercent) { "上传进度不能回退" }
             database.uploadDao().checkpoint(
                 accountScope = lease.patientId,
                 draftId = draftId,
                 overallState = checkpoint.overallState,
+                pipelineStage = checkpoint.pipelineStage,
                 audioGrantState = checkpoint.audioGrantState,
                 videoGrantState = checkpoint.videoGrantState,
                 audioUploadState = checkpoint.audioUploadState,
@@ -662,6 +750,8 @@ class AccountScopedDraftStorage internal constructor(
                 attemptCount = checkpoint.attemptCount,
                 nextRetryAt = checkpoint.nextRetryAt,
                 lastSafeError = checkpoint.lastSafeError,
+                progressPercent = checkpoint.progressPercent,
+                receiptWaitAttempt = checkpoint.receiptWaitAttempt,
             ).also { check(it == 1) { "上传检查点未持久化" } }
         }
     }
@@ -707,24 +797,28 @@ class AccountScopedDraftStorage internal constructor(
     private fun allowedTransition(from: UploadOverallState, to: UploadOverallState): Boolean =
         to == from || to in OVERALL_TRANSITIONS.getValue(from)
 
-    private fun allowedStepTransition(from: UploadStepState, to: UploadStepState): Boolean = when (from) {
-        UploadStepState.TERMINAL_FAILURE, UploadStepState.SUCCEEDED -> to == from
-        UploadStepState.RETRYABLE_FAILURE -> true
-        else -> to == UploadStepState.RETRYABLE_FAILURE || to == UploadStepState.TERMINAL_FAILURE || STEP_RANK.getValue(to) >= STEP_RANK.getValue(from)
-    }
+    private fun allowedStepTransition(from: UploadStepState, to: UploadStepState): Boolean =
+        to == from || to in STEP_TRANSITIONS.getValue(from)
+
+    private fun allowedPipelineTransition(from: UploadPipelineStage, to: UploadPipelineStage): Boolean =
+        to == from || to in PIPELINE_TRANSITIONS.getValue(from)
 
     private companion object {
         fun stableUploadKey(kind: String, draftId: String): String {
-            val direct = "upload-$kind:$draftId"
-            return if (direct.length <= 128) direct else "upload-$kind:${ChunkedAesGcmFileStore.sha256(draftId)}"
+            val direct = if (kind == "submit") "submit:$draftId" else "grant:$draftId:$kind"
+            require(direct.length <= 128) { "草稿标识过长，无法创建稳定上传键" }
+            return direct
         }
 
         val OVERALL_TRANSITIONS = mapOf(
-            UploadOverallState.PAUSED to setOf(UploadOverallState.WAITING_NETWORK, UploadOverallState.UPLOADING, UploadOverallState.CANCELLED),
+            UploadOverallState.PAUSED to setOf(
+                UploadOverallState.WAITING_NETWORK, UploadOverallState.UPLOADING, UploadOverallState.WAITING_CALLBACK,
+                UploadOverallState.CONFIRMING, UploadOverallState.SUBMITTING, UploadOverallState.CANCELLED,
+            ),
             UploadOverallState.WAITING_NETWORK to setOf(UploadOverallState.UPLOADING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED, UploadOverallState.FAILED),
             UploadOverallState.UPLOADING to setOf(UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.PAUSED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
             UploadOverallState.WAITING_CALLBACK to setOf(UploadOverallState.CONFIRMING, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
-            UploadOverallState.CONFIRMING to setOf(UploadOverallState.READY_TO_SUBMIT, UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.CONFIRMING to setOf(UploadOverallState.UPLOADING, UploadOverallState.READY_TO_SUBMIT, UploadOverallState.SUBMITTING, UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
             UploadOverallState.READY_TO_SUBMIT to setOf(UploadOverallState.SUBMITTING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED),
             UploadOverallState.SUBMITTING to setOf(UploadOverallState.ANALYZING, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
             UploadOverallState.ANALYZING to setOf(UploadOverallState.COMPLETED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
@@ -732,13 +826,54 @@ class AccountScopedDraftStorage internal constructor(
             UploadOverallState.CANCELLED to emptySet(),
             UploadOverallState.COMPLETED to emptySet(),
         )
-        val STEP_RANK = UploadStepState.entries.withIndex().associate { (index, state) ->
-            state to when (state) {
-                UploadStepState.RETRYABLE_FAILURE -> 0
-                UploadStepState.TERMINAL_FAILURE -> Int.MAX_VALUE
-                else -> index
-            }
-        }
+        val PIPELINE_TRANSITIONS = mapOf(
+            UploadPipelineStage.PAUSED to setOf(
+                UploadPipelineStage.WAITING_NETWORK,
+                UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.UPLOADING_AUDIO,
+                UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.CONFIRMING_AUDIO,
+                UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.UPLOADING_VIDEO,
+                UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.CONFIRMING_VIDEO,
+                UploadPipelineStage.SUBMITTING,
+            ),
+            UploadPipelineStage.WAITING_NETWORK to setOf(UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.REQUESTING_AUDIO_GRANT to setOf(UploadPipelineStage.UPLOADING_AUDIO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.UPLOADING_AUDIO to setOf(UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.WAITING_AUDIO_RECEIPT to setOf(UploadPipelineStage.CONFIRMING_AUDIO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.CONFIRMING_AUDIO to setOf(UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.REQUESTING_VIDEO_GRANT to setOf(UploadPipelineStage.UPLOADING_VIDEO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.UPLOADING_VIDEO to setOf(UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.WAITING_VIDEO_RECEIPT to setOf(UploadPipelineStage.CONFIRMING_VIDEO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.CONFIRMING_VIDEO to setOf(UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.SUBMITTING, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.SUBMITTING to setOf(UploadPipelineStage.ANALYZING, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+            UploadPipelineStage.ANALYZING to emptySet(),
+            UploadPipelineStage.FAILED to setOf(UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED),
+        )
+        val STEP_TRANSITIONS = mapOf(
+            UploadStepState.PENDING to setOf(
+                UploadStepState.REQUESTING_GRANT, UploadStepState.UPLOADING, UploadStepState.WAITING_RECEIPT,
+                UploadStepState.CONFIRMING, UploadStepState.SUBMITTING, UploadStepState.RETRYABLE_FAILURE,
+                UploadStepState.TERMINAL_FAILURE,
+            ),
+            UploadStepState.REQUESTING_GRANT to setOf(UploadStepState.GRANT_READY, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.GRANT_READY to setOf(UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.UPLOADING to setOf(UploadStepState.UPLOADED, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.UPLOADED to setOf(UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.WAITING_RECEIPT to setOf(UploadStepState.RECEIPT_RECEIVED, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.RECEIPT_RECEIVED to setOf(UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.CONFIRMING to setOf(UploadStepState.CONFIRMED, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.CONFIRMED to setOf(UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.SUBMITTING to setOf(UploadStepState.SUBMITTED, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.SUBMITTED to setOf(UploadStepState.ANALYZING, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.ANALYZING to setOf(UploadStepState.SUCCEEDED, UploadStepState.RETRYABLE_FAILURE, UploadStepState.TERMINAL_FAILURE),
+            UploadStepState.RETRYABLE_FAILURE to setOf(
+                UploadStepState.PENDING, UploadStepState.REQUESTING_GRANT, UploadStepState.GRANT_READY,
+                UploadStepState.UPLOADING, UploadStepState.UPLOADED, UploadStepState.WAITING_RECEIPT,
+                UploadStepState.RECEIPT_RECEIVED, UploadStepState.CONFIRMING, UploadStepState.CONFIRMED,
+                UploadStepState.SUBMITTING, UploadStepState.SUBMITTED, UploadStepState.ANALYZING,
+            ),
+            UploadStepState.TERMINAL_FAILURE to emptySet(),
+            UploadStepState.SUCCEEDED to emptySet(),
+        )
     }
 }
 
@@ -777,6 +912,9 @@ data class UploadCheckpoint(
     val attemptCount: Int,
     val nextRetryAt: Long?,
     val lastSafeError: String?,
+    val pipelineStage: UploadPipelineStage = UploadPipelineStage.PAUSED,
+    val progressPercent: Int = 0,
+    val receiptWaitAttempt: Int = 0,
 )
 
 data class EncryptedMediaAsset(val relativePath: String, val encryptedSizeBytes: Long)
@@ -798,6 +936,22 @@ data class AccountScopedReviewDraftSnapshot(
     val state: DraftState,
     val durationMs: Long,
     val media: List<AccountScopedReviewMediaSnapshot>,
+)
+
+data class AccountScopedUploadMedia(
+    val type: MediaType,
+    val mimeType: String,
+    val sizeBytes: Long,
+    internal val encryptedRelativePath: String,
+)
+
+data class AccountScopedUploadBundle(
+    val accountScopeHash: String,
+    val draftId: String,
+    val sessionId: String,
+    val songTitle: String,
+    val job: UploadJobEntity,
+    val media: List<AccountScopedUploadMedia>,
 )
 
 data class DraftSnapshot(
