@@ -388,8 +388,8 @@ private class FakePreviewSession : PreviewSession {
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Buffered)
     override val state: StateFlow<PreviewState> = mutableState
     override suspend fun prepare(songId: String) = Unit
-    override fun play(): Boolean = true
-    override fun pause(): Boolean = true
+    override suspend fun play(): Boolean = true
+    override suspend fun pause(): Boolean = true
     override fun release() = Unit
     fun emit(value: PreviewState) {
         mutableState.value = value

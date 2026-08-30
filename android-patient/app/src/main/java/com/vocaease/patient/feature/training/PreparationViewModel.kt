@@ -285,7 +285,7 @@ class PreparationViewModel(
         }
     }
 
-    fun togglePreview() {
+    suspend fun togglePreview() {
         when (preview.state.value) {
             PreviewState.Buffered -> preview.play()
             PreviewState.Playing -> preview.pause()

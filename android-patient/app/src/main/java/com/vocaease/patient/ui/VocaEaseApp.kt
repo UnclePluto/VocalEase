@@ -410,7 +410,7 @@ private fun PreparationRoute(
             )
         },
         onRetry = { scope.launch { viewModel.load() } },
-        onPreviewToggle = viewModel::togglePreview,
+        onPreviewToggle = { scope.launch { viewModel.togglePreview() } },
         onRetryPreview = { scope.launch { viewModel.retryPreview() } },
     )
 }

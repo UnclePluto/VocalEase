@@ -1,15 +1,212 @@
 package com.vocaease.patient.core.media
 
 import java.time.Instant
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreviewPlayerTest {
+    @Test
+    fun `release完成后已进入的旧播放器事件不能覆盖Released`() = runBlocking {
+        val eventAdmitted = CompletableDeferred<Unit>()
+        val continueEvent = CompletableDeferred<Unit>()
+        var gateEvent = false
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine = engine,
+            grantSource = QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+            admissionProbe = PreviewAdmissionProbe { point ->
+                if (gateEvent && point == PreviewAdmissionPoint.ENGINE_EVENT) {
+                    eventAdmitted.complete(Unit)
+                    continueEvent.await()
+                }
+            },
+        )
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(player.state.value is PreviewState.Buffered)
+        gateEvent = true
+
+        val lateEvent = engine.emitAsync(this, PreviewEngineEvent.Buffering)
+        eventAdmitted.await()
+        val release = async(Dispatchers.Default) { player.release() }
+        release.await()
+        assertTrue(player.state.value is PreviewState.Released)
+
+        continueEvent.complete(Unit)
+        lateEvent.await()
+
+        assertTrue(player.state.value is PreviewState.Released)
+        assertEquals(1, engine.releaseCount)
+        assertEquals(listOf("https://private.invalid/audio"), engine.loadedUrls)
+        assertEquals(0, engine.playCount)
+        assertEquals(0, engine.pauseCount)
+        assertTrue(engine.seeks.isEmpty())
+    }
+
+    @Test
+    fun `release完成后已进入的授权错误不能发布Error`() = runBlocking {
+        val errorAdmitted = CompletableDeferred<Unit>()
+        val continueError = CompletableDeferred<Unit>()
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine = engine,
+            grantSource = PreviewGrantSource { throw java.io.IOException("offline") },
+            admissionProbe = PreviewAdmissionProbe { point ->
+                if (point == PreviewAdmissionPoint.PUBLISH_ERROR) {
+                    errorAdmitted.complete(Unit)
+                    continueError.await()
+                }
+            },
+        )
+
+        val preparation = async { player.prepare(SONG_ID) }
+        withTimeout(500) { errorAdmitted.await() }
+        val release = async(Dispatchers.Default) { player.release() }
+        release.await()
+        assertTrue(player.state.value is PreviewState.Released)
+
+        continueError.complete(Unit)
+        preparation.await()
+
+        assertTrue(player.state.value is PreviewState.Released)
+        assertEquals(1, engine.releaseCount)
+    }
+
+    @Test
+    fun `手动重试后的旧generation事件被丢弃而新generation仍可播放`() = runBlocking {
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(
+                PreviewGrant("https://private.invalid/first", Instant.MAX),
+                PreviewGrant("https://private.invalid/retry", Instant.MAX),
+            ),
+        )
+        player.prepare(SONG_ID)
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(player.state.value is PreviewState.Buffered)
+
+        engine.emitFromListener(0, PreviewEngineEvent.PlayingChanged(true))
+
+        assertTrue(player.state.value is PreviewState.Buffered)
+        assertTrue(player.play())
+    }
+
+    @Test
+    fun `401刷新异步结果在release后不能加载或seek`() = runBlocking {
+        val refreshEntered = CompletableDeferred<Unit>()
+        val releaseRefresh = CompletableDeferred<Unit>()
+        val refreshReturned = CompletableDeferred<Unit>()
+        var call = 0
+        val engine = FakePreviewEngine().apply { position = 9_876 }
+        val player = PreviewPlayer(
+            engine = engine,
+            grantSource = PreviewGrantSource {
+                call += 1
+                if (call == 1) {
+                    PreviewGrant("https://private.invalid/first", Instant.MAX)
+                } else {
+                    withContext(NonCancellable) {
+                        refreshEntered.complete(Unit)
+                        releaseRefresh.await()
+                        refreshReturned.complete(Unit)
+                    }
+                    PreviewGrant("https://private.invalid/late-refresh", Instant.MAX)
+                }
+            },
+        )
+        player.prepare(SONG_ID)
+
+        engine.emit(PreviewEngineEvent.HttpError(401))
+        refreshEntered.await()
+        player.release()
+        releaseRefresh.complete(Unit)
+        refreshReturned.await()
+        yield()
+
+        assertTrue(player.state.value is PreviewState.Released)
+        assertEquals(listOf("https://private.invalid/first"), engine.loadedUrls)
+        assertTrue(engine.seeks.isEmpty())
+        assertEquals(1, engine.releaseCount)
+    }
+
+    @Test
+    fun `play与pause被接受后release按同一队列等待且最终保持Released`() = runBlocking {
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+        )
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+
+        engine.blockPlay = true
+        val play = async(Dispatchers.Default) { player.play() }
+        engine.playEntered.await()
+        val releaseAfterPlay = async(Dispatchers.Default) { player.release() }
+        yield()
+        assertFalse(releaseAfterPlay.isCompleted)
+        engine.continuePlay.complete(Unit)
+        assertTrue(play.await())
+        releaseAfterPlay.await()
+
+        assertTrue(player.state.value is PreviewState.Released)
+        assertEquals(1, engine.playCount)
+        assertEquals(1, engine.releaseCount)
+
+        val pauseEngine = FakePreviewEngine()
+        val pausePlayer = PreviewPlayer(
+            pauseEngine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio-2", Instant.MAX)),
+        )
+        pausePlayer.prepare(SONG_ID)
+        pauseEngine.emit(PreviewEngineEvent.Ready)
+        assertTrue(pausePlayer.play())
+        pauseEngine.blockPause = true
+        val pause = async(Dispatchers.Default) { pausePlayer.pause() }
+        pauseEngine.pauseEntered.await()
+        val releaseAfterPause = async(Dispatchers.Default) { pausePlayer.release() }
+        yield()
+        assertFalse(releaseAfterPause.isCompleted)
+        pauseEngine.continuePause.complete(Unit)
+        assertTrue(pause.await())
+        releaseAfterPause.await()
+
+        assertTrue(pausePlayer.state.value is PreviewState.Released)
+        assertEquals(1, pauseEngine.pauseCount)
+        assertEquals(1, pauseEngine.releaseCount)
+    }
+
+    @Test
+    fun `engine操作同步重入播放器回调不会死锁`() = runBlocking {
+        val engine = FakePreviewEngine().apply {
+            reentrantPlayEvent = PreviewEngineEvent.PlayingChanged(true)
+        }
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+        )
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+
+        assertTrue(withTimeout(1_000) { player.play() })
+        assertTrue(player.state.value is PreviewState.Playing)
+    }
+
     @Test
     fun `只有播放器STATE_READY才发布Buffered`() = runBlocking {
         val engine = FakePreviewEngine()
@@ -42,6 +239,7 @@ class PreviewPlayerTest {
             player.prepare(SONG_ID)
 
             engine.emit(PreviewEngineEvent.HttpError(status))
+            awaitCondition { source.callCount == 2 && engine.seeks.size == 1 }
 
             assertEquals(2, source.callCount)
             assertEquals(listOf(37_500L), engine.seeks)
@@ -49,6 +247,7 @@ class PreviewPlayerTest {
             assertTrue(player.state.value is PreviewState.Buffering)
 
             engine.emit(PreviewEngineEvent.HttpError(status))
+            awaitCondition { player.state.value is PreviewState.Error }
             assertEquals(2, source.callCount)
             assertEquals("试听加载失败，请重试", (player.state.value as PreviewState.Error).message)
         }
@@ -89,7 +288,9 @@ class PreviewPlayerTest {
         assertTrue(player.play())
 
         engine.emit(PreviewEngineEvent.HttpError(401))
+        awaitCondition { source.callCount == 2 && engine.loadedUrls.size == 2 }
         engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { engine.playCount == 2 }
 
         assertEquals(listOf(12_345L), engine.seeks)
         assertEquals(2, engine.playCount)
@@ -100,11 +301,11 @@ class PreviewPlayerTest {
     fun `授权失败或第二次鉴权失败后手动重试开启新的单次刷新预算`() = runBlocking {
         val engine = FakePreviewEngine()
         var attempt = 0
-        val player = PreviewPlayer(engine) {
+        val player = PreviewPlayer(engine, grantSource = PreviewGrantSource {
             attempt += 1
             if (attempt == 1) throw java.io.IOException("offline")
             PreviewGrant("https://private.invalid/$attempt", Instant.MAX)
-        }
+        })
 
         player.prepare(SONG_ID)
         assertTrue(player.state.value is PreviewState.Error)
@@ -128,7 +329,9 @@ class PreviewPlayerTest {
         player.prepare(SONG_ID)
 
         engine.emit(PreviewEngineEvent.HttpError(401))
+        awaitCondition { source.callCount == 2 && engine.loadedUrls.size == 2 }
         engine.emit(PreviewEngineEvent.HttpError(401))
+        awaitCondition { player.state.value is PreviewState.Error }
         assertEquals("试听加载失败，请重试", (player.state.value as PreviewState.Error).message)
 
         player.prepare(SONG_ID)
@@ -161,11 +364,11 @@ class PreviewPlayerTest {
         val entered = CompletableDeferred<Unit>()
         val releaseGrant = CompletableDeferred<Unit>()
         val engine = FakePreviewEngine()
-        val player = PreviewPlayer(engine) {
+        val player = PreviewPlayer(engine, grantSource = PreviewGrantSource {
             entered.complete(Unit)
             releaseGrant.await()
             PreviewGrant("https://private.invalid/late", Instant.MAX)
-        }
+        })
         val preparation = async { player.prepare(SONG_ID) }
         entered.await()
 
@@ -183,31 +386,49 @@ class PreviewPlayerTest {
     }
 }
 
+private suspend fun awaitCondition(condition: () -> Boolean) {
+    withTimeout(1_000) {
+        while (!condition()) yield()
+    }
+}
+
 private class QueuePreviewSource(vararg grants: PreviewGrant) : PreviewGrantSource {
     private val values = ArrayDeque(grants.toList())
-    var callCount = 0
-        private set
+    private val calls = AtomicInteger()
+    val callCount: Int
+        get() = calls.get()
 
     override suspend fun fetch(songId: String): PreviewGrant {
-        callCount += 1
-        return values.removeFirst()
+        calls.incrementAndGet()
+        return synchronized(values) { values.removeFirst() }
     }
 }
 
 private class FakePreviewEngine : PreviewEngine {
+    @Volatile
     private var listener: (suspend (PreviewEngineEvent) -> Unit)? = null
-    val loadedUrls = mutableListOf<String>()
-    val seeks = mutableListOf<Long>()
+    private val listenerHistory = CopyOnWriteArrayList<suspend (PreviewEngineEvent) -> Unit>()
+    val loadedUrls = CopyOnWriteArrayList<String>()
+    val seeks = CopyOnWriteArrayList<Long>()
     var position = 0L
     var released = false
     var playCount = 0
     var pauseCount = 0
+    var releaseCount = 0
+    var blockPlay = false
+    val playEntered = CompletableDeferred<Unit>()
+    val continuePlay = CompletableDeferred<Unit>()
+    var blockPause = false
+    val pauseEntered = CompletableDeferred<Unit>()
+    val continuePause = CompletableDeferred<Unit>()
+    var reentrantPlayEvent: PreviewEngineEvent? = null
 
     override val currentPositionMillis: Long
         get() = position
 
     override fun setListener(listener: suspend (PreviewEngineEvent) -> Unit) {
         this.listener = listener
+        listenerHistory += listener
     }
 
     override fun load(url: String) {
@@ -220,18 +441,38 @@ private class FakePreviewEngine : PreviewEngine {
 
     override fun play() {
         playCount += 1
+        if (blockPlay) runBlocking {
+            playEntered.complete(Unit)
+            continuePlay.await()
+        }
+        reentrantPlayEvent?.let { event ->
+            listener?.let { callback -> runBlocking { callback(event) } }
+        }
     }
 
     override fun pause() {
         pauseCount += 1
+        if (blockPause) runBlocking {
+            pauseEntered.complete(Unit)
+            continuePause.await()
+        }
     }
 
     override fun release() {
         released = true
+        releaseCount += 1
         listener = null
     }
 
     suspend fun emit(event: PreviewEngineEvent) {
         listener?.invoke(event)
+    }
+
+    fun emitAsync(scope: CoroutineScope, event: PreviewEngineEvent) = scope.async {
+        listener?.invoke(event)
+    }
+
+    suspend fun emitFromListener(index: Int, event: PreviewEngineEvent) {
+        listenerHistory[index](event)
     }
 }

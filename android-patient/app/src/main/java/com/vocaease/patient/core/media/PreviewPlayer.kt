@@ -10,15 +10,16 @@ import com.vocaease.patient.core.network.NetworkContractException
 import java.io.IOException
 import java.time.Instant
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 
@@ -61,151 +62,272 @@ interface PreviewEngine {
 interface PreviewSession {
     val state: StateFlow<PreviewState>
     suspend fun prepare(songId: String)
-    fun play(): Boolean
-    fun pause(): Boolean
+    suspend fun play(): Boolean
+    suspend fun pause(): Boolean
     fun release()
 }
 
-class PreviewPlayer(
+internal enum class PreviewAdmissionPoint {
+    ENGINE_EVENT,
+    PUBLISH_ERROR,
+    GRANT_RESULT,
+}
+
+internal fun interface PreviewAdmissionProbe {
+    suspend fun afterAdmission(point: PreviewAdmissionPoint)
+}
+
+class PreviewPlayer internal constructor(
     private val engine: PreviewEngine,
     private val grantSource: PreviewGrantSource,
+    private val admissionProbe: PreviewAdmissionProbe = PreviewAdmissionProbe {},
 ) : PreviewSession {
-    private val mutex = Mutex()
-    private val engineLock = Any()
+    private val commands = Channel<PreviewCommand>(Channel.UNLIMITED)
+    private val actorScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    private val submissionLock = Any()
+    private val releaseCompletion = CompletableDeferred<Unit>()
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Idle)
     override val state: StateFlow<PreviewState> = mutableState.asStateFlow()
+    private var acceptingCommands = true
+    private var generation = 0L
     private var songId: String? = null
     private var currentGrant: PreviewGrant? = null
     private var refreshUsed = false
     private var resumeAfterReady = false
-    @Volatile
-    private var released = false
+    private var mediaLoaded = false
+    private var pendingPreparation: CompletableDeferred<Result<Unit>>? = null
 
     init {
-        engine.setListener(::onEngineEvent)
+        actorScope.launch { runActor() }
     }
 
     override suspend fun prepare(songId: String) {
-        mutex.withLock {
-            if (released) return@withLock
-            this.songId = songId
-            refreshUsed = false
-            resumeAfterReady = false
-            mutableState.value = PreviewState.Buffering
-            try {
-                loadGrant(grantSource.fetch(songId), positionMillis = null)
-            } catch (error: kotlinx.coroutines.CancellationException) {
-                throw error
-            } catch (_: IOException) {
-                publishErrorUnlessReleased()
-            } catch (_: HttpException) {
-                publishErrorUnlessReleased()
-            } catch (_: SerializationException) {
-                publishErrorUnlessReleased()
-            } catch (_: NetworkContractException) {
-                publishErrorUnlessReleased()
-            }
-        }
+        val completion = CompletableDeferred<Result<Unit>>()
+        if (!submit(PreviewCommand.Prepare(songId, completion))) return
+        completion.await().getOrThrow()
     }
 
-    override fun play(): Boolean = synchronized(engineLock) {
-        if (released || mutableState.value !is PreviewState.Buffered) return@synchronized false
-        engine.play()
-        mutableState.value = PreviewState.Playing
-        true
+    override suspend fun play(): Boolean {
+        val completion = CompletableDeferred<Boolean>()
+        if (!submit(PreviewCommand.Play(completion))) return false
+        return completion.await()
     }
 
-    override fun pause(): Boolean = synchronized(engineLock) {
-        if (released || mutableState.value !is PreviewState.Playing) return@synchronized false
-        engine.pause()
-        mutableState.value = PreviewState.Buffered
-        true
+    override suspend fun pause(): Boolean {
+        val completion = CompletableDeferred<Boolean>()
+        if (!submit(PreviewCommand.Pause(completion))) return false
+        return completion.await()
     }
 
     override fun release() {
-        synchronized(engineLock) {
-            if (released) return
-            released = true
-            currentGrant = null
-            engine.release()
+        val completion = synchronized(submissionLock) {
+            if (acceptingCommands) {
+                acceptingCommands = false
+                check(commands.trySend(PreviewCommand.Release).isSuccess)
+            }
+            releaseCompletion
         }
-        mutableState.value = PreviewState.Released
+        runBlocking { completion.await() }
     }
 
-    private suspend fun onEngineEvent(event: PreviewEngineEvent) {
-        mutex.withLock {
-            if (released) return@withLock
-            when (event) {
-                PreviewEngineEvent.Ready -> {
-                    mutableState.value = PreviewState.Buffered
-                    if (resumeAfterReady) {
-                        resumeAfterReady = false
-                        synchronized(engineLock) {
-                            if (!released) {
-                                engine.play()
-                                mutableState.value = PreviewState.Playing
-                            }
-                        }
-                    }
+    private suspend fun runActor() {
+        for (command in commands) {
+            when (command) {
+                is PreviewCommand.Prepare -> beginPreparation(command)
+                is PreviewCommand.GrantResolved -> applyGrant(command)
+                is PreviewCommand.EngineEvent -> applyEngineEvent(command)
+                is PreviewCommand.Play -> applyPlay(command)
+                is PreviewCommand.Pause -> applyPause(command)
+                PreviewCommand.Release -> {
+                    applyRelease()
+                    return
                 }
-                PreviewEngineEvent.Buffering -> mutableState.value = PreviewState.Buffering
-                is PreviewEngineEvent.PlayingChanged -> {
-                    when {
-                        event.isPlaying && mutableState.value is PreviewState.Buffered ->
-                            mutableState.value = PreviewState.Playing
-                        !event.isPlaying && mutableState.value is PreviewState.Playing ->
-                            mutableState.value = PreviewState.Buffered
-                    }
-                }
-                is PreviewEngineEvent.HttpError -> handleHttpError(event.status)
-                PreviewEngineEvent.PlaybackError -> publishErrorUnlessReleased()
             }
+        }
+    }
+
+    private fun beginPreparation(command: PreviewCommand.Prepare) {
+        pendingPreparation?.complete(Result.success(Unit))
+        pendingPreparation = command.completion
+        generation += 1
+        songId = command.songId
+        currentGrant = null
+        refreshUsed = false
+        resumeAfterReady = false
+        mediaLoaded = false
+        mutableState.value = PreviewState.Buffering
+        bindListener(generation)
+        fetchGrant(generation, command.songId, positionMillis = null)
+    }
+
+    private suspend fun applyGrant(command: PreviewCommand.GrantResolved) {
+        if (command.generation != generation) return
+        command.result.fold(
+            onSuccess = { grant ->
+                if (grant.url.isBlank()) {
+                    mutableState.value = PreviewState.Error(ERROR_MESSAGE)
+                    pendingPreparation?.complete(Result.failure(IllegalArgumentException("试听地址不能为空")))
+                    pendingPreparation = null
+                    return@fold
+                }
+                currentGrant = grant
+                engine.load(grant.url)
+                command.positionMillis?.let { engine.seekTo(it) }
+                mediaLoaded = true
+                pendingPreparation?.complete(Result.success(Unit))
+                pendingPreparation = null
+            },
+            onFailure = { error ->
+                mutableState.value = PreviewState.Error(ERROR_MESSAGE)
+                if (error.isRecoverablePreviewFailure()) {
+                    pendingPreparation?.complete(Result.success(Unit))
+                } else {
+                    pendingPreparation?.complete(Result.failure(error))
+                }
+                pendingPreparation = null
+            },
+        )
+    }
+
+    private suspend fun applyEngineEvent(command: PreviewCommand.EngineEvent) {
+        if (command.generation != generation) return
+        when (val event = command.event) {
+            PreviewEngineEvent.Ready -> if (mediaLoaded) {
+                mutableState.value = PreviewState.Buffered
+                if (resumeAfterReady) {
+                    resumeAfterReady = false
+                    engine.play()
+                    mutableState.value = PreviewState.Playing
+                }
+            }
+            PreviewEngineEvent.Buffering -> if (mediaLoaded) {
+                mutableState.value = PreviewState.Buffering
+            }
+            is PreviewEngineEvent.PlayingChanged -> if (mediaLoaded) {
+                when {
+                    event.isPlaying && mutableState.value is PreviewState.Buffered ->
+                        mutableState.value = PreviewState.Playing
+                    !event.isPlaying && mutableState.value is PreviewState.Playing ->
+                        mutableState.value = PreviewState.Buffered
+                }
+            }
+            is PreviewEngineEvent.HttpError -> handleHttpError(event.status)
+            PreviewEngineEvent.PlaybackError -> mutableState.value = PreviewState.Error(ERROR_MESSAGE)
         }
     }
 
     private suspend fun handleHttpError(status: Int) {
-        val currentSongId = songId
-        if (status !in setOf(401, 403) || refreshUsed || currentSongId == null || currentGrant == null) {
-            mutableState.value = PreviewState.Error("试听加载失败，请重试")
+        val activeSongId = songId
+        if (
+            status !in setOf(401, 403) || refreshUsed || activeSongId == null ||
+            currentGrant == null || !mediaLoaded
+        ) {
+            mutableState.value = PreviewState.Error(ERROR_MESSAGE)
             return
         }
         refreshUsed = true
         resumeAfterReady = mutableState.value is PreviewState.Playing
         val position = engine.currentPositionMillis.coerceAtLeast(0)
+        generation += 1
+        currentGrant = null
+        mediaLoaded = false
         mutableState.value = PreviewState.Buffering
+        bindListener(generation)
+        fetchGrant(generation, activeSongId, position)
+    }
+
+    private suspend fun applyPlay(command: PreviewCommand.Play) {
+        if (mutableState.value !is PreviewState.Buffered || !mediaLoaded) {
+            command.completion.complete(false)
+            return
+        }
+        engine.play()
+        mutableState.value = PreviewState.Playing
+        command.completion.complete(true)
+    }
+
+    private suspend fun applyPause(command: PreviewCommand.Pause) {
+        if (mutableState.value !is PreviewState.Playing || !mediaLoaded) {
+            command.completion.complete(false)
+            return
+        }
+        engine.pause()
+        mutableState.value = PreviewState.Buffered
+        command.completion.complete(true)
+    }
+
+    private suspend fun applyRelease() {
+        generation += 1
+        currentGrant = null
+        mediaLoaded = false
+        mutableState.value = PreviewState.Released
+        pendingPreparation?.complete(Result.success(Unit))
+        pendingPreparation = null
         try {
-            loadGrant(grantSource.fetch(currentSongId), position)
-        } catch (error: kotlinx.coroutines.CancellationException) {
-            throw error
-        } catch (_: IOException) {
-            publishErrorUnlessReleased()
-        } catch (_: HttpException) {
-            publishErrorUnlessReleased()
-        } catch (_: SerializationException) {
-            publishErrorUnlessReleased()
-        } catch (_: NetworkContractException) {
-            publishErrorUnlessReleased()
+            engine.release()
+        } finally {
+            commands.close()
+            releaseCompletion.complete(Unit)
+            actorScope.cancel()
         }
     }
 
-    private fun loadGrant(grant: PreviewGrant, positionMillis: Long?) {
-        require(grant.url.isNotBlank())
-        synchronized(engineLock) {
-            if (released) return
-            currentGrant = grant
-            engine.load(grant.url)
-            if (positionMillis != null) engine.seekTo(positionMillis)
+    private fun bindListener(expectedGeneration: Long) {
+        engine.setListener { event ->
+            admissionProbe.afterAdmission(PreviewAdmissionPoint.ENGINE_EVENT)
+            commands.trySend(PreviewCommand.EngineEvent(expectedGeneration, event))
         }
     }
 
-    private fun publishErrorUnlessReleased() {
-        if (!released) mutableState.value = PreviewState.Error("试听加载失败，请重试")
+    private fun fetchGrant(expectedGeneration: Long, expectedSongId: String, positionMillis: Long?) {
+        actorScope.launch(Dispatchers.IO) {
+            val result = runCatching { grantSource.fetch(expectedSongId) }
+            val point = if (result.exceptionOrNull()?.isRecoverablePreviewFailure() == true) {
+                PreviewAdmissionPoint.PUBLISH_ERROR
+            } else {
+                PreviewAdmissionPoint.GRANT_RESULT
+            }
+            admissionProbe.afterAdmission(point)
+            commands.trySend(PreviewCommand.GrantResolved(expectedGeneration, result, positionMillis))
+        }
+    }
+
+    private fun submit(command: PreviewCommand): Boolean = synchronized(submissionLock) {
+        acceptingCommands && commands.trySend(command).isSuccess
+    }
+
+    private companion object {
+        const val ERROR_MESSAGE = "试听加载失败，请重试"
     }
 }
+
+private sealed interface PreviewCommand {
+    data class Prepare(
+        val songId: String,
+        val completion: CompletableDeferred<Result<Unit>>,
+    ) : PreviewCommand
+
+    data class GrantResolved(
+        val generation: Long,
+        val result: Result<PreviewGrant>,
+        val positionMillis: Long?,
+    ) : PreviewCommand
+
+    data class EngineEvent(val generation: Long, val event: PreviewEngineEvent) : PreviewCommand
+    data class Play(val completion: CompletableDeferred<Boolean>) : PreviewCommand
+    data class Pause(val completion: CompletableDeferred<Boolean>) : PreviewCommand
+    data object Release : PreviewCommand
+}
+
+private fun Throwable.isRecoverablePreviewFailure(): Boolean =
+    this is IOException || this is HttpException || this is SerializationException || this is NetworkContractException
 
 class ExoPreviewEngine(context: Context) : PreviewEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val player = ExoPlayer.Builder(context.applicationContext).build()
+    @Volatile
+    private var positionSnapshotMillis = 0L
+    @Volatile
     private var listener: (suspend (PreviewEngineEvent) -> Unit)? = null
 
     init {
@@ -220,6 +342,7 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                positionSnapshotMillis = player.currentPosition.coerceAtLeast(0)
                 val status = generateSequence(error.cause) { it.cause }
                     .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
                     .firstOrNull()
@@ -233,12 +356,12 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
         })
     }
 
-    override val currentPositionMillis: Long
-        get() = player.currentPosition
-
     override fun setListener(listener: suspend (PreviewEngineEvent) -> Unit) {
         this.listener = listener
     }
+
+    override val currentPositionMillis: Long
+        get() = positionSnapshotMillis
 
     override fun load(url: String) {
         scope.launch {
