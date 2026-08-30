@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 class DatabaseConverters {
@@ -45,8 +46,8 @@ class DatabaseConverters {
 }
 
 @Database(
-    entities = [DraftEntity::class, MediaEntity::class, UploadJobEntity::class],
-    version = 1,
+    entities = [DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class],
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -54,6 +55,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
     abstract fun draftDao(): DraftDao
     abstract fun mediaDao(): MediaDao
     abstract fun uploadDao(): UploadDao
+    abstract fun preparationDraftDao(): PreparationDraftDao
 
     companion object {
         fun create(
@@ -62,6 +64,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
             allowMainThreadQueries: Boolean = false,
         ): VocaEaseDatabase {
             val builder = Room.databaseBuilder(context.applicationContext, VocaEaseDatabase::class.java, name)
+                .addMigrations(MIGRATION_1_2)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -72,6 +75,40 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
+        }
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `preparation_drafts` (
+                      `account_scope` TEXT NOT NULL,
+                      `draft_id` TEXT NOT NULL,
+                      `song_id` TEXT NOT NULL,
+                      `song_title` TEXT NOT NULL,
+                      `song_artist` TEXT NOT NULL,
+                      `song_duration_seconds` INTEGER NOT NULL,
+                      `server_session_id` TEXT,
+                      `creation_key` TEXT NOT NULL,
+                      `created_at` INTEGER NOT NULL,
+                      `expires_at` INTEGER NOT NULL,
+                      PRIMARY KEY(`account_scope`, `draft_id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_creation_key` " +
+                        "ON `preparation_drafts` (`account_scope`, `creation_key`)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_server_session_id` " +
+                        "ON `preparation_drafts` (`account_scope`, `server_session_id`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_expires_at` " +
+                        "ON `preparation_drafts` (`account_scope`, `expires_at`)",
+                )
+            }
         }
     }
 }
@@ -84,6 +121,7 @@ internal object DatabaseConstraintInstaller {
         "drafts_guard_insert_v1", "drafts_guard_update_v1",
         "media_guard_insert_v1", "media_guard_update_v1",
         "upload_jobs_guard_insert_v1", "upload_jobs_guard_update_v1",
+        "preparation_drafts_guard_insert_v2", "preparation_drafts_guard_update_v2",
     )
 
     fun callback(context: Context) = object : RoomDatabase.Callback() {

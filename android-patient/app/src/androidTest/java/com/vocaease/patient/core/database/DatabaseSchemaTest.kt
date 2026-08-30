@@ -31,12 +31,12 @@ class DatabaseSchemaTest {
 
     @Test
     @Throws(IOException::class)
-    fun exportedVersionOneSchema_canBeCreatedValidatedAndReopened() {
+    fun exportedVersionOneSchema_canBeMigratedValidatedAndReopened() {
         migrationHelper.createDatabase(DATABASE_NAME, 1).close()
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(1, reopened.openHelper.readableDatabase.version)
+            assertEquals(2, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }

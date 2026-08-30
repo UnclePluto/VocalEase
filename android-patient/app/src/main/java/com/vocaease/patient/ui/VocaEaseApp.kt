@@ -22,13 +22,31 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.navigation.toRoute
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -43,15 +61,27 @@ import com.vocaease.patient.feature.catalog.CatalogScreen
 import com.vocaease.patient.feature.catalog.CatalogViewModel
 import com.vocaease.patient.feature.profile.ProfileScreen
 import com.vocaease.patient.feature.profile.ProfileViewModel
+import com.vocaease.patient.core.media.PreviewPlayer
+import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
+import com.vocaease.patient.feature.training.AndroidReadinessSource
+import com.vocaease.patient.feature.training.PreparationScreen
+import com.vocaease.patient.feature.training.PreparationViewModel
+import com.vocaease.patient.feature.training.SavedStatePreparationState
+import com.vocaease.patient.feature.training.VocaEasePreparationSongSource
+import com.vocaease.patient.feature.training.VocaEasePreviewGrantSource
+import com.vocaease.patient.feature.training.VocaEaseTrainingSessionCreator
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
 import com.vocaease.patient.ui.theme.TextSecondary
 import com.vocaease.patient.ui.theme.VocaEaseTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import java.util.UUID
 
 typealias CatalogContent = @Composable ((String) -> Unit) -> Unit
 typealias ProfileContent = @Composable (ProfileNavigation) -> Unit
+typealias PreparationContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
 
 data class ProfileNavigation(
     val openHistory: () -> Unit,
@@ -69,10 +99,20 @@ fun VocaEaseApp(
         CompositionLocalProvider(LocalAppContainer provides container) {
             if (initialRoute == null) {
                 AuthFlow(repository = container.authRepository) {
-                    AuthenticatedApp(initialRoute = AppRoute.Catalog)
+                    AuthenticatedApp(
+                        initialRoute = AppRoute.Catalog,
+                        preparationContent = { songId, onBack, onRecording ->
+                            PreparationRoute(songId, onBack, onRecording)
+                        },
+                    )
                 }
             } else {
-                AuthenticatedApp(initialRoute)
+                AuthenticatedApp(
+                    initialRoute,
+                    preparationContent = { songId, onBack, onRecording ->
+                        PreparationRoute(songId, onBack, onRecording)
+                    },
+                )
             }
         }
     }
@@ -83,6 +123,7 @@ internal fun AuthenticatedApp(
     initialRoute: AppRoute,
     catalogContent: CatalogContent = { onSongClick -> CatalogRoute(onSongClick) },
     profileContent: ProfileContent = { navigation -> ProfileRoute(navigation) },
+    preparationContent: PreparationContent = { _, _, _ -> PlaceholderScreen("准备演唱") },
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -102,6 +143,7 @@ internal fun AuthenticatedApp(
             padding = padding,
             catalogContent = catalogContent,
             profileContent = profileContent,
+            preparationContent = preparationContent,
         )
     }
 }
@@ -188,6 +230,7 @@ private fun AppNavHost(
     padding: PaddingValues,
     catalogContent: CatalogContent,
     profileContent: ProfileContent,
+    preparationContent: PreparationContent,
 ) {
     NavHost(
         navController = navController,
@@ -209,7 +252,14 @@ private fun AppNavHost(
                 ),
             )
         }
-        composable<AppRoute.Preparation> { PlaceholderScreen("准备演唱") }
+        composable<AppRoute.Preparation> { entry ->
+            val route = entry.toRoute<AppRoute.Preparation>()
+            preparationContent(
+                route.songId,
+                { navController.popBackStack() },
+                { draftId -> navController.navigate(AppRoute.Recording(draftId)) { launchSingleTop = true } },
+            )
+        }
         composable<AppRoute.Recording> { PlaceholderScreen("正在录制") }
         composable<AppRoute.Review> { PlaceholderScreen("确认作品") }
         composable<AppRoute.PendingUploads> { PlaceholderScreen("待上传记录") }
@@ -256,6 +306,85 @@ private fun ProfileRoute(navigation: ProfileNavigation) {
         onSettingsClick = navigation.openSettings,
         onRetry = { scope.launch { profileViewModel.refresh() } },
     )
+}
+
+@Composable
+private fun PreparationRoute(
+    songId: String,
+    onBack: () -> Unit,
+    onRecording: (String) -> Unit,
+) {
+    val container = LocalAppContainer.current
+    val context = LocalContext.current
+    val activity = requireNotNull(context.findActivity()) { "演唱准备页需要 Activity 上下文" }
+    var permissionsRequested by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val factory = remember(songId, container, activity) {
+        viewModelFactory {
+            initializer {
+                val preview = PreviewPlayer(
+                    container.mediaFactory.createPreviewEngine(),
+                    VocaEasePreviewGrantSource(container.patientApi),
+                )
+                PreparationViewModel(
+                    songId = songId,
+                    songSource = VocaEasePreparationSongSource(container.patientApi),
+                    readinessSource = AndroidReadinessSource(activity, { permissionsRequested }, container.dispatchers.io),
+                    preview = preview,
+                    storageProvider = AccountScopedPreparationDraftStoreProvider(container.draftStorage),
+                    sessionCreator = VocaEaseTrainingSessionCreator(container.patientApi),
+                    savedState = SavedStatePreparationState(createSavedStateHandle()),
+                    countdownTick = { delay(1_000) },
+                    idFactory = { UUID.randomUUID().toString() },
+                    clock = container.clock::nowEpochMilliseconds,
+                    dispatcher = container.dispatchers.io,
+                )
+            }
+        }
+    }
+    val viewModel: PreparationViewModel = viewModel(key = "preparation:$songId", factory = factory)
+    val state by viewModel.state.collectAsState()
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        permissionsRequested = true
+        scope.launch { viewModel.refreshReadiness() }
+    }
+
+    LaunchedEffect(viewModel) { viewModel.load() }
+    LaunchedEffect(state.navigateToRecordingDraftId) {
+        state.navigateToRecordingDraftId?.let { draftId ->
+            viewModel.consumeRecordingNavigation()
+            onRecording(draftId)
+        }
+    }
+    PreparationScreen(
+        state = state,
+        onBack = {
+            viewModel.cancelPreparation()
+            onBack()
+        },
+        onStart = { scope.launch { viewModel.startTraining() } },
+        onRequestPermissions = {
+            permissionsRequested = true
+            permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
+        },
+        onOpenSettings = {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", context.packageName, null),
+                ),
+            )
+        },
+        onRetry = { scope.launch { viewModel.load() } },
+    )
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 @Composable

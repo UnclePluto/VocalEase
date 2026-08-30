@@ -8,6 +8,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class StaleAccountScopeException internal constructor() : IllegalStateException("当前账户存储已失效")
+class SessionBindingMismatchException internal constructor() : IllegalArgumentException("服务端会话与本地草稿不一致")
 
 class AuthenticatedAccountLease internal constructor(
     internal val patientId: String,
@@ -73,6 +74,8 @@ class AccountScopedDraftStorage internal constructor(
     private val session: AuthenticatedAccountSession,
     private val lease: AuthenticatedAccountLease,
 ) {
+    val accountScopeHash: String = ChunkedAesGcmFileStore.sha256(lease.patientId)
+
     suspend fun encryptMedia(plaintext: InputStream, originalLength: Long): EncryptedMediaAsset = checked {
         fileStore.encrypt(lease.patientId, plaintext, originalLength).let {
             EncryptedMediaAsset(it.relativePath, it.encryptedSizeBytes)
@@ -111,8 +114,89 @@ class AccountScopedDraftStorage internal constructor(
         }
     }
 
+    suspend fun insertPreparationDraft(draft: PreparationDraftSnapshot) = checked {
+        require(draft.accountScopeHash == accountScopeHash) { "账户作用域不匹配" }
+        database.preparationDraftDao().insert(
+            PreparationDraftEntity(
+                accountScope = lease.patientId,
+                draftId = draft.draftId,
+                songId = draft.songId,
+                songTitle = draft.songTitle,
+                songArtist = draft.songArtist,
+                songDurationSeconds = draft.songDurationSeconds,
+                serverSessionId = draft.serverSessionId,
+                creationKey = draft.creationKey,
+                createdAt = draft.createdAt,
+                expiresAt = draft.expiresAt,
+            ),
+        )
+    }
+
+    suspend fun findPreparationDraft(draftId: String): PreparationDraftSnapshot? = checked {
+        database.preparationDraftDao().find(lease.patientId, draftId)?.toSnapshot(accountScopeHash)
+    }
+
+    suspend fun bindPreparationSession(
+        draftId: String,
+        patientId: String,
+        serverSessionId: String,
+        songId: String,
+        songTitle: String,
+        songArtist: String,
+        songDurationSeconds: Int,
+    ) = checked {
+        if (patientId != lease.patientId) throw SessionBindingMismatchException()
+        database.withTransaction {
+            val pending = database.preparationDraftDao().find(lease.patientId, draftId)
+                ?: error("演唱准备草稿不存在")
+            if (pending.songId != songId) throw SessionBindingMismatchException()
+            if (pending.serverSessionId == null) {
+                check(
+                    database.preparationDraftDao().bind(
+                        accountScope = lease.patientId,
+                        draftId = draftId,
+                        serverSessionId = serverSessionId,
+                        songTitle = songTitle,
+                        songArtist = songArtist,
+                        songDurationSeconds = songDurationSeconds,
+                    ) == 1,
+                ) { "服务端会话绑定未持久化" }
+            } else {
+                if (pending.serverSessionId != serverSessionId) throw SessionBindingMismatchException()
+            }
+            val existing = database.draftDao().find(lease.patientId, draftId)
+            if (existing == null) {
+                database.draftDao().insert(
+                    DraftEntity(
+                        accountScope = lease.patientId,
+                        draftId = draftId,
+                        songId = songId,
+                        sessionId = serverSessionId,
+                        creationKey = pending.creationKey,
+                        state = DraftState.RECORDING,
+                        durationMs = 0,
+                        createdAt = pending.createdAt,
+                        expiresAt = pending.expiresAt,
+                        interruptionReason = null,
+                    ),
+                )
+            } else {
+                if (
+                    existing.sessionId != serverSessionId || existing.songId != songId ||
+                    existing.creationKey != pending.creationKey
+                ) {
+                    throw SessionBindingMismatchException()
+                }
+            }
+        }
+    }
+
     suspend fun deleteDraft(draftId: String): Int = checked {
-        database.draftDao().delete(lease.patientId, draftId)
+        database.withTransaction {
+            val deletedDraft = database.draftDao().delete(lease.patientId, draftId)
+            val deletedPreparation = database.preparationDraftDao().delete(lease.patientId, draftId)
+            maxOf(deletedDraft, deletedPreparation)
+        }
     }
 
     suspend fun insertMedia(
@@ -290,4 +374,30 @@ data class DraftSnapshot(
     val createdAt: Long,
     val expiresAt: Long,
     val interruptionReason: String?,
+)
+
+data class PreparationDraftSnapshot(
+    val accountScopeHash: String,
+    val draftId: String,
+    val songId: String,
+    val songTitle: String,
+    val songArtist: String,
+    val songDurationSeconds: Int,
+    val serverSessionId: String?,
+    val creationKey: String,
+    val createdAt: Long,
+    val expiresAt: Long,
+)
+
+private fun PreparationDraftEntity.toSnapshot(accountScopeHash: String) = PreparationDraftSnapshot(
+    accountScopeHash = accountScopeHash,
+    draftId = draftId,
+    songId = songId,
+    songTitle = songTitle,
+    songArtist = songArtist,
+    songDurationSeconds = songDurationSeconds,
+    serverSessionId = serverSessionId,
+    creationKey = creationKey,
+    createdAt = createdAt,
+    expiresAt = expiresAt,
 )

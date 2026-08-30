@@ -153,3 +153,40 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     )
   THEN RAISE(ABORT, 'upload constraint') END;
 END;
+-- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_insert_v2 BEFORE INSERT ON preparation_drafts BEGIN
+  SELECT CASE WHEN trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = '' OR trim(NEW.song_id) = ''
+    OR trim(NEW.song_title) = '' OR trim(NEW.song_artist) = '' OR trim(NEW.creation_key) = ''
+    OR length(NEW.account_scope) > 128 OR length(NEW.draft_id) > 128 OR length(NEW.song_id) > 128
+    OR length(NEW.song_title) > 256 OR length(NEW.song_artist) > 256 OR length(NEW.creation_key) > 128
+    OR NEW.creation_key NOT LIKE 'session-create:%:' || NEW.draft_id
+    OR typeof(NEW.song_duration_seconds) != 'integer' OR NEW.song_duration_seconds <= 0
+    OR (NEW.server_session_id IS NOT NULL AND (trim(NEW.server_session_id) = '' OR length(NEW.server_session_id) > 128))
+    OR typeof(NEW.created_at) != 'integer' OR typeof(NEW.expires_at) != 'integer'
+    OR NEW.created_at < 0 OR NEW.expires_at < NEW.created_at
+    OR NEW.expires_at - NEW.created_at > 604800000
+  THEN RAISE(ABORT, 'preparation draft constraint') END;
+END;
+-- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_update_v2 BEFORE UPDATE ON preparation_drafts BEGIN
+  SELECT CASE WHEN NEW.account_scope != OLD.account_scope OR NEW.draft_id != OLD.draft_id
+    OR NEW.song_id != OLD.song_id OR NEW.creation_key != OLD.creation_key
+    OR NEW.created_at != OLD.created_at OR NEW.expires_at != OLD.expires_at
+    OR (OLD.server_session_id IS NOT NULL AND (
+      NEW.server_session_id IS NOT OLD.server_session_id OR NEW.song_title != OLD.song_title
+      OR NEW.song_artist != OLD.song_artist OR NEW.song_duration_seconds != OLD.song_duration_seconds))
+    OR (OLD.server_session_id IS NULL AND NEW.server_session_id IS NULL AND (
+      NEW.song_title != OLD.song_title OR NEW.song_artist != OLD.song_artist
+      OR NEW.song_duration_seconds != OLD.song_duration_seconds))
+    OR trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = '' OR trim(NEW.song_id) = ''
+    OR trim(NEW.song_title) = '' OR trim(NEW.song_artist) = '' OR trim(NEW.creation_key) = ''
+    OR length(NEW.account_scope) > 128 OR length(NEW.draft_id) > 128 OR length(NEW.song_id) > 128
+    OR length(NEW.song_title) > 256 OR length(NEW.song_artist) > 256 OR length(NEW.creation_key) > 128
+    OR NEW.creation_key NOT LIKE 'session-create:%:' || NEW.draft_id
+    OR typeof(NEW.song_duration_seconds) != 'integer' OR NEW.song_duration_seconds <= 0
+    OR (NEW.server_session_id IS NOT NULL AND (trim(NEW.server_session_id) = '' OR length(NEW.server_session_id) > 128))
+    OR typeof(NEW.created_at) != 'integer' OR typeof(NEW.expires_at) != 'integer'
+    OR NEW.created_at < 0 OR NEW.expires_at < NEW.created_at
+    OR NEW.expires_at - NEW.created_at > 604800000
+  THEN RAISE(ABORT, 'preparation draft constraint') END;
+END;

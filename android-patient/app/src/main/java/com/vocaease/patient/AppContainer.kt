@@ -7,6 +7,8 @@ import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.VocaEaseDatabase
+import com.vocaease.patient.core.media.ExoPreviewEngine
+import com.vocaease.patient.core.media.PreviewEngine
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
@@ -37,7 +39,7 @@ fun interface RepositoryFactory {
 }
 
 fun interface MediaFactory {
-    fun create(): Any
+    fun createPreviewEngine(): PreviewEngine
 }
 
 fun interface UploadFactory {
@@ -106,7 +108,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
             else -> error("仓库尚未提供：$name")
         }
     }
-    override val mediaFactory = MediaFactory { error("媒体能力将在后续任务中提供") }
+    override val mediaFactory = MediaFactory { ExoPreviewEngine(context.applicationContext) }
     override val uploadFactory = UploadFactory { error("上传能力将在后续任务中提供") }
 }
 

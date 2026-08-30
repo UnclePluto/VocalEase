@@ -1,0 +1,145 @@
+package com.vocaease.patient.feature.training
+
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.StatFs
+import androidx.camera.core.CameraSelector
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.SavedStateHandle
+import com.vocaease.patient.core.media.PreviewGrant
+import com.vocaease.patient.core.media.PreviewGrantSource
+import com.vocaease.patient.core.network.NetworkContractException
+import com.vocaease.patient.core.network.PatientApi
+import com.vocaease.patient.core.network.dto.CreateSessionRequestDto
+import com.vocaease.patient.core.network.dto.toDomain
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
+
+class VocaEasePreparationSongSource(
+    private val api: PatientApi,
+) : PreparationSongSource {
+    override suspend fun load(songId: String): PreparationSong {
+        val song = api.song(songId).data.toDomain()
+        if (song.durationSeconds <= 0) throw NetworkContractException("歌曲时长无效")
+        return PreparationSong(song.id, song.title, song.artist, song.durationSeconds)
+    }
+}
+
+class VocaEasePreviewGrantSource(
+    private val api: PatientApi,
+) : PreviewGrantSource {
+    override suspend fun fetch(songId: String): PreviewGrant = api.previewSong(songId).data.toDomain().let {
+        PreviewGrant(it.url, it.expiresAt)
+    }
+}
+
+class VocaEaseTrainingSessionCreator(
+    private val api: PatientApi,
+) : TrainingSessionCreator {
+    override suspend fun create(songId: java.util.UUID, creationKey: String): CreatedTrainingSession {
+        val session = api.createSession(creationKey, CreateSessionRequestDto(songId.toString())).data.toDomain()
+        return CreatedTrainingSession(
+            sessionId = session.id,
+            patientId = session.patient.id,
+            song = PreparationSong(
+                id = session.song.id,
+                title = session.song.title,
+                artist = session.song.artist,
+                durationSeconds = session.song.durationSeconds,
+            ),
+        )
+    }
+}
+
+class SavedStatePreparationState(
+    private val handle: SavedStateHandle,
+) : PreparationSavedState {
+    override var draftId: String?
+        get() = handle[DRAFT_ID]
+        set(value) { handle[DRAFT_ID] = value }
+
+    override var accountScopeHash: String?
+        get() = handle[ACCOUNT_SCOPE_HASH]
+        set(value) { handle[ACCOUNT_SCOPE_HASH] = value }
+
+    private companion object {
+        const val DRAFT_ID = "preparation_draft_id"
+        const val ACCOUNT_SCOPE_HASH = "preparation_account_scope_hash"
+    }
+}
+
+class AndroidReadinessSource(
+    private val activity: Activity,
+    private val permissionsRequested: () -> Boolean,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) : ReadinessSource {
+    override suspend fun inspect(durationSeconds: Long, previewBuffered: Boolean): DeviceReadiness {
+        val context = activity.applicationContext
+        return DeviceReadiness(
+            cameraPermission = permissionState(Manifest.permission.CAMERA),
+            audioPermission = permissionState(Manifest.permission.RECORD_AUDIO),
+            availableBytes = StatFs(context.filesDir.absolutePath).availableBytes,
+            durationSeconds = durationSeconds,
+            previewBuffered = previewBuffered,
+            online = context.isOnline(),
+            frontCameraAvailable = withContext(ioDispatcher) {
+                runCatching {
+                    ProcessCameraProvider.getInstance(context).get(
+                        CAMERA_PROVIDER_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ).hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
+                }.getOrDefault(false)
+            },
+            headphonesConnected = context.headphonesConnected(),
+        )
+    }
+
+    private fun permissionState(permission: String): PermissionReadiness {
+        if (ContextCompat.checkSelfPermission(activity, permission) == PackageManager.PERMISSION_GRANTED) {
+            return PermissionReadiness.GRANTED
+        }
+        return if (
+            permissionsRequested() &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)
+        ) {
+            PermissionReadiness.PERMANENTLY_DENIED
+        } else {
+            PermissionReadiness.DENIED
+        }
+    }
+
+    private companion object {
+        const val CAMERA_PROVIDER_TIMEOUT_SECONDS = 5L
+    }
+}
+
+private fun Context.isOnline(): Boolean {
+    val manager = getSystemService(ConnectivityManager::class.java) ?: return false
+    val network = manager.activeNetwork ?: return false
+    val capabilities = manager.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+}
+
+private fun Context.headphonesConnected(): Boolean {
+    val audio = getSystemService(AudioManager::class.java) ?: return false
+    return audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { device ->
+        device.type in setOf(
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+        )
+    }
+}
