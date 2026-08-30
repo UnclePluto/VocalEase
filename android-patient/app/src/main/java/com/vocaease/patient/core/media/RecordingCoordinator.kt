@@ -43,6 +43,7 @@ interface RecordingPlayback {
 
 interface RecordingTempFiles {
     fun createVideo(): File
+    fun createVideo(identity: RecordingStagingIdentity): File = createVideo()
     fun createAudio(): File
     fun cleanup(vararg files: File)
 }
@@ -62,6 +63,7 @@ interface RecordingCoordinator : AutoCloseable {
     val playbackPositionMillis: Long get() = 0
     val recordingDurationMillis: Long get() = 0
     suspend fun takeOver(draftId: String)
+    suspend fun takeOver(draftId: String, stagingIdentity: RecordingStagingIdentity) = takeOver(draftId)
     suspend fun onCountdownFinished()
     suspend fun stop()
     suspend fun onPlaybackEnded()
@@ -91,6 +93,7 @@ class DefaultRecordingCoordinator(
             ((clockNanos() - it.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
         } ?: terminalDurationMillis.get()
     private var draftId: String? = null
+    private var stagingIdentity: RecordingStagingIdentity? = null
     private var video: File? = null
     private var audio: File? = null
 
@@ -100,15 +103,25 @@ class DefaultRecordingCoordinator(
     }
 
     override suspend fun takeOver(draftId: String) = mutex.withLock {
+        takeOverLocked(draftId, null)
+    }
+
+    override suspend fun takeOver(draftId: String, stagingIdentity: RecordingStagingIdentity) = mutex.withLock {
+        require(stagingIdentity.draftId == draftId)
+        takeOverLocked(draftId, stagingIdentity)
+    }
+
+    private suspend fun takeOverLocked(draftId: String, stagingIdentity: RecordingStagingIdentity?) {
         require(draftId.isNotBlank())
         check(this.draftId == null) { "录制协调器已接管" }
         this.draftId = draftId
+        this.stagingIdentity = stagingIdentity
         capture.bindFrontCamera()
     }
 
     override suspend fun onCountdownFinished() = mutex.withLock {
         repeat(3) { update(RecordingEvent.CountdownTick) }
-        val output = tempFiles.createVideo()
+        val output = stagingIdentity?.let(tempFiles::createVideo) ?: tempFiles.createVideo()
         video = output
         try {
             capture.start(output)

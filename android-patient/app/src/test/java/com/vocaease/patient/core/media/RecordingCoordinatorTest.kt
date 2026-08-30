@@ -15,6 +15,20 @@ import org.junit.Test
 
 class RecordingCoordinatorTest {
     @Test
+    fun `带账户绑定接管会为视频创建可恢复暂存`() = runBlocking {
+        val identity = RecordingStagingIdentity("a".repeat(64), "draft-1", "session-1", "create-1")
+        val capture = FakeCapture()
+        val tempFiles = FakeTempFiles()
+        val coordinator = DefaultRecordingCoordinator(
+            capture, FakePlayback(), { 1L }, tempFiles, FakePublisher(),
+        )
+
+        coordinator.takeOver("draft-1", identity)
+        coordinator.onCountdownFinished()
+
+        assertEquals(identity, tempFiles.stagingIdentity)
+    }
+    @Test
     fun `只选择前置摄像头且CameraX Start后才播放并记录单调偏移`() = runBlocking {
         val calls = CopyOnWriteArrayList<String>()
         val capture = FakeCapture(calls)
@@ -256,7 +270,12 @@ private class FakePlayback(private val calls: MutableList<String> = mutableListO
 
 private class FakeTempFiles : RecordingTempFiles {
     var cleaned = false
+    var stagingIdentity: RecordingStagingIdentity? = null
     override fun createVideo(): File = File("build/test-recording.recording")
+    override fun createVideo(identity: RecordingStagingIdentity): File {
+        stagingIdentity = identity
+        return createVideo()
+    }
     override fun createAudio(): File = File("build/test-audio.recording")
     override fun cleanup(vararg files: File) { cleaned = true }
 }

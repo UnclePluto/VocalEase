@@ -111,6 +111,13 @@ internal interface PreparationDraftDao {
     suspend fun acknowledgeHandoff(accountScope: String, draftId: String): Int
 
     @Query(
+        "UPDATE preparation_drafts SET status='BOUND', active_song_id=song_id " +
+            "WHERE account_scope=:accountScope AND draft_id=:draftId " +
+            "AND server_session_id=:serverSessionId AND status='HANDED_OFF'",
+    )
+    suspend fun prepareRerecord(accountScope: String, draftId: String, serverSessionId: String): Int
+
+    @Query(
         "UPDATE preparation_drafts SET status='ABANDONED', active_song_id=NULL " +
             "WHERE account_scope=:accountScope AND draft_id=:draftId " +
             "AND status IN ('PENDING','BOUND','HANDOFF_PENDING')",

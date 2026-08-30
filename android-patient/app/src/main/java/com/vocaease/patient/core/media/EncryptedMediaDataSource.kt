@@ -14,6 +14,8 @@ import com.vocaease.patient.core.security.EncryptedMediaException
 internal class EncryptedMediaDataSource(
     private val store: ChunkedAesGcmFileStore,
     private val accountScope: String,
+    private val fixedRelativePath: String? = null,
+    private val leaseActive: () -> Boolean = { true },
 ) : BaseDataSource(false) {
     private var reader: EncryptedFileReader? = null
     private var openedUri: Uri? = null
@@ -23,9 +25,10 @@ internal class EncryptedMediaDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         if (reader != null) close()
+        if (!leaseActive()) throw EncryptedMediaException("无法读取加密媒体")
         transferInitializing(dataSpec)
         try {
-            val relativePath = dataSpec.uri.path.orEmpty().removePrefix("/")
+            val relativePath = fixedRelativePath ?: dataSpec.uri.path.orEmpty().removePrefix("/")
             val openedReader = store.open(accountScope, relativePath)
             if (dataSpec.position < 0 || dataSpec.position > openedReader.length) {
                 openedReader.close()
@@ -56,6 +59,10 @@ internal class EncryptedMediaDataSource(
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (!leaseActive()) {
+            close()
+            throw EncryptedMediaException("无法读取加密媒体")
+        }
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
         val activeReader = reader ?: throw EncryptedMediaException("无法读取加密媒体")

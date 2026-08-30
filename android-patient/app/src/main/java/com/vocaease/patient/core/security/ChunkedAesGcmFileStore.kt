@@ -32,7 +32,9 @@ open class EncryptedMediaException internal constructor(message: String) : java.
 class MediaKeyInvalidatedException internal constructor() : EncryptedMediaException("加密媒体密钥已失效")
 
 internal data class EncryptedMediaReference(val relativePath: String, val encryptedSizeBytes: Long)
-internal enum class StoreIoStep { TEMP_CHMOD, FILE_FSYNC, ATOMIC_MOVE, DESTINATION_CHMOD, DIRECTORY_FSYNC, TEMP_CLEANUP }
+internal enum class StoreIoStep {
+    TEMP_CHMOD, FILE_FSYNC, ATOMIC_MOVE, DESTINATION_CHMOD, DIRECTORY_FSYNC, TEMP_CLEANUP, DELETE_MEDIA,
+}
 
 /** 软件 AES key 的单一生命周期实例；destroy 后密钥字节不可再导出或用于新 cipher。 */
 internal class WipeableAesKey(keyMaterial: ByteArray) : SecretKey {
@@ -233,8 +235,19 @@ internal class ChunkedAesGcmFileStore(
         val scopeHash = sha256(accountScope)
         synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
             val target = resolveAccountRelative(accountScope, encryptedRelativePath, WRITE_ERROR)
+            failureInjector(StoreIoStep.DELETE_MEDIA)
             if (target.exists() && !target.delete()) failWrite()
             runCatching { syncDirectory(target.parentFile ?: return@synchronized) }
+        }
+    }
+
+    internal fun revokeEncryptedMediaReaders(accountScope: String) {
+        if (accountScope.isBlank()) failOpen()
+        val scopeHash = sha256(accountScope)
+        synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+            val registryKey = registryKey(scopeHash)
+            accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.incrementAndGet()
+            activeReaders.remove(registryKey)?.toList()?.forEach(EncryptedFileReader::revoke)
         }
     }
 

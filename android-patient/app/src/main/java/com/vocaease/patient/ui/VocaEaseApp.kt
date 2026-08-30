@@ -56,6 +56,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.camera.view.PreviewView
+import androidx.media3.ui.PlayerView
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -76,6 +77,8 @@ import com.vocaease.patient.core.media.CameraXRecordingCapture
 import com.vocaease.patient.core.media.DefaultRecordingCoordinator
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingPlayback
+import com.vocaease.patient.core.media.LinearizedReviewPlayer
+import com.vocaease.patient.core.media.Media3ReviewPlayerEngine
 import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
 import com.vocaease.patient.feature.training.AndroidReadinessSource
 import com.vocaease.patient.feature.training.AndroidPreparationEnvironmentMonitor
@@ -89,6 +92,11 @@ import com.vocaease.patient.feature.training.AccountScopedRecordingDraftGateway
 import com.vocaease.patient.feature.training.RecordingScreen
 import com.vocaease.patient.feature.training.RecordingViewModel
 import com.vocaease.patient.feature.training.RecordingSystemChrome
+import com.vocaease.patient.feature.training.AccountScopedLocalReviewStore
+import com.vocaease.patient.feature.training.DraftRepository
+import com.vocaease.patient.feature.training.LocalUploadQueueSignals
+import com.vocaease.patient.feature.training.ReviewScreen
+import com.vocaease.patient.feature.training.ReviewViewModel
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
@@ -103,6 +111,7 @@ typealias CatalogContent = @Composable ((String) -> Unit) -> Unit
 typealias ProfileContent = @Composable (ProfileNavigation) -> Unit
 typealias PreparationContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
 typealias RecordingContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
+typealias ReviewContent = @Composable (String, () -> Unit, (String) -> Unit, (String) -> Unit) -> Unit
 
 private sealed interface RecordingPlaybackClaim {
     data object Loading : RecordingPlaybackClaim
@@ -132,6 +141,9 @@ fun VocaEaseApp(
                             PreparationRoute(songId, onBack, onRecording)
                         },
                         recordingContent = { draftId, onBack, onReview -> RecordingRoute(draftId, onBack, onReview) },
+                        reviewContent = { draftId, onBack, onRerecord, onPending ->
+                            ReviewRoute(draftId, onBack, onRerecord, onPending)
+                        },
                     )
                 }
             } else {
@@ -141,6 +153,9 @@ fun VocaEaseApp(
                         PreparationRoute(songId, onBack, onRecording)
                     },
                     recordingContent = { draftId, onBack, onReview -> RecordingRoute(draftId, onBack, onReview) },
+                    reviewContent = { draftId, onBack, onRerecord, onPending ->
+                        ReviewRoute(draftId, onBack, onRerecord, onPending)
+                    },
                 )
             }
         }
@@ -154,6 +169,7 @@ internal fun AuthenticatedApp(
     profileContent: ProfileContent = { navigation -> ProfileRoute(navigation) },
     preparationContent: PreparationContent = { _, _, _ -> PlaceholderScreen("准备演唱") },
     recordingContent: RecordingContent = { _, _, _ -> PlaceholderScreen("正在录制") },
+    reviewContent: ReviewContent = { _, _, _, _ -> PlaceholderScreen("本地回看") },
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -175,6 +191,7 @@ internal fun AuthenticatedApp(
             profileContent = profileContent,
             preparationContent = preparationContent,
             recordingContent = recordingContent,
+            reviewContent = reviewContent,
         )
     }
 }
@@ -263,6 +280,7 @@ private fun AppNavHost(
     profileContent: ProfileContent,
     preparationContent: PreparationContent,
     recordingContent: RecordingContent,
+    reviewContent: ReviewContent,
 ) {
     NavHost(
         navController = navController,
@@ -304,7 +322,23 @@ private fun AppNavHost(
                 },
             )
         }
-        composable<AppRoute.Review> { PlaceholderScreen("确认作品") }
+        composable<AppRoute.Review> { entry ->
+            val route = entry.toRoute<AppRoute.Review>()
+            reviewContent(
+                route.draftId,
+                { navController.popBackStack() },
+                { songId ->
+                    navController.navigate(AppRoute.Preparation(songId)) {
+                        popUpTo(AppRoute.Review(route.draftId)) { inclusive = true }
+                    }
+                },
+                {
+                    navController.navigate(AppRoute.PendingUploads) {
+                        popUpTo(AppRoute.Review(route.draftId)) { inclusive = true }
+                    }
+                },
+            )
+        }
         composable<AppRoute.PendingUploads> { PlaceholderScreen("待上传记录") }
         composable<AppRoute.TreatmentPlan> { PlaceholderScreen("治疗计划") }
         composable<AppRoute.History> { PlaceholderScreen("演唱记录") }
@@ -555,6 +589,86 @@ private fun RecordingRoute(
         },
         onStop = { scope.launch { recordingViewModel.stop() } },
         onClose = leave,
+    )
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun ReviewRoute(
+    draftId: String,
+    onBack: () -> Unit,
+    onRerecord: (String) -> Unit,
+    onPendingUploads: (String) -> Unit,
+) {
+    val container = LocalAppContainer.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val storage = remember(draftId, container) { container.draftStorage.current() }
+    val playerView = remember(context) {
+        PlayerView(context).apply {
+            useController = false
+            contentDescription = "本地录制视频"
+        }
+    }
+    val player = remember(draftId, storage, playerView) {
+        LinearizedReviewPlayer(Media3ReviewPlayerEngine(context, storage, playerView))
+    }
+    val gateway = remember(storage) {
+        DraftRepository(AccountScopedLocalReviewStore(storage), LocalUploadQueueSignals)
+    }
+    val factory = remember(draftId, gateway, player) {
+        viewModelFactory {
+            initializer {
+                ReviewViewModel(draftId, gateway, player, container.dispatchers.io)
+            }
+        }
+    }
+    val reviewViewModel: ReviewViewModel = viewModel(key = "review:$draftId", factory = factory)
+    val state by reviewViewModel.state.collectAsState()
+
+    LaunchedEffect(reviewViewModel) { reviewViewModel.load() }
+    LaunchedEffect(
+        state.navigatePreparationSongId,
+        state.navigatePendingUploadDraftId,
+        state.navigateBack,
+    ) {
+        when {
+            state.navigatePreparationSongId != null -> {
+                val songId = requireNotNull(state.navigatePreparationSongId)
+                reviewViewModel.consumeNavigation()
+                onRerecord(songId)
+            }
+            state.navigatePendingUploadDraftId != null -> {
+                val id = requireNotNull(state.navigatePendingUploadDraftId)
+                reviewViewModel.consumeNavigation()
+                onPendingUploads(id)
+            }
+            state.navigateBack -> {
+                reviewViewModel.consumeNavigation()
+                onBack()
+            }
+        }
+    }
+    val leaveAndBack = {
+        scope.launch {
+            reviewViewModel.leave()
+            onBack()
+        }
+        Unit
+    }
+    BackHandler(onBack = leaveAndBack)
+    ReviewScreen(
+        state = state,
+        videoContent = {
+            AndroidView(factory = { playerView }, modifier = Modifier.fillMaxSize())
+        },
+        onBack = leaveAndBack,
+        onPlayPause = { scope.launch { reviewViewModel.playPause() } },
+        onSeek = { scope.launch { reviewViewModel.seekTo(it) } },
+        onSwitchMedia = { scope.launch { reviewViewModel.switchMedia(it) } },
+        onRerecord = { scope.launch { reviewViewModel.rerecord() } },
+        onDelete = { scope.launch { reviewViewModel.delete() } },
+        onConfirm = { scope.launch { reviewViewModel.confirm() } },
     )
 }
 

@@ -3,7 +3,7 @@ CREATE TRIGGER IF NOT EXISTS drafts_guard_insert_v1 BEFORE INSERT ON drafts BEGI
     OR trim(NEW.session_id) = '' OR trim(NEW.creation_key) = ''
     OR length(NEW.account_scope) > 128 OR length(NEW.draft_id) > 128 OR length(NEW.song_id) > 128
     OR length(NEW.session_id) > 128 OR length(NEW.creation_key) > 128
-    OR NEW.state NOT IN ('RECORDING','REVIEW_READY','READY_TO_UPLOAD','UPLOADING','SUBMITTED','FAILED')
+    OR NEW.state NOT IN ('RECORDING','REVIEW_READY','INTERRUPTED','READY_TO_UPLOAD','UPLOADING','SUBMITTED','FAILED')
     OR typeof(NEW.duration_ms) != 'integer' OR typeof(NEW.created_at) != 'integer' OR typeof(NEW.expires_at) != 'integer'
     OR NEW.duration_ms < 0 OR NEW.created_at < 0 OR NEW.expires_at < NEW.created_at
     OR NEW.expires_at - NEW.created_at > 604800000
@@ -18,7 +18,7 @@ CREATE TRIGGER IF NOT EXISTS drafts_guard_update_v1 BEFORE UPDATE ON drafts BEGI
     OR trim(NEW.session_id) = '' OR trim(NEW.creation_key) = ''
     OR length(NEW.account_scope) > 128 OR length(NEW.draft_id) > 128 OR length(NEW.song_id) > 128
     OR length(NEW.session_id) > 128 OR length(NEW.creation_key) > 128
-    OR NEW.state NOT IN ('RECORDING','REVIEW_READY','READY_TO_UPLOAD','UPLOADING','SUBMITTED','FAILED')
+    OR NEW.state NOT IN ('RECORDING','REVIEW_READY','INTERRUPTED','READY_TO_UPLOAD','UPLOADING','SUBMITTED','FAILED')
     OR typeof(NEW.duration_ms) != 'integer' OR typeof(NEW.created_at) != 'integer' OR typeof(NEW.expires_at) != 'integer'
     OR NEW.duration_ms < 0 OR NEW.created_at < 0 OR NEW.expires_at < NEW.created_at
     OR NEW.expires_at - NEW.created_at > 604800000

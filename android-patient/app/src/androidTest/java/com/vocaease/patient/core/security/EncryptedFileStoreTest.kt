@@ -122,6 +122,27 @@ class EncryptedFileStoreTest {
     }
 
     @Test
+    fun mediaDataSourceRejectsReadsImmediatelyAfterAccountLeaseChanges() = runBlocking {
+        val reference = store.encrypt(ACCOUNT_A, ByteArrayInputStream(sample), sample.size.toLong())
+        val leaseActive = AtomicBoolean(true)
+        val source = EncryptedMediaDataSource(
+            store,
+            ACCOUNT_A,
+            fixedRelativePath = reference.relativePath,
+            leaseActive = leaseActive::get,
+        )
+        source.open(DataSpec(Uri.parse("vocaease-encrypted:///video")))
+        assertEquals(32, source.read(ByteArray(32), 0, 32))
+
+        leaseActive.set(false)
+
+        assertThrows(EncryptedMediaException::class.java) {
+            source.read(ByteArray(32), 0, 32)
+        }
+        assertEquals(null, source.uri)
+    }
+
+    @Test
     fun dataSourceClosesReaderWhenTransferStartedCallbackThrows() = runBlocking {
         var closeCount = 0
         val observedStore = ChunkedAesGcmFileStore(context, root, readerCloseObserver = { closeCount++ })

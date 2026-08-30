@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import com.vocaease.patient.core.security.StoreIoStep
 import java.io.File
 import java.io.ByteArrayInputStream
 import java.util.concurrent.atomic.AtomicReference
@@ -239,9 +240,180 @@ class AuthenticatedDraftStorageTest {
 
         storage.markRecordingInterrupted("cancel-after-publish", 1_000, "录制已取消")
 
-        assertEquals(DraftState.FAILED, storage.findDraft("cancel-after-publish")?.state)
+        assertEquals(DraftState.INTERRUPTED, storage.findDraft("cancel-after-publish")?.state)
         assertTrue(database.mediaDao().observeForDraft(PATIENT_A_UUID, "cancel-after-publish").first().isEmpty())
         assertEquals(before - 2, root.walkTopDown().count { it.extension == "vef" })
+        Unit
+    }
+
+    @Test
+    fun 回看加载要求当前账户恰好一份有效可读的音视频() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "review")
+        storage.publishRecordingMedia("review", plainFile("review-video", 257), plainFile("review-audio", 129), 2_000)
+
+        val snapshot = storage.loadReviewDraft("review")
+
+        assertEquals(DraftState.REVIEW_READY, snapshot.state)
+        assertEquals(setOf(MediaType.VIDEO, MediaType.AUDIO), snapshot.media.map { it.type }.toSet())
+        assertTrue(snapshot.media.all { it.validationState == MediaValidationState.VALID && it.readableLength == it.sizeBytes })
+
+        database.mediaDao().delete(PATIENT_A_UUID, "review", MediaType.AUDIO)
+        assertThrows(ReviewMediaInvalidException::class.java) {
+            runBlocking { storage.loadReviewDraft("review") }
+        }
+        Unit
+    }
+
+    @Test
+    fun 确认提交原子转换并创建稳定幂等上传入口() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "enqueue")
+        storage.publishRecordingMedia("enqueue", plainFile("enqueue-video", 257), plainFile("enqueue-audio", 129), 2_000)
+
+        assertTrue(storage.enqueueReviewDraft("enqueue"))
+        assertFalse(storage.enqueueReviewDraft("enqueue"))
+
+        assertEquals(DraftState.READY_TO_UPLOAD, storage.findDraft("enqueue")?.state)
+        val job = database.uploadDao().find(PATIENT_A_UUID, "enqueue")
+        assertEquals("upload-audio:enqueue", job?.audioGrantKey)
+        assertEquals("upload-video:enqueue", job?.videoGrantKey)
+        assertEquals("upload-submit:enqueue", job?.submitKey)
+        Unit
+    }
+
+    @Test
+    fun 重录使旧双密文先失效再删除且保留会话和creationKey() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "rerecord")
+        storage.publishRecordingMedia("rerecord", plainFile("rerecord-video", 257), plainFile("rerecord-audio", 129), 2_000)
+        val old = database.mediaDao().observeForDraft(PATIENT_A_UUID, "rerecord").first()
+        val before = storage.findDraft("rerecord")!!
+
+        val reset = storage.prepareRerecord("rerecord")
+
+        assertEquals(before.sessionId, reset.sessionId)
+        assertEquals(before.creationKey, reset.creationKey)
+        assertEquals(DraftState.RECORDING, storage.findDraft("rerecord")?.state)
+        assertTrue(database.mediaDao().observeForDraft(PATIENT_A_UUID, "rerecord").first().isEmpty())
+        old.forEach { media ->
+            assertThrows(com.vocaease.patient.core.security.EncryptedMediaException::class.java) {
+                fileStore.open(PATIENT_A_UUID, media.encryptedRelativePath)
+            }
+        }
+        Unit
+    }
+
+    @Test
+    fun 重录第二个密文删除失败时全部reader先撤销且可幂等重试() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        var deletes = 0
+        val injectedStore = ChunkedAesGcmFileStore(
+            context = ApplicationProvider.getApplicationContext(),
+            rootDirectory = File(contextFiles(), "delete-failure-${System.nanoTime()}"),
+            failureInjector = { step ->
+                if (step == StoreIoStep.DELETE_MEDIA && ++deletes == 2) error("injected delete")
+            },
+        )
+        val injectedProvider = AccountScopedDraftStorageProvider(database, injectedStore, sessions)
+        val storage = injectedProvider.current()
+        insertDraft(storage, "delete-failure")
+        storage.publishRecordingMedia(
+            "delete-failure", plainFile("delete-video", 257), plainFile("delete-audio", 129), 2_000,
+        )
+        val old = database.mediaDao().findAll(PATIENT_A_UUID, "delete-failure")
+        val oldSource = storage.encryptedMediaDataSource(old.first().encryptedRelativePath)
+        oldSource.open(androidx.media3.datasource.DataSpec(android.net.Uri.parse("vocaease://review/old")))
+
+        assertThrows(Exception::class.java) { runBlocking { storage.prepareRerecord("delete-failure") } }
+
+        assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, "delete-failure").all {
+            it.validationState == MediaValidationState.INVALID
+        })
+        assertThrows(Exception::class.java) { oldSource.read(ByteArray(1), 0, 1) }
+        oldSource.close()
+        assertEquals(DraftState.REVIEW_READY, storage.findDraft("delete-failure")?.state)
+
+        val reset = storage.prepareRerecord("delete-failure")
+        assertEquals(DraftState.RECORDING, reset.state)
+        assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, "delete-failure").isEmpty())
+        Unit
+    }
+
+    @Test
+    fun 重录Room提交失败时密文虽已删除但行保持INVALID并可安全重试() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "db-failure")
+        storage.publishRecordingMedia(
+            "db-failure", plainFile("db-video", 257), plainFile("db-audio", 129), 2_000,
+        )
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_rerecord BEFORE UPDATE OF state ON drafts " +
+                "WHEN NEW.draft_id = 'db-failure' AND NEW.state = 'RECORDING' " +
+                "BEGIN SELECT RAISE(ABORT, 'injected'); END",
+        )
+
+        assertThrows(android.database.sqlite.SQLiteException::class.java) {
+            runBlocking { storage.prepareRerecord("db-failure") }
+        }
+        assertEquals(DraftState.REVIEW_READY, storage.findDraft("db-failure")?.state)
+        assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, "db-failure").all {
+            it.validationState == MediaValidationState.INVALID
+        })
+        database.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_rerecord")
+
+        assertEquals(DraftState.RECORDING, storage.prepareRerecord("db-failure").state)
+        Unit
+    }
+
+    @Test
+    fun 七天清理只删除当前账户刚好到期的未入队本地态() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val accountA = provider.current()
+        suspend fun add(id: String, state: DraftState, expiresAt: Long) = accountA.insertDraft(
+            id, "song", "session-$id", "create-$id", state, 0, 0, expiresAt, null,
+        )
+        add("recording", DraftState.RECORDING, 100)
+        add("review", DraftState.REVIEW_READY, 100)
+        add("interrupted", DraftState.INTERRUPTED, 100)
+        add("future", DraftState.REVIEW_READY, 101)
+        add("failed", DraftState.FAILED, 100)
+        add("ready-upload", DraftState.READY_TO_UPLOAD, 100)
+        add("uploading", DraftState.UPLOADING, 100)
+        add("submitted", DraftState.SUBMITTED, 100)
+
+        sessions.authenticate(PATIENT_B_UUID)
+        val accountB = provider.current()
+        accountB.insertDraft("other", "song", "session-other", "create-other", DraftState.REVIEW_READY, 0, 0, 100, null)
+        sessions.authenticate(PATIENT_A_UUID)
+
+        assertEquals(3, provider.current().cleanupExpiredLocalDrafts(100))
+        assertEquals(null, provider.current().findDraft("recording"))
+        assertEquals(null, provider.current().findDraft("review"))
+        assertEquals(null, provider.current().findDraft("interrupted"))
+        listOf("future", "failed", "ready-upload", "uploading", "submitted").forEach {
+            assertTrue(provider.current().findDraft(it) != null)
+        }
+        sessions.authenticate(PATIENT_B_UUID)
+        assertTrue(provider.current().findDraft("other") != null)
+        Unit
+    }
+
+    @Test
+    fun 无可用媒体的中断草稿仍可加载身份以供重录或删除() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "interrupted-empty")
+        storage.markRecordingInterrupted("interrupted-empty", 0, "录制文件损坏")
+
+        val review = storage.loadReviewDraft("interrupted-empty")
+
+        assertEquals(DraftState.INTERRUPTED, review.state)
+        assertTrue(review.media.isEmpty())
         Unit
     }
 
@@ -255,6 +427,8 @@ class AuthenticatedDraftStorageTest {
         parentFile?.mkdirs()
         writeBytes(ByteArray(size) { index -> (index * 31).toByte() })
     }
+
+    private fun contextFiles(): File = ApplicationProvider.getApplicationContext<Context>().filesDir
 
     private fun File.sha256() = readBytes().sha256()
     private fun ByteArray.sha256() = MessageDigest.getInstance("SHA-256").digest(this)

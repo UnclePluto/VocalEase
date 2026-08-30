@@ -5,6 +5,7 @@ import com.vocaease.patient.core.database.AccountScopedDraftStorage
 import com.vocaease.patient.core.database.SessionBindingMismatchException
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import com.vocaease.patient.core.media.RecordingCoordinator
+import com.vocaease.patient.core.media.RecordingStagingIdentity
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -26,6 +27,9 @@ data class RecordingDraftInfo(
     val draftId: String,
     val songTitle: String,
     val totalDurationMillis: Long,
+    val accountScopeHash: String = "",
+    val sessionId: String = "",
+    val creationKey: String = "",
 )
 
 interface RecordingDraftGateway {
@@ -47,6 +51,9 @@ class AccountScopedRecordingDraftGateway(
             draftId,
             preparation.songTitle,
             preparation.songDurationSeconds.coerceAtLeast(0) * 1_000L,
+            storage.accountScopeHash,
+            draft.sessionId,
+            draft.creationKey,
         )
     }
 
@@ -94,7 +101,14 @@ class RecordingViewModel(
                 songTitle = info.songTitle,
                 totalDurationMillis = info.totalDurationMillis,
             ) }
-            coordinator.takeOver(draftId)
+            if (info.accountScopeHash.isNotBlank() && info.sessionId.isNotBlank() && info.creationKey.isNotBlank()) {
+                coordinator.takeOver(
+                    draftId,
+                    RecordingStagingIdentity(info.accountScopeHash, draftId, info.sessionId, info.creationKey),
+                )
+            } else {
+                coordinator.takeOver(draftId)
+            }
             for (second in 3 downTo 1) countdownTick(second)
             coordinator.onCountdownFinished()
         } catch (error: CancellationException) {

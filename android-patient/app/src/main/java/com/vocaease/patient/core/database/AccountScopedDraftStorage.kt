@@ -2,6 +2,7 @@ package com.vocaease.patient.core.database
 
 import androidx.room.withTransaction
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import com.vocaease.patient.core.media.EncryptedMediaDataSource
 import java.io.InputStream
 import java.io.File
 import java.security.MessageDigest
@@ -11,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 
 class StaleAccountScopeException internal constructor() : IllegalStateException("当前账户存储已失效")
 class SessionBindingMismatchException internal constructor() : IllegalArgumentException("服务端会话与本地草稿不一致")
+class ReviewMediaInvalidException internal constructor() : IllegalStateException("录制文件检查未通过")
 
 class AuthenticatedAccountLease internal constructor(
     internal val patientId: String,
@@ -77,6 +79,22 @@ class AccountScopedDraftStorage internal constructor(
     private val lease: AuthenticatedAccountLease,
 ) {
     val accountScopeHash: String = ChunkedAesGcmFileStore.sha256(lease.patientId)
+    val cleanupScopeToken: String = ChunkedAesGcmFileStore.sha256(lease.patientId + "\u0000" + lease.incarnationId)
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    internal fun encryptedMediaDataSource(encryptedRelativePath: String) =
+        EncryptedMediaDataSource(
+            fileStore,
+            lease.patientId,
+            fixedRelativePath = encryptedRelativePath,
+            leaseActive = { session.current() === lease },
+        )
+
+    fun isLeaseActive(): Boolean = session.current() === lease
+
+    fun onLeaseInvalidated(listener: () -> Unit) {
+        session.addLeaseChangedListener { if (session.current() !== lease) listener() }
+    }
 
     suspend fun encryptMedia(plaintext: InputStream, originalLength: Long): EncryptedMediaAsset = checked {
         fileStore.encrypt(lease.patientId, plaintext, originalLength).let {
@@ -114,6 +132,190 @@ class AccountScopedDraftStorage internal constructor(
         database.draftDao().find(lease.patientId, draftId)?.let {
             DraftSnapshot(it.draftId, it.songId, it.sessionId, it.creationKey, it.state, it.durationMs, it.createdAt, it.expiresAt, it.interruptionReason)
         }
+    }
+
+    suspend fun loadReviewDraft(draftId: String): AccountScopedReviewDraftSnapshot = checked {
+        val draft = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+        if (draft.state !in setOf(DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {
+            throw ReviewMediaInvalidException()
+        }
+        val media = database.mediaDao().findAll(lease.patientId, draftId)
+        if (media.size != 2 || media.map { it.type }.toSet() != setOf(MediaType.VIDEO, MediaType.AUDIO)) {
+            if (draft.state == DraftState.INTERRUPTED) {
+                return@checked AccountScopedReviewDraftSnapshot(
+                    draft.draftId, draft.songId, draft.sessionId, draft.creationKey,
+                    draft.state, draft.durationMs, emptyList(),
+                )
+            }
+            throw ReviewMediaInvalidException()
+        }
+        val snapshots = media.map { entity ->
+            val expectedMime = if (entity.type == MediaType.VIDEO) "video/mp4" else "audio/mp4"
+            if (entity.mimeType != expectedMime || entity.validationState != MediaValidationState.VALID || entity.sizeBytes <= 0) {
+                if (draft.state == DraftState.INTERRUPTED) {
+                    return@checked AccountScopedReviewDraftSnapshot(
+                        draft.draftId, draft.songId, draft.sessionId, draft.creationKey,
+                        draft.state, draft.durationMs, emptyList(),
+                    )
+                }
+                throw ReviewMediaInvalidException()
+            }
+            try {
+                fileStore.verifyEncryptedMedia(lease.patientId, entity.encryptedRelativePath, entity.sizeBytes)
+            } catch (_: Exception) {
+                database.mediaDao().updateValidation(
+                    lease.patientId, draftId, entity.type, MediaValidationState.INVALID,
+                )
+                if (draft.state == DraftState.INTERRUPTED) {
+                    return@checked AccountScopedReviewDraftSnapshot(
+                        draft.draftId, draft.songId, draft.sessionId, draft.creationKey,
+                        draft.state, draft.durationMs, emptyList(),
+                    )
+                }
+                throw ReviewMediaInvalidException()
+            }
+            AccountScopedReviewMediaSnapshot(
+                type = entity.type,
+                encryptedRelativePath = entity.encryptedRelativePath,
+                mimeType = entity.mimeType,
+                sizeBytes = entity.sizeBytes,
+                readableLength = entity.sizeBytes,
+                validationState = entity.validationState,
+            )
+        }
+        AccountScopedReviewDraftSnapshot(
+            draftId = draft.draftId,
+            songId = draft.songId,
+            sessionId = draft.sessionId,
+            creationKey = draft.creationKey,
+            state = draft.state,
+            durationMs = draft.durationMs,
+            media = snapshots,
+        )
+    }
+
+    suspend fun enqueueReviewDraft(draftId: String): Boolean = checked {
+        val initial = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+        if (initial.state == DraftState.READY_TO_UPLOAD) {
+            check(database.uploadDao().find(lease.patientId, draftId) != null) { "上传入口缺失" }
+            return@checked false
+        }
+        if (initial.state != DraftState.REVIEW_READY) throw ReviewMediaInvalidException()
+        val verifiedMedia = database.mediaDao().findAll(lease.patientId, draftId)
+        if (verifiedMedia.size != 2 || verifiedMedia.map { it.type }.toSet() != setOf(MediaType.VIDEO, MediaType.AUDIO) ||
+            verifiedMedia.any { it.validationState != MediaValidationState.VALID || it.sizeBytes <= 0 }
+        ) throw ReviewMediaInvalidException()
+        try {
+            verifiedMedia.forEach {
+                fileStore.verifyEncryptedMedia(lease.patientId, it.encryptedRelativePath, it.sizeBytes)
+            }
+        } catch (_: Exception) {
+            verifiedMedia.forEach {
+                database.mediaDao().updateValidation(lease.patientId, draftId, it.type, MediaValidationState.INVALID)
+            }
+            throw ReviewMediaInvalidException()
+        }
+        database.withTransaction {
+            val draft = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+            if (draft.state == DraftState.READY_TO_UPLOAD) {
+                check(database.uploadDao().find(lease.patientId, draftId) != null) { "上传入口缺失" }
+                return@withTransaction false
+            }
+            if (draft.state != DraftState.REVIEW_READY) throw ReviewMediaInvalidException()
+            val media = database.mediaDao().findAll(lease.patientId, draftId)
+            if (media.size != 2 || media.map { it.type }.toSet() != setOf(MediaType.VIDEO, MediaType.AUDIO) ||
+                media.any { it.validationState != MediaValidationState.VALID } ||
+                media.map { it.encryptedRelativePath to it.sizeBytes }.toSet() !=
+                verifiedMedia.map { it.encryptedRelativePath to it.sizeBytes }.toSet()
+            ) throw ReviewMediaInvalidException()
+            check(
+                database.draftDao().transitionState(
+                    lease.patientId, draftId, DraftState.REVIEW_READY, DraftState.READY_TO_UPLOAD,
+                    draft.durationMs, null,
+                ) == 1,
+            ) { "草稿入队状态未持久化" }
+            database.uploadDao().insert(
+                UploadJobEntity.newPending(
+                    lease.patientId,
+                    draftId,
+                    stableUploadKey("audio", draftId),
+                    stableUploadKey("video", draftId),
+                    stableUploadKey("submit", draftId),
+                ),
+            )
+            true
+        }
+    }
+
+    suspend fun prepareRerecord(draftId: String): DraftSnapshot = checked {
+        val draft = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+        if (draft.state !in setOf(DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {
+            throw ReviewMediaInvalidException()
+        }
+        val media = database.withTransaction {
+            val current = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+            if (current.sessionId != draft.sessionId || current.creationKey != draft.creationKey ||
+                current.state !in setOf(DraftState.REVIEW_READY, DraftState.INTERRUPTED)
+            ) throw ReviewMediaInvalidException()
+            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
+            database.mediaDao().findAll(lease.patientId, draftId)
+        }
+        fileStore.revokeEncryptedMediaReaders(lease.patientId)
+        media.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it.encryptedRelativePath) }
+        database.withTransaction {
+            val current = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
+            if (current.sessionId != draft.sessionId || current.creationKey != draft.creationKey ||
+                current.state !in setOf(DraftState.REVIEW_READY, DraftState.INTERRUPTED)
+            ) throw ReviewMediaInvalidException()
+            database.mediaDao().deleteAll(lease.patientId, draftId)
+            check(database.draftDao().updateState(lease.patientId, draftId, DraftState.RECORDING, 0, null) == 1) {
+                "重录状态未持久化"
+            }
+            val preparation = database.preparationDraftDao().find(lease.patientId, draftId)
+            if (preparation?.status == PreparationDraftStatus.HANDED_OFF) {
+                check(database.preparationDraftDao().prepareRerecord(lease.patientId, draftId, draft.sessionId) == 1) {
+                    "重录准备状态未持久化"
+                }
+            }
+        }
+        database.draftDao().find(lease.patientId, draftId)?.let {
+            DraftSnapshot(it.draftId, it.songId, it.sessionId, it.creationKey, it.state, it.durationMs, it.createdAt, it.expiresAt, it.interruptionReason)
+        } ?: throw ReviewMediaInvalidException()
+    }
+
+    suspend fun deleteReviewDraft(draftId: String) = checked {
+        val draft = database.draftDao().find(lease.patientId, draftId) ?: return@checked
+        if (draft.state !in setOf(DraftState.RECORDING, DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {
+            throw ReviewMediaInvalidException()
+        }
+        val media = database.withTransaction {
+            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
+            database.mediaDao().findAll(lease.patientId, draftId)
+        }
+        fileStore.revokeEncryptedMediaReaders(lease.patientId)
+        media.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it.encryptedRelativePath) }
+        database.withTransaction {
+            val current = database.draftDao().find(lease.patientId, draftId) ?: return@withTransaction
+            if (current.state !in setOf(DraftState.RECORDING, DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {
+                throw ReviewMediaInvalidException()
+            }
+            database.draftDao().delete(lease.patientId, draftId)
+            database.preparationDraftDao().delete(lease.patientId, draftId)
+        }
+    }
+
+    suspend fun cleanupExpiredLocalDrafts(nowEpochMilliseconds: Long): Int {
+        require(nowEpochMilliseconds >= 0)
+        val candidates = checked {
+            database.draftDao().findExpiredLocal(lease.patientId, nowEpochMilliseconds).map { it.draftId }
+        }
+        var deleted = 0
+        for (draftId in candidates) {
+            // 每个草稿独立采用“先撤销可读性、再删密文、最后删行”的可重试屏障。
+            deleteReviewDraft(draftId)
+            if (checked { database.draftDao().find(lease.patientId, draftId) == null }) deleted += 1
+        }
+        return deleted
     }
 
     suspend fun insertPreparationDraft(draft: PreparationDraftSnapshot) = checked {
@@ -285,7 +487,32 @@ class AccountScopedDraftStorage internal constructor(
         audio: File,
         durationMs: Long,
         publicationActive: () -> Boolean = { true },
+    ) = publishRecordingMedia(
+        draftId, video, audio, durationMs, DraftState.REVIEW_READY, null, publicationActive,
+    )
+
+    suspend fun publishInterruptedRecordingMedia(
+        draftId: String,
+        video: File,
+        audio: File,
+        durationMs: Long,
+        reason: String,
+        publicationActive: () -> Boolean = { true },
+    ) {
+        require(reason.isNotBlank() && reason.length <= 256)
+        publishRecordingMedia(draftId, video, audio, durationMs, DraftState.INTERRUPTED, reason, publicationActive)
+    }
+
+    private suspend fun publishRecordingMedia(
+        draftId: String,
+        video: File,
+        audio: File,
+        durationMs: Long,
+        targetState: DraftState,
+        interruptionReason: String?,
+        publicationActive: () -> Boolean,
     ) = checked {
+        require(targetState in setOf(DraftState.REVIEW_READY, DraftState.INTERRUPTED))
         check(publicationActive()) { "录制发布已取消" }
         require(durationMs > 0) { "录制时长无效" }
         require(video.isFile && video.length() > 0) { "视频文件无效" }
@@ -333,7 +560,7 @@ class AccountScopedDraftStorage internal constructor(
                 )
                 check(
                     database.draftDao().updateState(
-                        lease.patientId, draftId, DraftState.REVIEW_READY, durationMs, null,
+                        lease.patientId, draftId, targetState, durationMs, interruptionReason,
                     ) == 1,
                 ) { "草稿状态未持久化" }
                 check(publicationActive()) { "录制发布已取消" }
@@ -348,30 +575,28 @@ class AccountScopedDraftStorage internal constructor(
 
     suspend fun markRecordingInterrupted(draftId: String, durationMs: Long, reason: String) = checked {
         require(reason.isNotBlank() && reason.length <= 256)
-        val encryptedToDelete = mutableListOf<String>()
+        val encryptedToDelete = database.withTransaction {
+            val draft = database.draftDao().find(lease.patientId, draftId) ?: error("草稿不存在")
+            if (draft.state !in setOf(DraftState.RECORDING, DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {
+                return@withTransaction emptyList()
+            }
+            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
+            database.mediaDao().findAll(lease.patientId, draftId).map { it.encryptedRelativePath }
+        }
+        fileStore.revokeEncryptedMediaReaders(lease.patientId)
+        encryptedToDelete.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
         database.withTransaction {
             val draft = database.draftDao().find(lease.patientId, draftId) ?: error("草稿不存在")
-            if (draft.state == DraftState.RECORDING || draft.state == DraftState.REVIEW_READY) {
-                if (draft.state == DraftState.REVIEW_READY) {
-                    listOf(MediaType.VIDEO, MediaType.AUDIO).forEach { type ->
-                        database.mediaDao().find(lease.patientId, draftId, type)?.let { media ->
-                            encryptedToDelete += media.encryptedRelativePath
-                            check(database.mediaDao().delete(lease.patientId, draftId, type) == 1)
-                        }
-                    }
-                }
+            if (draft.state in setOf(DraftState.RECORDING, DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {
+                database.mediaDao().deleteAll(lease.patientId, draftId)
                 check(
                     database.draftDao().updateState(
-                        lease.patientId,
-                        draftId,
-                        DraftState.FAILED,
-                        durationMs.coerceAtLeast(0),
-                        reason,
+                        lease.patientId, draftId, DraftState.INTERRUPTED,
+                        durationMs.coerceAtLeast(0), reason,
                     ) == 1,
                 )
             }
         }
-        encryptedToDelete.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
     }
 
     suspend fun insertUploadJob(draftId: String, audioGrantKey: String, videoGrantKey: String, submitKey: String) = checked {
@@ -482,6 +707,11 @@ class AccountScopedDraftStorage internal constructor(
     }
 
     private companion object {
+        fun stableUploadKey(kind: String, draftId: String): String {
+            val direct = "upload-$kind:$draftId"
+            return if (direct.length <= 128) direct else "upload-$kind:${ChunkedAesGcmFileStore.sha256(draftId)}"
+        }
+
         val OVERALL_TRANSITIONS = mapOf(
             UploadOverallState.PAUSED to setOf(UploadOverallState.WAITING_NETWORK, UploadOverallState.UPLOADING, UploadOverallState.CANCELLED),
             UploadOverallState.WAITING_NETWORK to setOf(UploadOverallState.UPLOADING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED, UploadOverallState.FAILED),
@@ -543,6 +773,25 @@ data class UploadCheckpoint(
 )
 
 data class EncryptedMediaAsset(val relativePath: String, val encryptedSizeBytes: Long)
+
+data class AccountScopedReviewMediaSnapshot(
+    val type: MediaType,
+    internal val encryptedRelativePath: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val readableLength: Long,
+    val validationState: MediaValidationState,
+)
+
+data class AccountScopedReviewDraftSnapshot(
+    val draftId: String,
+    val songId: String,
+    val sessionId: String,
+    val creationKey: String,
+    val state: DraftState,
+    val durationMs: Long,
+    val media: List<AccountScopedReviewMediaSnapshot>,
+)
 
 data class DraftSnapshot(
     val draftId: String,

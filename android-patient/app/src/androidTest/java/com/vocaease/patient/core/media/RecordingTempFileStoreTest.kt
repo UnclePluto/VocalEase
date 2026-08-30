@@ -44,14 +44,16 @@ class RecordingTempFileStoreTest {
     }
 
     @Test
-    fun 应用重启默认立即清理上一进程遗留的全部recording明文() {
-        val crashedProcessStore = PrivateRecordingTempFiles(context)
-        val orphanVideo = crashedProcessStore.createVideo()
-        val orphanAudio = crashedProcessStore.createAudio()
+    fun 应用重启默认只清理超过24小时且无sidecar的recording明文() {
+        val now = 25L * 60L * 60L * 1_000L
+        val crashedProcessStore = PrivateRecordingTempFiles(context, nowMillis = { now })
+        val orphanVideo = crashedProcessStore.createVideo().apply { setLastModified(0L) }
+        val recentAudio = crashedProcessStore.createAudio().apply { setLastModified(now) }
 
-        PrivateRecordingTempFiles(context).cleanupOrphans()
+        PrivateRecordingTempFiles(context, nowMillis = { now }).cleanupOrphans()
 
         assertFalse(orphanVideo.exists())
-        assertFalse(orphanAudio.exists())
+        assertTrue(recentAudio.exists())
+        crashedProcessStore.cleanup(recentAudio)
     }
 }

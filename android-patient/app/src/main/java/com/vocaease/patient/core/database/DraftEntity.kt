@@ -7,6 +7,7 @@ import androidx.room.Index
 enum class DraftState {
     RECORDING,
     REVIEW_READY,
+    INTERRUPTED,
     READY_TO_UPLOAD,
     UPLOADING,
     SUBMITTED,

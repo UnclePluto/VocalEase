@@ -7,10 +7,12 @@ import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.VocaEaseDatabase
+import com.vocaease.patient.core.cleanup.DailyDraftCleanupScheduler
 import com.vocaease.patient.core.media.ExoPreviewEngine
 import com.vocaease.patient.core.media.PreviewEngine
 import com.vocaease.patient.core.media.RecordingPlaybackHandoff
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
+import com.vocaease.patient.core.media.RecordingStagingRecovery
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
@@ -26,6 +28,10 @@ import com.vocaease.patient.feature.profile.AccountScopedPendingUploadCounter
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 fun interface AppClock {
     fun nowEpochMilliseconds(): Long
@@ -70,6 +76,7 @@ interface AppContainer {
 }
 
 class AndroidAppContainer(context: Context) : AppContainer {
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val tokenVault = AndroidTokenVault(context)
     private val sessionGraph = createProductionSessionGraph(BuildConfig.API_BASE_URL, tokenVault)
 
@@ -116,8 +123,20 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val uploadFactory = UploadFactory { error("上传能力将在后续任务中提供") }
 
     init {
-        accountSession.addLeaseChangedListener { recordingPlaybackHandoff.discardAll() }
-        PrivateRecordingTempFiles(context).cleanupOrphans()
+        val cleanupScheduler = DailyDraftCleanupScheduler(context)
+        val tempFiles = PrivateRecordingTempFiles(context)
+        val stagingRecovery = RecordingStagingRecovery(tempFiles)
+        var recoveryJob: Job? = null
+        accountSession.addLeaseChangedListener {
+            recordingPlaybackHandoff.discardAll()
+            val storage = runCatching { draftStorage.current() }.getOrNull()
+            cleanupScheduler.replaceFor(storage)
+            recoveryJob?.cancel()
+            recoveryJob = storage?.let { current ->
+                applicationScope.launch { stagingRecovery.recover(current) }
+            }
+        }
+        tempFiles.cleanupOrphans()
     }
 }
 
