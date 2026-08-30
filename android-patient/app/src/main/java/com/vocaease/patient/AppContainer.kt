@@ -9,6 +9,8 @@ import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.media.ExoPreviewEngine
 import com.vocaease.patient.core.media.PreviewEngine
+import com.vocaease.patient.core.media.RecordingPlaybackHandoff
+import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
@@ -58,6 +60,7 @@ interface AppContainer {
     val songRepository: SongRepository
     val pendingUploadCounter: PendingUploadCounter
     val draftStorage: AccountScopedDraftStorageProvider
+    val recordingPlaybackHandoff: RecordingPlaybackHandoff
     /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
     val sessionEvents: Flow<SessionLifecycleEvent>
 
@@ -93,6 +96,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
         encryptedFileStore,
         accountSession,
     )
+    override val recordingPlaybackHandoff = RecordingPlaybackHandoff()
     override val pendingUploadCounter = AccountScopedPendingUploadCounter(draftStorage)
     override val clock = AppClock(System::currentTimeMillis)
     override val dispatchers = object : AppDispatchers {
@@ -110,6 +114,11 @@ class AndroidAppContainer(context: Context) : AppContainer {
     }
     override val mediaFactory = MediaFactory { ExoPreviewEngine(context.applicationContext) }
     override val uploadFactory = UploadFactory { error("上传能力将在后续任务中提供") }
+
+    init {
+        accountSession.addLeaseChangedListener { recordingPlaybackHandoff.discardAll() }
+        PrivateRecordingTempFiles(context).cleanupOrphans()
+    }
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {
@@ -140,6 +149,8 @@ private object UnavailableAppContainer : AppContainer {
     override val pendingUploadCounter: PendingUploadCounter
         get() = unavailable()
     override val draftStorage: AccountScopedDraftStorageProvider
+        get() = unavailable()
+    override val recordingPlaybackHandoff: RecordingPlaybackHandoff
         get() = unavailable()
     override val sessionEvents: Flow<SessionLifecycleEvent>
         get() = unavailable()

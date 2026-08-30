@@ -22,6 +22,56 @@ import org.junit.Test
 
 class PreparationViewModelTest {
     @Test
+    fun `导航发布时把已预缓冲播放器一次性交给Task8且onCleared不再释放`() = runBlocking {
+        val preview = FakePreviewSession()
+        val handed = mutableListOf<Pair<String, PreviewSession>>()
+        val store = FakePreparationStore().apply {
+            drafts += pendingDraft(DRAFT_ID).copy(
+                serverSessionId = SESSION_ID,
+                status = PreparationDraftStatus.BOUND,
+            )
+        }
+        val viewModel = viewModel(
+            store = store,
+            remote = FakeSessionCreator { error("不应创建") },
+            preview = preview,
+            onPlaybackHandoff = { id, session -> handed += id to session },
+        )
+        val viewModelStore = ViewModelStore().apply { put("preparation-handoff", viewModel) }
+        viewModel.load()
+
+        viewModel.startTraining()
+        viewModelStore.clear()
+
+        assertEquals(listOf(DRAFT_ID), handed.map { it.first })
+        assertTrue(handed.single().second === preview)
+        assertEquals(0, preview.releaseCount)
+    }
+
+    @Test
+    fun `handoff已offer但导航发布取消时回滚并由准备页释放播放器`() = runBlocking {
+        val preview = FakePreviewSession()
+        var rollbackCount = 0
+        lateinit var viewModel: PreparationViewModel
+        viewModel = viewModel(
+            store = FakePreparationStore(),
+            remote = FakeSessionCreator { createdSession() },
+            preview = preview,
+            onPlaybackHandoff = { _, _ -> viewModel.cancelPreparation() },
+            onPlaybackHandoffCancelled = { rollbackCount += 1 },
+        )
+        val viewModelStore = ViewModelStore().apply { put("cancelled-handoff", viewModel) }
+        viewModel.load()
+
+        viewModel.startTraining()
+        viewModelStore.clear()
+
+        assertEquals(1, rollbackCount)
+        assertEquals(1, preview.releaseCount)
+        assertNull(viewModel.state.value.navigateToRecordingDraftId)
+    }
+
+    @Test
     fun `onCleared只提交release且不等待播放器释放完成`() = runBlocking {
         val preview = FakePreviewSession(releaseCompletion = CompletableDeferred())
         val viewModel = viewModel(
@@ -66,6 +116,36 @@ class PreparationViewModelTest {
         assertEquals(1, remote.keys.size)
         assertEquals(listOf(3, 2, 1), countdownObserved)
         assertEquals(store.drafts.single().draftId, viewModel.state.value.navigateToRecordingDraftId)
+    }
+
+    @Test
+    fun `试听播放中开始演唱会先锁定控制并暂停归零再倒计时`() = runBlocking {
+        val preview = FakePreviewSession().apply { emit(PreviewState.Playing) }
+        val countdownPositions = mutableListOf<Long>()
+        val countdownEntered = CompletableDeferred<Unit>()
+        val continueCountdown = CompletableDeferred<Unit>()
+        val viewModel = viewModel(
+            store = FakePreparationStore(),
+            remote = FakeSessionCreator { createdSession() },
+            preview = preview,
+            countdown = {
+                countdownPositions += preview.currentPositionMillis
+                if (countdownPositions.size == 1) {
+                    countdownEntered.complete(Unit)
+                    continueCountdown.await()
+                }
+            },
+        )
+        viewModel.load()
+
+        val starting = async { viewModel.startTraining() }
+        countdownEntered.await()
+
+        assertEquals(1, preview.rewindCount)
+        assertFalse(viewModel.togglePreview())
+        continueCountdown.complete(Unit)
+        starting.await()
+        assertEquals(listOf(0L, 0L, 0L), countdownPositions)
     }
 
     @Test
@@ -348,6 +428,8 @@ class PreparationViewModelTest {
         readinessSource: FakeReadinessSource = FakeReadinessSource(readiness),
         environmentMonitor: PreparationEnvironmentMonitor = FakePreparationEnvironmentMonitor(),
         preview: FakePreviewSession = FakePreviewSession(),
+        onPlaybackHandoff: (String, PreviewSession) -> Unit = { _, _ -> },
+        onPlaybackHandoffCancelled: (String) -> Unit = {},
         countdown: suspend (Int) -> Unit = {},
     ) = PreparationViewModel(
         songId = SONG_ID,
@@ -362,6 +444,8 @@ class PreparationViewModelTest {
         idFactory = { DRAFT_ID },
         clock = { 1_000L },
         dispatcher = Dispatchers.Unconfined,
+        onPlaybackHandoff = onPlaybackHandoff,
+        onPlaybackHandoffCancelled = onPlaybackHandoffCancelled,
     )
 
     private fun song() = PreparationSong(
@@ -410,10 +494,19 @@ private class FakePreviewSession(
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Buffered)
     var releaseCount = 0
     var awaitReleasedCount = 0
+    var rewindCount = 0
+    private var position = 4_321L
     override val state: StateFlow<PreviewState> = mutableState
+    override val currentPositionMillis: Long get() = position
     override suspend fun prepare(songId: String) = Unit
     override suspend fun play(): Boolean = true
     override suspend fun pause(): Boolean = true
+    override suspend fun rewindToStart(): Boolean {
+        rewindCount += 1
+        position = 0
+        mutableState.value = PreviewState.Buffered
+        return true
+    }
     override fun release() {
         releaseCount += 1
     }

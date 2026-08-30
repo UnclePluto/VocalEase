@@ -641,6 +641,26 @@ class PreviewPlayerTest {
     }
 
     @Test
+    fun `演唱交接前将播放中的试听暂停并归零`() = runBlocking {
+        val engine = FakePreviewEngine().apply { position = 12_345 }
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+        )
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { player.state.value is PreviewState.Buffered }
+        assertTrue(player.play())
+
+        assertTrue(player.rewindToStart())
+
+        assertEquals(1, engine.pauseCount)
+        assertEquals(listOf(0L), engine.seeks)
+        assertEquals(0L, player.currentPositionMillis)
+        assertTrue(player.state.value is PreviewState.Buffered)
+    }
+
+    @Test
     fun `授权失败或第二次鉴权失败后手动重试开启新的单次刷新预算`() = runBlocking {
         val engine = FakePreviewEngine()
         var attempt = 0
@@ -788,6 +808,7 @@ private class FakePreviewEngine : PreviewEngine {
 
     override fun seekTo(positionMillis: Long) {
         seeks += positionMillis
+        position = positionMillis
     }
 
     override fun play() {

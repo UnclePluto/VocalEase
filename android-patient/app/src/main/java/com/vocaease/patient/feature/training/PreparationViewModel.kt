@@ -127,6 +127,8 @@ class PreparationViewModel(
     private val idFactory: () -> String,
     private val clock: () -> Long,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val onPlaybackHandoff: (String, PreviewSession) -> Unit = { _, _ -> },
+    private val onPlaybackHandoffCancelled: (String) -> Unit = {},
 ) : ViewModel() {
     private val creationMutex = Mutex()
     private val readinessMutex = Mutex()
@@ -134,6 +136,7 @@ class PreparationViewModel(
     private val operationGeneration = AtomicLong()
     private val readinessGeneration = AtomicLong()
     private val environmentStarted = AtomicBoolean()
+    private val previewHandedOff = AtomicBoolean()
     private val mutableState = MutableStateFlow(PreparationUiState())
     val state: StateFlow<PreparationUiState> = mutableState.asStateFlow()
 
@@ -212,6 +215,8 @@ class PreparationViewModel(
             val operation = operationGeneration.incrementAndGet()
             updateState { it.copy(isCreatingSession = true, errorMessage = null) }
             try {
+                if (!preview.rewindToStart()) throw IllegalStateException("试听无法归零")
+                checkOperation(operation)
                 val store = storageProvider.current()
                 val expectedScope = savedState.accountScopeHash
                 if (expectedScope != null && expectedScope != store.accountScopeHash) {
@@ -262,7 +267,16 @@ class PreparationViewModel(
                 }
                 checkOperation(operation)
                 store.markHandoffPending(draft.draftId, sessionId) {
-                    publishNavigation(operation, draft.draftId)
+                    var offered = false
+                    try {
+                        onPlaybackHandoff(draft.draftId, preview)
+                        offered = true
+                        publishNavigation(operation, draft.draftId)
+                        previewHandedOff.set(true)
+                    } catch (error: Throwable) {
+                        if (offered) onPlaybackHandoffCancelled(draft.draftId)
+                        throw error
+                    }
                 }
             } catch (error: CancellationException) {
                 updateState { it.copy(isCreatingSession = false, countdownSecond = null) }
@@ -281,15 +295,18 @@ class PreparationViewModel(
                 publishCreationFailure("创建演唱会话失败，请重试")
             } catch (_: NetworkContractException) {
                 publishCreationFailure("创建演唱会话失败，请重试")
+            } catch (_: IllegalStateException) {
+                publishCreationFailure("试听未能安全归零，请重试")
             }
         }
     }
 
-    suspend fun togglePreview() {
-        when (preview.state.value) {
+    suspend fun togglePreview(): Boolean {
+        if (currentState().isCreatingSession) return false
+        return when (preview.state.value) {
             PreviewState.Buffered -> preview.play()
             PreviewState.Playing -> preview.pause()
-            else -> Unit
+            else -> false
         }
     }
 
@@ -323,7 +340,7 @@ class PreparationViewModel(
     override fun onCleared() {
         cancelPreparation()
         onEnvironmentStopped()
-        preview.release()
+        if (!previewHandedOff.get()) preview.release()
     }
 
     private fun scheduleReadinessRefresh() {

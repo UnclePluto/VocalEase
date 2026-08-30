@@ -81,7 +81,7 @@ fun PreparationScreen(
             return@Column
         }
 
-        SongIdentity(song, state.previewState, onPreviewToggle, onRetryPreview)
+        SongIdentity(song, state.previewState, !state.isCreatingSession, onPreviewToggle, onRetryPreview)
         LyricsUnavailable()
         Text(
             "开始前请确认",
@@ -180,6 +180,7 @@ private fun PreparationHeader(onBack: () -> Unit) {
 private fun SongIdentity(
     song: PreparationSong,
     previewState: PreviewState,
+    controlsEnabled: Boolean,
     onPreviewToggle: () -> Unit,
     onRetryPreview: () -> Unit,
 ) {
@@ -204,8 +205,8 @@ private fun SongIdentity(
         }
         TextButton(
             onClick = action,
-            enabled = previewState is PreviewState.Buffered || previewState is PreviewState.Playing ||
-                previewState is PreviewState.Error,
+            enabled = controlsEnabled && (previewState is PreviewState.Buffered || previewState is PreviewState.Playing ||
+                previewState is PreviewState.Error),
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .height(MinimumTouchTargetSize)

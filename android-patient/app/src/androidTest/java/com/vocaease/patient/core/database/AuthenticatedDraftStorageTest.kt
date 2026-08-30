@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.first
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -23,6 +24,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.security.MessageDigest
 
 @RunWith(AndroidJUnit4::class)
 class AuthenticatedDraftStorageTest {
@@ -159,11 +161,104 @@ class AuthenticatedDraftStorageTest {
         Unit
     }
 
+    @Test
+    fun 双媒体密文验证与Room发布保持原子且失败回滚新密文() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "recording-success")
+        val successVideo = plainFile("success-video", 257)
+        val successAudio = plainFile("success-audio", 129)
+
+        storage.publishRecordingMedia("recording-success", successVideo, successAudio, 2_000)
+
+        assertEquals(DraftState.REVIEW_READY, storage.findDraft("recording-success")?.state)
+        val successMedia = database.mediaDao().observeForDraft(PATIENT_A_UUID, "recording-success").first()
+        assertEquals(setOf(MediaType.AUDIO, MediaType.VIDEO), successMedia.map { it.type }.toSet())
+        assertTrue(successMedia.all { it.validationState == MediaValidationState.VALID })
+        assertEquals(successVideo.sha256(), successMedia.single { it.type == MediaType.VIDEO }.sha256)
+
+        insertDraft(storage, "recording-failure")
+        val existing = storage.encryptMedia(ByteArrayInputStream(byteArrayOf(9, 8, 7)), 3)
+        storage.insertMedia(
+            "recording-failure", MediaType.AUDIO, existing.relativePath, "audio/mp4", 3,
+            byteArrayOf(9, 8, 7).sha256(), MediaValidationState.VALID,
+        )
+        val before = root.walkTopDown().count { it.extension == "vef" }
+        assertThrows(android.database.sqlite.SQLiteConstraintException::class.java) {
+            runBlocking {
+                storage.publishRecordingMedia(
+                    "recording-failure",
+                    plainFile("failed-video", 311),
+                    plainFile("failed-audio", 211),
+                    1_000,
+                )
+            }
+        }
+
+        assertEquals(DraftState.RECORDING, storage.findDraft("recording-failure")?.state)
+        assertEquals(before, root.walkTopDown().count { it.extension == "vef" })
+        assertEquals(
+            listOf(MediaType.AUDIO),
+            database.mediaDao().observeForDraft(PATIENT_A_UUID, "recording-failure").first().map { it.type },
+        )
+        Unit
+    }
+
+    @Test
+    fun 换号与同UUID新incarnation后迟到Finalize都不能发布() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val old = provider.current()
+        insertDraft(old, "late-finalize")
+        val video = plainFile("late-video", 64)
+        val audio = plainFile("late-audio", 64)
+
+        sessions.authenticate(PATIENT_B_UUID)
+        assertThrows(StaleAccountScopeException::class.java) {
+            runBlocking { old.publishRecordingMedia("late-finalize", video, audio, 1_000) }
+        }
+        sessions.authenticate(PATIENT_A_UUID)
+        assertThrows(StaleAccountScopeException::class.java) {
+            runBlocking { old.publishRecordingMedia("late-finalize", video, audio, 1_000) }
+        }
+        assertEquals(DraftState.RECORDING, provider.current().findDraft("late-finalize")?.state)
+        Unit
+    }
+
+    @Test
+    fun 取消与发布竞态时ReviewReady会原子回滚为失败并删除双密文() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "cancel-after-publish")
+        storage.publishRecordingMedia(
+            "cancel-after-publish",
+            plainFile("cancel-video", 257),
+            plainFile("cancel-audio", 129),
+            2_000,
+        )
+        val before = root.walkTopDown().count { it.extension == "vef" }
+
+        storage.markRecordingInterrupted("cancel-after-publish", 1_000, "录制已取消")
+
+        assertEquals(DraftState.FAILED, storage.findDraft("cancel-after-publish")?.state)
+        assertTrue(database.mediaDao().observeForDraft(PATIENT_A_UUID, "cancel-after-publish").first().isEmpty())
+        assertEquals(before - 2, root.walkTopDown().count { it.extension == "vef" })
+        Unit
+    }
+
     private suspend fun insertDraft(storage: AccountScopedDraftStorage, id: String) = storage.insertDraft(
         draftId = id, songId = "song", sessionId = "session-$id", creationKey = "create-$id",
         state = DraftState.RECORDING, durationMs = 0, createdAt = 0, expiresAt = DraftEntity.MAX_RETENTION_MILLIS,
         interruptionReason = null,
     )
+
+    private fun plainFile(prefix: String, size: Int) = File(root, "$prefix-${System.nanoTime()}.bin").apply {
+        parentFile?.mkdirs()
+        writeBytes(ByteArray(size) { index -> (index * 31).toByte() })
+    }
+
+    private fun File.sha256() = readBytes().sha256()
+    private fun ByteArray.sha256() = MessageDigest.getInstance("SHA-256").digest(this)
+        .joinToString("") { "%02x".format(it) }
 
     private fun pendingCheckpoint() = UploadCheckpoint(
         overallState = UploadOverallState.PAUSED,

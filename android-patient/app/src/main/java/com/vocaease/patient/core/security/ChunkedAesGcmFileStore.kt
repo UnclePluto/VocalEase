@@ -214,6 +214,30 @@ internal class ChunkedAesGcmFileStore(
             }
         }.getOrDefault(false)
 
+    internal fun verifyEncryptedMedia(accountScope: String, encryptedRelativePath: String, expectedLength: Long) {
+        open(accountScope, encryptedRelativePath).use { reader ->
+            if (reader.length != expectedLength || expectedLength <= 0) failOpen()
+            val buffer = ByteArray(CHUNK_SIZE)
+            var position = 0L
+            while (position < reader.length) {
+                val read = reader.read(position, buffer, 0, minOf(buffer.size.toLong(), reader.length - position).toInt())
+                if (read <= 0) failOpen()
+                position += read
+            }
+            buffer.fill(0)
+        }
+    }
+
+    internal fun deleteEncryptedMedia(accountScope: String, encryptedRelativePath: String) {
+        if (accountScope.isBlank()) failWrite()
+        val scopeHash = sha256(accountScope)
+        synchronized(accountLocks.computeIfAbsent(scopeHash) { Any() }) {
+            val target = resolveAccountRelative(accountScope, encryptedRelativePath, WRITE_ERROR)
+            if (target.exists() && !target.delete()) failWrite()
+            runCatching { syncDirectory(target.parentFile ?: return@synchronized) }
+        }
+    }
+
     internal fun destroyAccountEncryption(accountScope: String) {
         if (accountScope.isBlank()) failWrite()
         val scopeHash = sha256(accountScope)

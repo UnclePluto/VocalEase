@@ -26,10 +26,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -52,6 +54,8 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.view.WindowManager
+import androidx.camera.view.PreviewView
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -67,6 +71,11 @@ import com.vocaease.patient.feature.catalog.CatalogViewModel
 import com.vocaease.patient.feature.profile.ProfileScreen
 import com.vocaease.patient.feature.profile.ProfileViewModel
 import com.vocaease.patient.core.media.PreviewPlayer
+import com.vocaease.patient.core.media.AccountScopedRecordingArtifactPublisher
+import com.vocaease.patient.core.media.CameraXRecordingCapture
+import com.vocaease.patient.core.media.DefaultRecordingCoordinator
+import com.vocaease.patient.core.media.PrivateRecordingTempFiles
+import com.vocaease.patient.core.media.RecordingPlayback
 import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
 import com.vocaease.patient.feature.training.AndroidReadinessSource
 import com.vocaease.patient.feature.training.AndroidPreparationEnvironmentMonitor
@@ -76,6 +85,9 @@ import com.vocaease.patient.feature.training.SavedStatePreparationState
 import com.vocaease.patient.feature.training.VocaEasePreparationSongSource
 import com.vocaease.patient.feature.training.VocaEasePreviewGrantSource
 import com.vocaease.patient.feature.training.VocaEaseTrainingSessionCreator
+import com.vocaease.patient.feature.training.AccountScopedRecordingDraftGateway
+import com.vocaease.patient.feature.training.RecordingScreen
+import com.vocaease.patient.feature.training.RecordingViewModel
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
@@ -83,11 +95,19 @@ import com.vocaease.patient.ui.theme.TextSecondary
 import com.vocaease.patient.ui.theme.VocaEaseTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.awaitCancellation
 import java.util.UUID
 
 typealias CatalogContent = @Composable ((String) -> Unit) -> Unit
 typealias ProfileContent = @Composable (ProfileNavigation) -> Unit
 typealias PreparationContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
+typealias RecordingContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
+
+private sealed interface RecordingPlaybackClaim {
+    data object Loading : RecordingPlaybackClaim
+    data object Missing : RecordingPlaybackClaim
+    data class Ready(val playback: RecordingPlayback) : RecordingPlaybackClaim
+}
 
 data class ProfileNavigation(
     val openHistory: () -> Unit,
@@ -110,6 +130,7 @@ fun VocaEaseApp(
                         preparationContent = { songId, onBack, onRecording ->
                             PreparationRoute(songId, onBack, onRecording)
                         },
+                        recordingContent = { draftId, onBack, onReview -> RecordingRoute(draftId, onBack, onReview) },
                     )
                 }
             } else {
@@ -118,6 +139,7 @@ fun VocaEaseApp(
                     preparationContent = { songId, onBack, onRecording ->
                         PreparationRoute(songId, onBack, onRecording)
                     },
+                    recordingContent = { draftId, onBack, onReview -> RecordingRoute(draftId, onBack, onReview) },
                 )
             }
         }
@@ -130,6 +152,7 @@ internal fun AuthenticatedApp(
     catalogContent: CatalogContent = { onSongClick -> CatalogRoute(onSongClick) },
     profileContent: ProfileContent = { navigation -> ProfileRoute(navigation) },
     preparationContent: PreparationContent = { _, _, _ -> PlaceholderScreen("准备演唱") },
+    recordingContent: RecordingContent = { _, _, _ -> PlaceholderScreen("正在录制") },
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -150,6 +173,7 @@ internal fun AuthenticatedApp(
             catalogContent = catalogContent,
             profileContent = profileContent,
             preparationContent = preparationContent,
+            recordingContent = recordingContent,
         )
     }
 }
@@ -237,6 +261,7 @@ private fun AppNavHost(
     catalogContent: CatalogContent,
     profileContent: ProfileContent,
     preparationContent: PreparationContent,
+    recordingContent: RecordingContent,
 ) {
     NavHost(
         navController = navController,
@@ -266,7 +291,18 @@ private fun AppNavHost(
                 { draftId -> navController.navigate(AppRoute.Recording(draftId)) { launchSingleTop = true } },
             )
         }
-        composable<AppRoute.Recording> { PlaceholderScreen("正在录制") }
+        composable<AppRoute.Recording> { entry ->
+            val route = entry.toRoute<AppRoute.Recording>()
+            recordingContent(
+                route.draftId,
+                { navController.popBackStack() },
+                { draftId ->
+                    navController.navigate(AppRoute.Review(draftId)) {
+                        popUpTo(AppRoute.Recording(draftId)) { inclusive = true }
+                    }
+                },
+            )
+        }
         composable<AppRoute.Review> { PlaceholderScreen("确认作品") }
         composable<AppRoute.PendingUploads> { PlaceholderScreen("待上传记录") }
         composable<AppRoute.TreatmentPlan> { PlaceholderScreen("治疗计划") }
@@ -325,13 +361,15 @@ private fun PreparationRoute(
     val activity = requireNotNull(context.findActivity()) { "演唱准备页需要 Activity 上下文" }
     var permissionsRequested by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val preview = remember(songId, container) {
+        PreviewPlayer(
+            container.mediaFactory.createPreviewEngine(),
+            VocaEasePreviewGrantSource(container.patientApi),
+        )
+    }
     val factory = remember(songId, container, activity) {
         viewModelFactory {
             initializer {
-                val preview = PreviewPlayer(
-                    container.mediaFactory.createPreviewEngine(),
-                    VocaEasePreviewGrantSource(container.patientApi),
-                )
                 PreparationViewModel(
                     songId = songId,
                     songSource = VocaEasePreparationSongSource(container.patientApi),
@@ -345,6 +383,10 @@ private fun PreparationRoute(
                     idFactory = { UUID.randomUUID().toString() },
                     clock = container.clock::nowEpochMilliseconds,
                     dispatcher = container.dispatchers.io,
+                    onPlaybackHandoff = { draftId, session ->
+                        container.recordingPlaybackHandoff.offer(draftId, session)
+                    },
+                    onPlaybackHandoffCancelled = container.recordingPlaybackHandoff::discard,
                 )
             }
         }
@@ -412,6 +454,105 @@ private fun PreparationRoute(
         onRetry = { scope.launch { viewModel.load() } },
         onPreviewToggle = { scope.launch { viewModel.togglePreview() } },
         onRetryPreview = { scope.launch { viewModel.retryPreview() } },
+    )
+}
+
+@Composable
+private fun RecordingRoute(
+    draftId: String,
+    onBack: () -> Unit,
+    onReview: (String) -> Unit,
+) {
+    val container = LocalAppContainer.current
+    val context = LocalContext.current
+    val activity = requireNotNull(context.findActivity()) { "演唱录制页需要 Activity 上下文" }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
+    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    val storage = remember(draftId, container) { container.draftStorage.current() }
+    val playbackClaim by produceState<RecordingPlaybackClaim>(
+        initialValue = RecordingPlaybackClaim.Loading,
+        key1 = draftId,
+        key2 = container,
+    ) {
+        val claimed = container.recordingPlaybackHandoff.take(draftId)
+        value = claimed?.let(RecordingPlaybackClaim::Ready) ?: RecordingPlaybackClaim.Missing
+        try {
+            awaitCancellation()
+        } finally {
+            claimed?.stop()
+        }
+    }
+    if (playbackClaim === RecordingPlaybackClaim.Loading) {
+        PlaceholderScreen("正在接管录制")
+        return
+    }
+    if (playbackClaim === RecordingPlaybackClaim.Missing) {
+        LaunchedEffect(draftId) {
+            runCatching { storage.markRecordingInterrupted(draftId, 0, "歌曲播放交接已失效") }
+            onBack()
+        }
+        PlaceholderScreen("录制已中断")
+        return
+    }
+    val playback = (playbackClaim as RecordingPlaybackClaim.Ready).playback
+    val tempFiles = remember(context) { PrivateRecordingTempFiles(context).also { it.cleanupOrphans() } }
+    val coordinator = remember(draftId, previewView, lifecycleOwner, playback, storage) {
+        DefaultRecordingCoordinator(
+            capture = CameraXRecordingCapture(context, lifecycleOwner, previewView.surfaceProvider),
+            playback = playback,
+            clockNanos = System::nanoTime,
+            tempFiles = tempFiles,
+            publisher = AccountScopedRecordingArtifactPublisher(storage),
+        )
+    }
+    val factory = remember(draftId, coordinator, storage) {
+        viewModelFactory {
+            initializer {
+                RecordingViewModel(
+                    draftId,
+                    coordinator,
+                    AccountScopedRecordingDraftGateway(storage),
+                    // Task 7 已向患者展示 3、2、1；本页只完成状态机交接，避免重复等待。
+                    countdownTick = {},
+                    dispatcher = container.dispatchers.io,
+                )
+            }
+        }
+    }
+    val recordingViewModel: RecordingViewModel = viewModel(key = "recording:$draftId", factory = factory)
+    val state by recordingViewModel.state.collectAsState()
+
+    LaunchedEffect(recordingViewModel) { recordingViewModel.start() }
+    LaunchedEffect(state.navigateReviewDraftId) {
+        state.navigateReviewDraftId?.let { id ->
+            recordingViewModel.consumeReviewNavigation()
+            onReview(id)
+        }
+    }
+    DisposableEffect(state.keepScreenOn, activity) {
+        if (state.keepScreenOn) activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
+    DisposableEffect(recordingViewModel) {
+        onDispose { recordingViewModel.disposeRoute() }
+    }
+    val leave = {
+        scope.launch {
+            recordingViewModel.leave()
+            onBack()
+        }
+        Unit
+    }
+    BackHandler(onBack = leave)
+    RecordingScreen(
+        state = state,
+        preview = {
+            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        },
+        onStop = { scope.launch { recordingViewModel.stop() } },
+        onClose = leave,
     )
 }
 

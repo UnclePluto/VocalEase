@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
@@ -41,6 +42,7 @@ sealed interface PreviewState {
     data object Buffering : PreviewState
     data object Buffered : PreviewState
     data object Playing : PreviewState
+    data object Ended : PreviewState
     data class Error(val message: String) : PreviewState
     data object Released : PreviewState
 }
@@ -51,6 +53,7 @@ sealed interface PreviewEngineEvent {
     data class PlayingChanged(val isPlaying: Boolean) : PreviewEngineEvent
     data class HttpError(val status: Int) : PreviewEngineEvent
     data object PlaybackError : PreviewEngineEvent
+    data object Ended : PreviewEngineEvent
 }
 
 interface PreviewEngine {
@@ -65,9 +68,11 @@ interface PreviewEngine {
 
 interface PreviewSession {
     val state: StateFlow<PreviewState>
+    val currentPositionMillis: Long get() = 0
     suspend fun prepare(songId: String)
     suspend fun play(): Boolean
     suspend fun pause(): Boolean
+    suspend fun rewindToStart(): Boolean = false
     fun release()
     suspend fun awaitReleased()
 }
@@ -99,6 +104,7 @@ class PreviewPlayer internal constructor(
     private val actorJob: Job
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Idle)
     override val state: StateFlow<PreviewState> = mutableState.asStateFlow()
+    override val currentPositionMillis: Long get() = engine.currentPositionMillis.coerceAtLeast(0)
     private var acceptingCommands = true
     private var generation = 0L
     private var songId: String? = null
@@ -151,6 +157,12 @@ class PreviewPlayer internal constructor(
         return completion.await()
     }
 
+    override suspend fun rewindToStart(): Boolean {
+        val completion = CompletableDeferred<Boolean>()
+        if (!submit(PreviewCommand.RewindToStart(completion))) return false
+        return completion.await()
+    }
+
     override fun release() {
         synchronized(submissionLock) {
             if (acceptingCommands) {
@@ -176,6 +188,7 @@ class PreviewPlayer internal constructor(
                     is PreviewCommand.EngineEvent -> applyEngineEvent(command)
                     is PreviewCommand.Play -> applyPlay(command)
                     is PreviewCommand.Pause -> applyPause(command)
+                    is PreviewCommand.RewindToStart -> applyRewindToStart(command)
                     is PreviewCommand.CancelPreparation -> {
                         admissionProbe.afterAdmission(PreviewAdmissionPoint.CANCEL_APPLICATION)
                         applyPreparationCancellation(command)
@@ -286,6 +299,7 @@ class PreviewPlayer internal constructor(
             }
             is PreviewEngineEvent.HttpError -> handleHttpError(event.status)
             PreviewEngineEvent.PlaybackError -> mutableState.value = PreviewState.Error(ERROR_MESSAGE)
+            PreviewEngineEvent.Ended -> mutableState.value = PreviewState.Ended
         }
     }
 
@@ -326,6 +340,19 @@ class PreviewPlayer internal constructor(
             return
         }
         engine.pause()
+        mutableState.value = PreviewState.Buffered
+        command.completion.complete(true)
+    }
+
+    private fun applyRewindToStart(command: PreviewCommand.RewindToStart) {
+        if (mutableState.value !is PreviewState.Buffered && mutableState.value !is PreviewState.Playing &&
+            mutableState.value !is PreviewState.Ended || !mediaLoaded
+        ) {
+            command.completion.complete(false)
+            return
+        }
+        if (mutableState.value is PreviewState.Playing) engine.pause()
+        engine.seekTo(0)
         mutableState.value = PreviewState.Buffered
         command.completion.complete(true)
     }
@@ -431,6 +458,7 @@ private sealed interface PreviewCommand {
     ) : PreviewCommand
     data class Play(val completion: CompletableDeferred<Boolean>) : PreviewCommand
     data class Pause(val completion: CompletableDeferred<Boolean>) : PreviewCommand
+    data class RewindToStart(val completion: CompletableDeferred<Boolean>) : PreviewCommand
     data class CancelPreparation(
         val token: PreparationToken,
         val acknowledgement: CompletableDeferred<Unit>,
@@ -476,15 +504,18 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
     private val player = ExoPlayer.Builder(context.applicationContext).build()
     @Volatile
     private var positionSnapshotMillis = 0L
+    private var positionTicker: Job? = null
     @Volatile
     private var listener: (suspend (PreviewEngineEvent) -> Unit)? = null
 
     init {
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
+                positionSnapshotMillis = player.currentPosition.coerceAtLeast(0)
                 val event = when (playbackState) {
                     Player.STATE_BUFFERING -> PreviewEngineEvent.Buffering
                     Player.STATE_READY -> PreviewEngineEvent.Ready
+                    Player.STATE_ENDED -> PreviewEngineEvent.Ended
                     else -> null
                 }
                 if (event != null) dispatch(event)
@@ -500,6 +531,14 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                positionSnapshotMillis = player.currentPosition.coerceAtLeast(0)
+                positionTicker?.cancel()
+                positionTicker = if (isPlaying) scope.launch {
+                    while (player.isPlaying) {
+                        positionSnapshotMillis = player.currentPosition.coerceAtLeast(0)
+                        delay(POSITION_SNAPSHOT_INTERVAL_MILLIS)
+                    }
+                } else null
                 dispatch(PreviewEngineEvent.PlayingChanged(isPlaying))
             }
         })
@@ -513,6 +552,7 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
         get() = positionSnapshotMillis
 
     override fun load(url: String) {
+        positionSnapshotMillis = 0
         scope.launch {
             player.setMediaItem(MediaItem.fromUri(url))
             player.prepare()
@@ -520,6 +560,7 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
     }
 
     override fun seekTo(positionMillis: Long) {
+        positionSnapshotMillis = positionMillis.coerceAtLeast(0)
         scope.launch { player.seekTo(positionMillis) }
     }
 
@@ -533,6 +574,7 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
 
     override suspend fun releaseAndAwait() {
         withContext(Dispatchers.Main.immediate) {
+            positionTicker?.cancel()
             listener = null
             player.release()
         }
@@ -542,5 +584,9 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
     private fun dispatch(event: PreviewEngineEvent) {
         val callback = listener ?: return
         scope.launch { callback(event) }
+    }
+
+    private companion object {
+        const val POSITION_SNAPSHOT_INTERVAL_MILLIS = 100L
     }
 }

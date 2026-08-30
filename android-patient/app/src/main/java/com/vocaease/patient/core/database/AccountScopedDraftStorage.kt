@@ -3,6 +3,8 @@ package com.vocaease.patient.core.database
 import androidx.room.withTransaction
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import java.io.InputStream
+import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -277,6 +279,101 @@ class AccountScopedDraftStorage internal constructor(
         }
     }
 
+    suspend fun publishRecordingMedia(
+        draftId: String,
+        video: File,
+        audio: File,
+        durationMs: Long,
+        publicationActive: () -> Boolean = { true },
+    ) = checked {
+        check(publicationActive()) { "录制发布已取消" }
+        require(durationMs > 0) { "录制时长无效" }
+        require(video.isFile && video.length() > 0) { "视频文件无效" }
+        require(audio.isFile && audio.length() > 0) { "音频文件无效" }
+        val draft = database.draftDao().find(lease.patientId, draftId) ?: error("草稿不存在")
+        require(draft.state == DraftState.RECORDING) { "草稿状态不可发布" }
+        val published = mutableListOf<EncryptedMediaAsset>()
+        try {
+            val videoLength = video.length()
+            val audioLength = audio.length()
+            val videoSha = video.sha256()
+            val audioSha = audio.sha256()
+            check(publicationActive()) { "录制发布已取消" }
+            val videoAsset = video.inputStream().use { input ->
+                fileStore.encrypt(lease.patientId, input, videoLength).let {
+                    EncryptedMediaAsset(it.relativePath, it.encryptedSizeBytes)
+                }
+            }.also(published::add)
+            fileStore.verifyEncryptedMedia(lease.patientId, videoAsset.relativePath, videoLength)
+            check(publicationActive()) { "录制发布已取消" }
+            val audioAsset = audio.inputStream().use { input ->
+                fileStore.encrypt(lease.patientId, input, audioLength).let {
+                    EncryptedMediaAsset(it.relativePath, it.encryptedSizeBytes)
+                }
+            }.also(published::add)
+            fileStore.verifyEncryptedMedia(lease.patientId, audioAsset.relativePath, audioLength)
+            check(publicationActive()) { "录制发布已取消" }
+            database.withTransaction {
+                check(publicationActive()) { "录制发布已取消" }
+                val current = database.draftDao().find(lease.patientId, draftId) ?: error("草稿不存在")
+                require(current.sessionId == draft.sessionId && current.state == DraftState.RECORDING) {
+                    "草稿状态已变化"
+                }
+                database.mediaDao().insert(
+                    MediaEntity(
+                        lease.patientId, draftId, MediaType.VIDEO, videoAsset.relativePath,
+                        "video/mp4", videoLength, videoSha, MediaValidationState.VALID,
+                    ),
+                )
+                database.mediaDao().insert(
+                    MediaEntity(
+                        lease.patientId, draftId, MediaType.AUDIO, audioAsset.relativePath,
+                        "audio/mp4", audioLength, audioSha, MediaValidationState.VALID,
+                    ),
+                )
+                check(
+                    database.draftDao().updateState(
+                        lease.patientId, draftId, DraftState.REVIEW_READY, durationMs, null,
+                    ) == 1,
+                ) { "草稿状态未持久化" }
+                check(publicationActive()) { "录制发布已取消" }
+            }
+        } catch (error: Exception) {
+            published.forEach { asset ->
+                runCatching { fileStore.deleteEncryptedMedia(lease.patientId, asset.relativePath) }
+            }
+            throw error
+        }
+    }
+
+    suspend fun markRecordingInterrupted(draftId: String, durationMs: Long, reason: String) = checked {
+        require(reason.isNotBlank() && reason.length <= 256)
+        val encryptedToDelete = mutableListOf<String>()
+        database.withTransaction {
+            val draft = database.draftDao().find(lease.patientId, draftId) ?: error("草稿不存在")
+            if (draft.state == DraftState.RECORDING || draft.state == DraftState.REVIEW_READY) {
+                if (draft.state == DraftState.REVIEW_READY) {
+                    listOf(MediaType.VIDEO, MediaType.AUDIO).forEach { type ->
+                        database.mediaDao().find(lease.patientId, draftId, type)?.let { media ->
+                            encryptedToDelete += media.encryptedRelativePath
+                            check(database.mediaDao().delete(lease.patientId, draftId, type) == 1)
+                        }
+                    }
+                }
+                check(
+                    database.draftDao().updateState(
+                        lease.patientId,
+                        draftId,
+                        DraftState.FAILED,
+                        durationMs.coerceAtLeast(0),
+                        reason,
+                    ) == 1,
+                )
+            }
+        }
+        encryptedToDelete.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
+    }
+
     suspend fun insertUploadJob(draftId: String, audioGrantKey: String, videoGrantKey: String, submitKey: String) = checked {
         database.withTransaction {
             require(database.draftDao().find(lease.patientId, draftId) != null) { "草稿不存在" }
@@ -406,6 +503,19 @@ class AccountScopedDraftStorage internal constructor(
             }
         }
     }
+}
+
+private fun File.sha256(): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    inputStream().buffered().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 data class UploadCheckpoint(
