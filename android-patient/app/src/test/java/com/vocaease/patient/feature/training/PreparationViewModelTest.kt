@@ -1,5 +1,6 @@
 package com.vocaease.patient.feature.training
 
+import androidx.lifecycle.ViewModelStore
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import com.vocaease.patient.core.database.PreparationDraftStatus
 import com.vocaease.patient.core.media.PreviewState
@@ -10,6 +11,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.junit.Assert.assertEquals
@@ -19,6 +21,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreparationViewModelTest {
+    @Test
+    fun `onCleared只提交release且不等待播放器释放完成`() = runBlocking {
+        val preview = FakePreviewSession(releaseCompletion = CompletableDeferred())
+        val viewModel = viewModel(
+            store = FakePreparationStore(),
+            remote = FakeSessionCreator { createdSession() },
+            preview = preview,
+        )
+        val viewModelStore = ViewModelStore().apply { put("preparation", viewModel) }
+
+        withTimeout(1_000) {
+            async(Dispatchers.Default) { viewModelStore.clear() }.await()
+        }
+
+        assertEquals(1, preview.releaseCount)
+        assertEquals(0, preview.awaitReleasedCount)
+    }
+
     @Test
     fun `双击并发只创建一个逻辑会话且保存server id后才倒计时`() = runBlocking {
         val createEntered = CompletableDeferred<Unit>()
@@ -384,13 +404,23 @@ class PreparationViewModelTest {
     }
 }
 
-private class FakePreviewSession : PreviewSession {
+private class FakePreviewSession(
+    private val releaseCompletion: CompletableDeferred<Unit> = CompletableDeferred(Unit),
+) : PreviewSession {
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Buffered)
+    var releaseCount = 0
+    var awaitReleasedCount = 0
     override val state: StateFlow<PreviewState> = mutableState
     override suspend fun prepare(songId: String) = Unit
     override suspend fun play(): Boolean = true
     override suspend fun pause(): Boolean = true
-    override fun release() = Unit
+    override fun release() {
+        releaseCount += 1
+    }
+    override suspend fun awaitReleased() {
+        awaitReleasedCount += 1
+        releaseCompletion.await()
+    }
     fun emit(value: PreviewState) {
         mutableState.value = value
     }

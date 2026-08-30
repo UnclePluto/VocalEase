@@ -9,9 +9,12 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.vocaease.patient.core.network.NetworkContractException
 import java.io.IOException
 import java.time.Instant
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
@@ -19,7 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 
@@ -65,12 +68,14 @@ interface PreviewSession {
     suspend fun play(): Boolean
     suspend fun pause(): Boolean
     fun release()
+    suspend fun awaitReleased()
 }
 
 internal enum class PreviewAdmissionPoint {
     ENGINE_EVENT,
     PUBLISH_ERROR,
     GRANT_RESULT,
+    GRANT_APPLICATION,
 }
 
 internal fun interface PreviewAdmissionProbe {
@@ -83,7 +88,7 @@ class PreviewPlayer internal constructor(
     private val admissionProbe: PreviewAdmissionProbe = PreviewAdmissionProbe {},
 ) : PreviewSession {
     private val commands = Channel<PreviewCommand>(Channel.UNLIMITED)
-    private val actorScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    private val actorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val submissionLock = Any()
     private val releaseCompletion = CompletableDeferred<Unit>()
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Idle)
@@ -95,6 +100,7 @@ class PreviewPlayer internal constructor(
     private var refreshUsed = false
     private var resumeAfterReady = false
     private var mediaLoaded = false
+    private var activePreparationToken: PreparationToken? = null
     private var pendingPreparation: CompletableDeferred<Result<Unit>>? = null
 
     init {
@@ -102,9 +108,20 @@ class PreviewPlayer internal constructor(
     }
 
     override suspend fun prepare(songId: String) {
+        val token = PreparationToken()
         val completion = CompletableDeferred<Result<Unit>>()
-        if (!submit(PreviewCommand.Prepare(songId, completion))) return
-        completion.await().getOrThrow()
+        if (!submit(PreviewCommand.Prepare(songId, token, completion))) return
+        try {
+            completion.await().getOrThrow()
+        } catch (error: CancellationException) {
+            token.cancel()
+            val acknowledgement = CompletableDeferred<Unit>()
+            val cancellationAccepted = submit(PreviewCommand.CancelPreparation(token, acknowledgement))
+            withContext(NonCancellable) {
+                if (cancellationAccepted) acknowledgement.await() else releaseCompletion.await()
+            }
+            throw error
+        }
     }
 
     override suspend fun play(): Boolean {
@@ -120,14 +137,16 @@ class PreviewPlayer internal constructor(
     }
 
     override fun release() {
-        val completion = synchronized(submissionLock) {
+        synchronized(submissionLock) {
             if (acceptingCommands) {
                 acceptingCommands = false
                 check(commands.trySend(PreviewCommand.Release).isSuccess)
             }
-            releaseCompletion
         }
-        runBlocking { completion.await() }
+    }
+
+    override suspend fun awaitReleased() {
+        releaseCompletion.await()
     }
 
     private suspend fun runActor() {
@@ -138,6 +157,7 @@ class PreviewPlayer internal constructor(
                 is PreviewCommand.EngineEvent -> applyEngineEvent(command)
                 is PreviewCommand.Play -> applyPlay(command)
                 is PreviewCommand.Pause -> applyPause(command)
+                is PreviewCommand.CancelPreparation -> applyPreparationCancellation(command)
                 PreviewCommand.Release -> {
                     applyRelease()
                     return
@@ -147,7 +167,15 @@ class PreviewPlayer internal constructor(
     }
 
     private fun beginPreparation(command: PreviewCommand.Prepare) {
+        activePreparationToken?.cancel()
         pendingPreparation?.complete(Result.success(Unit))
+        if (!command.token.withActive { beginActivePreparation(command) }) {
+            command.completion.complete(Result.success(Unit))
+        }
+    }
+
+    private fun beginActivePreparation(command: PreviewCommand.Prepare) {
+        activePreparationToken = command.token
         pendingPreparation = command.completion
         generation += 1
         songId = command.songId
@@ -156,12 +184,18 @@ class PreviewPlayer internal constructor(
         resumeAfterReady = false
         mediaLoaded = false
         mutableState.value = PreviewState.Buffering
-        bindListener(generation)
-        fetchGrant(generation, command.songId, positionMillis = null)
+        bindListener(generation, command.token)
+        fetchGrant(generation, command.token, command.songId, positionMillis = null)
     }
 
     private suspend fun applyGrant(command: PreviewCommand.GrantResolved) {
-        if (command.generation != generation) return
+        admissionProbe.afterAdmission(PreviewAdmissionPoint.GRANT_APPLICATION)
+        if (command.generation != generation || command.token !== activePreparationToken) return
+        command.token.withActive { applyActiveGrant(command) }
+    }
+
+    private fun applyActiveGrant(command: PreviewCommand.GrantResolved) {
+        if (command.generation != generation || command.token !== activePreparationToken) return
         command.result.fold(
             onSuccess = { grant ->
                 if (grant.url.isBlank()) {
@@ -189,8 +223,19 @@ class PreviewPlayer internal constructor(
         )
     }
 
-    private suspend fun applyEngineEvent(command: PreviewCommand.EngineEvent) {
-        if (command.generation != generation) return
+    private fun applyEngineEvent(command: PreviewCommand.EngineEvent) {
+        if (
+            command.generation != generation ||
+            command.token !== activePreparationToken
+        ) return
+        command.token.withActive { applyActiveEngineEvent(command) }
+    }
+
+    private fun applyActiveEngineEvent(command: PreviewCommand.EngineEvent) {
+        if (
+            command.generation != generation ||
+            command.token !== activePreparationToken
+        ) return
         when (val event = command.event) {
             PreviewEngineEvent.Ready -> if (mediaLoaded) {
                 mutableState.value = PreviewState.Buffered
@@ -216,11 +261,12 @@ class PreviewPlayer internal constructor(
         }
     }
 
-    private suspend fun handleHttpError(status: Int) {
+    private fun handleHttpError(status: Int) {
         val activeSongId = songId
+        val activeToken = activePreparationToken
         if (
             status !in setOf(401, 403) || refreshUsed || activeSongId == null ||
-            currentGrant == null || !mediaLoaded
+            activeToken == null || currentGrant == null || !mediaLoaded
         ) {
             mutableState.value = PreviewState.Error(ERROR_MESSAGE)
             return
@@ -232,8 +278,8 @@ class PreviewPlayer internal constructor(
         currentGrant = null
         mediaLoaded = false
         mutableState.value = PreviewState.Buffering
-        bindListener(generation)
-        fetchGrant(generation, activeSongId, position)
+        bindListener(generation, activeToken)
+        fetchGrant(generation, activeToken, activeSongId, position)
     }
 
     private suspend fun applyPlay(command: PreviewCommand.Play) {
@@ -256,8 +302,28 @@ class PreviewPlayer internal constructor(
         command.completion.complete(true)
     }
 
+    private fun applyPreparationCancellation(command: PreviewCommand.CancelPreparation) {
+        try {
+            if (command.token !== activePreparationToken) return
+            generation += 1
+            activePreparationToken = null
+            songId = null
+            currentGrant = null
+            refreshUsed = false
+            resumeAfterReady = false
+            mediaLoaded = false
+            pendingPreparation?.complete(Result.success(Unit))
+            pendingPreparation = null
+            mutableState.value = PreviewState.Idle
+        } finally {
+            command.acknowledgement.complete(Unit)
+        }
+    }
+
     private suspend fun applyRelease() {
+        activePreparationToken?.cancel()
         generation += 1
+        activePreparationToken = null
         currentGrant = null
         mediaLoaded = false
         mutableState.value = PreviewState.Released
@@ -267,29 +333,43 @@ class PreviewPlayer internal constructor(
             engine.release()
         } finally {
             commands.close()
-            releaseCompletion.complete(Unit)
             actorScope.cancel()
+            releaseCompletion.complete(Unit)
         }
     }
 
-    private fun bindListener(expectedGeneration: Long) {
+    private fun bindListener(expectedGeneration: Long, token: PreparationToken) {
         engine.setListener { event ->
             admissionProbe.afterAdmission(PreviewAdmissionPoint.ENGINE_EVENT)
-            commands.trySend(PreviewCommand.EngineEvent(expectedGeneration, event))
+            commands.trySend(PreviewCommand.EngineEvent(expectedGeneration, token, event))
         }
     }
 
-    private fun fetchGrant(expectedGeneration: Long, expectedSongId: String, positionMillis: Long?) {
-        actorScope.launch(Dispatchers.IO) {
-            val result = runCatching { grantSource.fetch(expectedSongId) }
+    private fun fetchGrant(
+        expectedGeneration: Long,
+        token: PreparationToken,
+        expectedSongId: String,
+        positionMillis: Long?,
+    ) {
+        val job = actorScope.launch(Dispatchers.IO) {
+            val result = try {
+                Result.success(grantSource.fetch(expectedSongId))
+            } catch (_: CancellationException) {
+                return@launch
+            } catch (error: Throwable) {
+                Result.failure(error)
+            }
             val point = if (result.exceptionOrNull()?.isRecoverablePreviewFailure() == true) {
                 PreviewAdmissionPoint.PUBLISH_ERROR
             } else {
                 PreviewAdmissionPoint.GRANT_RESULT
             }
             admissionProbe.afterAdmission(point)
-            commands.trySend(PreviewCommand.GrantResolved(expectedGeneration, result, positionMillis))
+            commands.trySend(
+                PreviewCommand.GrantResolved(expectedGeneration, token, result, positionMillis),
+            )
         }
+        token.attachGrantJob(job)
     }
 
     private fun submit(command: PreviewCommand): Boolean = synchronized(submissionLock) {
@@ -304,19 +384,58 @@ class PreviewPlayer internal constructor(
 private sealed interface PreviewCommand {
     data class Prepare(
         val songId: String,
+        val token: PreparationToken,
         val completion: CompletableDeferred<Result<Unit>>,
     ) : PreviewCommand
 
     data class GrantResolved(
         val generation: Long,
+        val token: PreparationToken,
         val result: Result<PreviewGrant>,
         val positionMillis: Long?,
     ) : PreviewCommand
 
-    data class EngineEvent(val generation: Long, val event: PreviewEngineEvent) : PreviewCommand
+    data class EngineEvent(
+        val generation: Long,
+        val token: PreparationToken,
+        val event: PreviewEngineEvent,
+    ) : PreviewCommand
     data class Play(val completion: CompletableDeferred<Boolean>) : PreviewCommand
     data class Pause(val completion: CompletableDeferred<Boolean>) : PreviewCommand
+    data class CancelPreparation(
+        val token: PreparationToken,
+        val acknowledgement: CompletableDeferred<Unit>,
+    ) : PreviewCommand
     data object Release : PreviewCommand
+}
+
+private class PreparationToken {
+    private val lock = Any()
+    private var cancelled = false
+    private var grantJob: Job? = null
+
+    fun cancel() {
+        val job = synchronized(lock) {
+            cancelled = true
+            grantJob
+        }
+        job?.cancel()
+    }
+
+    fun attachGrantJob(job: Job) {
+        val cancelNow = synchronized(lock) {
+            grantJob = job
+            cancelled
+        }
+        if (cancelNow) job.cancel()
+    }
+
+    inline fun withActive(action: () -> Unit): Boolean = synchronized(lock) {
+        if (cancelled) false else {
+            action()
+            true
+        }
+    }
 }
 
 private fun Throwable.isRecoverablePreviewFailure(): Boolean =

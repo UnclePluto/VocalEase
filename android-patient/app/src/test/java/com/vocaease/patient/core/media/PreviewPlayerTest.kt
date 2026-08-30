@@ -3,14 +3,17 @@ package com.vocaease.patient.core.media
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -18,6 +21,152 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreviewPlayerTest {
+    @Test
+    fun `release立即返回且底层资源仍按actor顺序最终释放`() = runBlocking {
+        val engine = FakePreviewEngine().apply { blockRelease = true }
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+        )
+        player.prepare(SONG_ID)
+
+        val releaseCall = async(Dispatchers.Default) { player.release() }
+        engine.releaseEntered.await()
+        val returnedBeforeEngineFinished = withTimeoutOrNull(1_000) {
+            releaseCall.await()
+            true
+        } ?: false
+        engine.continueRelease.complete(Unit)
+        releaseCall.await()
+
+        assertTrue(returnedBeforeEngineFinished)
+        withTimeout(1_000) { player.awaitReleased() }
+        assertTrue(player.state.value is PreviewState.Released)
+        assertEquals(1, engine.releaseCount)
+    }
+
+    @Test
+    fun `多次release和关闭后调用保持幂等且可等待最终释放`() = runBlocking {
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+        )
+        player.prepare(SONG_ID)
+
+        player.release()
+        player.release()
+        withTimeout(1_000) { player.awaitReleased() }
+        player.release()
+
+        assertEquals(1, engine.releaseCount)
+        assertFalse(player.play())
+        assertFalse(player.pause())
+        player.prepare(SONG_ID)
+        assertEquals(1, engine.loadedUrls.size)
+        assertTrue(player.state.value is PreviewState.Released)
+    }
+
+    @Test
+    fun `caller取消prepare返回后非取消grant迟到也不能加载或污染状态`() = runBlocking {
+        val grantEntered = CompletableDeferred<Unit>()
+        val continueGrant = CompletableDeferred<Unit>()
+        val grantReturned = CompletableDeferred<Unit>()
+        val lateGrantDequeued = CompletableDeferred<Unit>()
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine = engine,
+            grantSource = PreviewGrantSource {
+                grantEntered.complete(Unit)
+                try {
+                    continueGrant.await()
+                } catch (_: CancellationException) {
+                    withContext(NonCancellable) { continueGrant.await() }
+                }
+                grantReturned.complete(Unit)
+                PreviewGrant("https://private.invalid/late", Instant.MAX)
+            },
+            admissionProbe = PreviewAdmissionProbe { point ->
+                if (point == PreviewAdmissionPoint.GRANT_APPLICATION) {
+                    lateGrantDequeued.complete(Unit)
+                }
+            },
+        )
+        val cancellation = CancellationException("调用方主动取消")
+        val preparation = async { player.prepare(SONG_ID) }
+        grantEntered.await()
+
+        preparation.cancel(cancellation)
+        withTimeout(1_000) { preparation.join() }
+        val propagated = runCatching { preparation.await() }.exceptionOrNull()
+        assertTrue(propagated is CancellationException)
+        assertEquals(cancellation.message, propagated?.message)
+
+        continueGrant.complete(Unit)
+        grantReturned.await()
+        lateGrantDequeued.await()
+
+        assertTrue(engine.loadedUrls.isEmpty())
+        assertTrue(player.state.value is PreviewState.Idle)
+    }
+
+    @Test
+    fun `caller取消prepare会停止普通grant任务并原样传播取消异常`() = runBlocking {
+        val grantEntered = CompletableDeferred<Unit>()
+        val grantStopped = CompletableDeferred<Unit>()
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(engine, grantSource = PreviewGrantSource {
+            grantEntered.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                grantStopped.complete(Unit)
+            }
+        })
+        val cancellation = CancellationException("保留此取消原因")
+        val preparation = async { player.prepare(SONG_ID) }
+        grantEntered.await()
+
+        preparation.cancel(cancellation)
+        withTimeout(1_000) { preparation.join() }
+
+        withTimeout(1_000) { grantStopped.await() }
+        val propagated = runCatching { preparation.await() }.exceptionOrNull()
+        assertTrue(propagated is CancellationException)
+        assertEquals(cancellation.message, propagated?.message)
+        assertTrue(engine.loadedUrls.isEmpty())
+        assertTrue(player.state.value is PreviewState.Idle)
+    }
+
+    @Test
+    fun `GrantResolved已入队但actor应用前caller取消仍不得load`() = runBlocking {
+        val grantApplicationEntered = CompletableDeferred<Unit>()
+        val continueGrantApplication = CompletableDeferred<Unit>()
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine = engine,
+            grantSource = QueuePreviewSource(
+                PreviewGrant("https://private.invalid/queued", Instant.MAX),
+            ),
+            admissionProbe = PreviewAdmissionProbe { point ->
+                if (point == PreviewAdmissionPoint.GRANT_APPLICATION) {
+                    grantApplicationEntered.complete(Unit)
+                    continueGrantApplication.await()
+                }
+            },
+        )
+        val preparation = async { player.prepare(SONG_ID) }
+        grantApplicationEntered.await()
+
+        preparation.cancel(CancellationException("结果已排队后取消"))
+        yield()
+        continueGrantApplication.complete(Unit)
+        withTimeout(1_000) { preparation.join() }
+
+        assertTrue(engine.loadedUrls.isEmpty())
+        assertTrue(player.state.value is PreviewState.Idle)
+    }
+
     @Test
     fun `release完成后已进入的旧播放器事件不能覆盖Released`() = runBlocking {
         val eventAdmitted = CompletableDeferred<Unit>()
@@ -36,13 +185,13 @@ class PreviewPlayerTest {
         )
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
-        assertTrue(player.state.value is PreviewState.Buffered)
+        awaitCondition { player.state.value is PreviewState.Buffered }
         gateEvent = true
 
         val lateEvent = engine.emitAsync(this, PreviewEngineEvent.Buffering)
         eventAdmitted.await()
-        val release = async(Dispatchers.Default) { player.release() }
-        release.await()
+        player.release()
+        player.awaitReleased()
         assertTrue(player.state.value is PreviewState.Released)
 
         continueEvent.complete(Unit)
@@ -74,8 +223,8 @@ class PreviewPlayerTest {
 
         val preparation = async { player.prepare(SONG_ID) }
         withTimeout(500) { errorAdmitted.await() }
-        val release = async(Dispatchers.Default) { player.release() }
-        release.await()
+        player.release()
+        player.awaitReleased()
         assertTrue(player.state.value is PreviewState.Released)
 
         continueError.complete(Unit)
@@ -98,7 +247,7 @@ class PreviewPlayerTest {
         player.prepare(SONG_ID)
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
-        assertTrue(player.state.value is PreviewState.Buffered)
+        awaitCondition { player.state.value is PreviewState.Buffered }
 
         engine.emitFromListener(0, PreviewEngineEvent.PlayingChanged(true))
 
@@ -134,6 +283,7 @@ class PreviewPlayerTest {
         engine.emit(PreviewEngineEvent.HttpError(401))
         refreshEntered.await()
         player.release()
+        player.awaitReleased()
         releaseRefresh.complete(Unit)
         refreshReturned.await()
         yield()
@@ -153,11 +303,13 @@ class PreviewPlayerTest {
         )
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { player.state.value is PreviewState.Buffered }
 
         engine.blockPlay = true
         val play = async(Dispatchers.Default) { player.play() }
         engine.playEntered.await()
-        val releaseAfterPlay = async(Dispatchers.Default) { player.release() }
+        player.release()
+        val releaseAfterPlay = async(Dispatchers.Default) { player.awaitReleased() }
         yield()
         assertFalse(releaseAfterPlay.isCompleted)
         engine.continuePlay.complete(Unit)
@@ -175,11 +327,13 @@ class PreviewPlayerTest {
         )
         pausePlayer.prepare(SONG_ID)
         pauseEngine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { pausePlayer.state.value is PreviewState.Buffered }
         assertTrue(pausePlayer.play())
         pauseEngine.blockPause = true
         val pause = async(Dispatchers.Default) { pausePlayer.pause() }
         pauseEngine.pauseEntered.await()
-        val releaseAfterPause = async(Dispatchers.Default) { pausePlayer.release() }
+        pausePlayer.release()
+        val releaseAfterPause = async(Dispatchers.Default) { pausePlayer.awaitReleased() }
         yield()
         assertFalse(releaseAfterPause.isCompleted)
         pauseEngine.continuePause.complete(Unit)
@@ -202,6 +356,7 @@ class PreviewPlayerTest {
         )
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { player.state.value is PreviewState.Buffered }
 
         assertTrue(withTimeout(1_000) { player.play() })
         assertTrue(player.state.value is PreviewState.Playing)
@@ -223,7 +378,7 @@ class PreviewPlayerTest {
         assertFalse(player.state.value is PreviewState.Buffered)
 
         engine.emit(PreviewEngineEvent.Ready)
-        assertTrue(player.state.value is PreviewState.Buffered)
+        awaitCondition { player.state.value is PreviewState.Buffered }
         assertFalse(player.state.value.toString().contains("token=secret"))
     }
 
@@ -264,13 +419,14 @@ class PreviewPlayerTest {
 
         assertFalse(player.play())
         engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { player.state.value is PreviewState.Buffered }
         assertTrue(player.play())
         engine.emit(PreviewEngineEvent.PlayingChanged(true))
-        assertTrue(player.state.value is PreviewState.Playing)
+        awaitCondition { player.state.value is PreviewState.Playing }
 
         assertTrue(player.pause())
         engine.emit(PreviewEngineEvent.PlayingChanged(false))
-        assertTrue(player.state.value is PreviewState.Buffered)
+        awaitCondition { player.state.value is PreviewState.Buffered }
         assertEquals(1, engine.playCount)
         assertEquals(1, engine.pauseCount)
     }
@@ -285,6 +441,7 @@ class PreviewPlayerTest {
         val player = PreviewPlayer(engine, source)
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { player.state.value is PreviewState.Buffered }
         assertTrue(player.play())
 
         engine.emit(PreviewEngineEvent.HttpError(401))
@@ -312,7 +469,7 @@ class PreviewPlayerTest {
 
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
-        assertTrue(player.state.value is PreviewState.Buffered)
+        awaitCondition { player.state.value is PreviewState.Buffered }
         assertTrue(player.play())
         assertEquals(2, attempt)
     }
@@ -336,6 +493,7 @@ class PreviewPlayerTest {
 
         player.prepare(SONG_ID)
         engine.emit(PreviewEngineEvent.Ready)
+        awaitCondition { player.state.value is PreviewState.Buffered }
 
         assertEquals(3, source.callCount)
         assertEquals("https://private.invalid/manual-retry", engine.loadedUrls.last())
@@ -353,6 +511,7 @@ class PreviewPlayerTest {
         player.prepare(SONG_ID)
 
         player.release()
+        player.awaitReleased()
         engine.emit(PreviewEngineEvent.Ready)
 
         assertTrue(engine.released)
@@ -375,6 +534,7 @@ class PreviewPlayerTest {
         player.release()
         releaseGrant.complete(Unit)
         preparation.await()
+        player.awaitReleased()
 
         assertTrue(engine.released)
         assertTrue(engine.loadedUrls.isEmpty())
@@ -422,6 +582,9 @@ private class FakePreviewEngine : PreviewEngine {
     val pauseEntered = CompletableDeferred<Unit>()
     val continuePause = CompletableDeferred<Unit>()
     var reentrantPlayEvent: PreviewEngineEvent? = null
+    var blockRelease = false
+    val releaseEntered = CompletableDeferred<Unit>()
+    val continueRelease = CompletableDeferred<Unit>()
 
     override val currentPositionMillis: Long
         get() = position
@@ -461,6 +624,10 @@ private class FakePreviewEngine : PreviewEngine {
     override fun release() {
         released = true
         releaseCount += 1
+        if (blockRelease) runBlocking {
+            releaseEntered.complete(Unit)
+            continueRelease.await()
+        }
         listener = null
     }
 
