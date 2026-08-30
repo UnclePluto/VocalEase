@@ -56,6 +56,8 @@ fun PreparationScreen(
     onRequestPermissions: () -> Unit,
     onOpenSettings: () -> Unit,
     onRetry: () -> Unit,
+    onPreviewToggle: () -> Unit = {},
+    onRetryPreview: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -79,7 +81,7 @@ fun PreparationScreen(
             return@Column
         }
 
-        SongIdentity(song)
+        SongIdentity(song, state.previewState, onPreviewToggle, onRetryPreview)
         LyricsUnavailable()
         Text(
             "开始前请确认",
@@ -175,15 +177,49 @@ private fun PreparationHeader(onBack: () -> Unit) {
 }
 
 @Composable
-private fun SongIdentity(song: PreparationSong) {
+private fun SongIdentity(
+    song: PreparationSong,
+    previewState: PreviewState,
+    onPreviewToggle: () -> Unit,
+    onRetryPreview: () -> Unit,
+) {
     Box(
-        modifier = Modifier
-            .size(88.dp)
-            .shadow(12.dp, RoundedCornerShape(24.dp))
-            .background(androidx.compose.ui.graphics.Color(0xFFB95C91), RoundedCornerShape(24.dp)),
-        contentAlignment = Alignment.Center,
+        modifier = Modifier.fillMaxWidth().height(88.dp),
     ) {
-        Text("♫", color = AppWhite, fontSize = 36.sp)
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(88.dp)
+                .shadow(12.dp, RoundedCornerShape(24.dp))
+                .background(androidx.compose.ui.graphics.Color(0xFFB95C91), RoundedCornerShape(24.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("♫", color = AppWhite, fontSize = 36.sp)
+        }
+        val (label, action) = when (previewState) {
+            PreviewState.Buffered -> "试听" to onPreviewToggle
+            PreviewState.Playing -> "暂停" to onPreviewToggle
+            is PreviewState.Error -> "重新试听" to onRetryPreview
+            else -> "缓冲中" to {}
+        }
+        TextButton(
+            onClick = action,
+            enabled = previewState is PreviewState.Buffered || previewState is PreviewState.Playing ||
+                previewState is PreviewState.Error,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .height(MinimumTouchTargetSize)
+                .semantics {
+                    contentDescription = when (previewState) {
+                        PreviewState.Playing -> "暂停试听"
+                        is PreviewState.Error -> "重新试听"
+                        else -> "试听歌曲"
+                    }
+                    role = Role.Button
+                },
+        ) {
+            Text(label, color = BrandGreenDark, fontWeight = FontWeight.Bold)
+        }
     }
     Text(
         song.title,
@@ -273,7 +309,8 @@ private fun DeviceStatus(
         PreflightBlocker.FRONT_CAMERA in state.preflight.blockers -> "未检测到前置摄像头"
         PreflightBlocker.STORAGE in state.preflight.blockers -> "存储空间不足"
         PreflightBlocker.OFFLINE in state.preflight.blockers -> "请连接网络后创建会话"
-        state.previewState !is PreviewState.Buffered -> "歌曲正在缓冲"
+        state.previewState is PreviewState.Error -> state.previewState.message
+        state.previewState !is PreviewState.Buffered && state.previewState !is PreviewState.Playing -> "歌曲正在缓冲"
         else -> "摄像头与麦克风已就绪"
     }
     Row(

@@ -126,6 +126,8 @@ class AccountScopedDraftStorage internal constructor(
                 songDurationSeconds = draft.songDurationSeconds,
                 serverSessionId = draft.serverSessionId,
                 creationKey = draft.creationKey,
+                status = draft.status,
+                activeSongId = draft.activeSongId,
                 createdAt = draft.createdAt,
                 expiresAt = draft.expiresAt,
             ),
@@ -134,6 +136,23 @@ class AccountScopedDraftStorage internal constructor(
 
     suspend fun findPreparationDraft(draftId: String): PreparationDraftSnapshot? = checked {
         database.preparationDraftDao().find(lease.patientId, draftId)?.toSnapshot(accountScopeHash)
+    }
+
+    suspend fun findActivePreparationDraft(songId: String): PreparationDraftSnapshot? = checked {
+        database.preparationDraftDao().findActive(lease.patientId, songId)?.toSnapshot(accountScopeHash)
+    }
+
+    suspend fun findOrCreatePreparationDraft(candidate: PreparationDraftSnapshot): PreparationDraftSnapshot = checked {
+        require(candidate.accountScopeHash == accountScopeHash) { "账户作用域不匹配" }
+        database.withTransaction {
+            database.preparationDraftDao().findActive(lease.patientId, candidate.songId)?.toSnapshot(accountScopeHash)
+                ?: run {
+                    insertPreparationEntity(candidate)
+                    requireNotNull(
+                        database.preparationDraftDao().find(lease.patientId, candidate.draftId),
+                    ).toSnapshot(accountScopeHash)
+                }
+        }
     }
 
     suspend fun bindPreparationSession(
@@ -189,6 +208,38 @@ class AccountScopedDraftStorage internal constructor(
                 }
             }
         }
+    }
+
+    suspend fun markPreparationHandoffPending(
+        draftId: String,
+        serverSessionId: String,
+        publishNavigation: () -> Unit,
+    ) = checked {
+        database.withTransaction {
+            val preparation = database.preparationDraftDao().find(lease.patientId, draftId)
+                ?: error("演唱准备草稿不存在")
+            if (
+                preparation.serverSessionId != serverSessionId ||
+                preparation.status !in setOf(PreparationDraftStatus.BOUND, PreparationDraftStatus.HANDOFF_PENDING)
+            ) {
+                throw SessionBindingMismatchException()
+            }
+            val recordingDraft = database.draftDao().find(lease.patientId, draftId)
+                ?: throw SessionBindingMismatchException()
+            if (recordingDraft.sessionId != serverSessionId || recordingDraft.songId != preparation.songId) {
+                throw SessionBindingMismatchException()
+            }
+            check(database.preparationDraftDao().markHandoffPending(lease.patientId, draftId, serverSessionId) == 1)
+        }
+        publishNavigation()
+    }
+
+    suspend fun acknowledgePreparationHandoff(draftId: String): Boolean = checked {
+        database.preparationDraftDao().acknowledgeHandoff(lease.patientId, draftId) == 1
+    }
+
+    suspend fun abandonPreparation(draftId: String): Boolean = checked {
+        database.preparationDraftDao().abandon(lease.patientId, draftId) == 1
     }
 
     suspend fun deleteDraft(draftId: String): Int = checked {
@@ -305,6 +356,25 @@ class AccountScopedDraftStorage internal constructor(
         return session.withCurrentLease(lease, block)
     }
 
+    private suspend fun insertPreparationEntity(draft: PreparationDraftSnapshot) {
+        database.preparationDraftDao().insert(
+            PreparationDraftEntity(
+                accountScope = lease.patientId,
+                draftId = draft.draftId,
+                songId = draft.songId,
+                songTitle = draft.songTitle,
+                songArtist = draft.songArtist,
+                songDurationSeconds = draft.songDurationSeconds,
+                serverSessionId = draft.serverSessionId,
+                creationKey = draft.creationKey,
+                status = draft.status,
+                activeSongId = draft.activeSongId,
+                createdAt = draft.createdAt,
+                expiresAt = draft.expiresAt,
+            ),
+        )
+    }
+
     private fun allowedTransition(from: UploadOverallState, to: UploadOverallState): Boolean =
         to == from || to in OVERALL_TRANSITIONS.getValue(from)
 
@@ -385,6 +455,8 @@ data class PreparationDraftSnapshot(
     val songDurationSeconds: Int,
     val serverSessionId: String?,
     val creationKey: String,
+    val status: PreparationDraftStatus,
+    val activeSongId: String?,
     val createdAt: Long,
     val expiresAt: Long,
 )
@@ -398,6 +470,8 @@ private fun PreparationDraftEntity.toSnapshot(accountScopeHash: String) = Prepar
     songDurationSeconds = songDurationSeconds,
     serverSessionId = serverSessionId,
     creationKey = creationKey,
+    status = status,
+    activeSongId = activeSongId,
     createdAt = createdAt,
     expiresAt = expiresAt,
 )

@@ -22,6 +22,8 @@ class PreviewPlayerTest {
         assertTrue(player.state.value is PreviewState.Buffering)
         engine.emit(PreviewEngineEvent.Buffering)
         assertFalse(player.state.value is PreviewState.Buffered)
+        engine.emit(PreviewEngineEvent.PlayingChanged(false))
+        assertFalse(player.state.value is PreviewState.Buffered)
 
         engine.emit(PreviewEngineEvent.Ready)
         assertTrue(player.state.value is PreviewState.Buffered)
@@ -50,6 +52,92 @@ class PreviewPlayerTest {
             assertEquals(2, source.callCount)
             assertEquals("试听加载失败，请重试", (player.state.value as PreviewState.Error).message)
         }
+    }
+
+    @Test
+    fun `只有缓冲完成后可试听且暂停后可再次播放`() = runBlocking {
+        val engine = FakePreviewEngine()
+        val player = PreviewPlayer(
+            engine,
+            QueuePreviewSource(PreviewGrant("https://private.invalid/audio", Instant.MAX)),
+        )
+        player.prepare(SONG_ID)
+
+        assertFalse(player.play())
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(player.play())
+        engine.emit(PreviewEngineEvent.PlayingChanged(true))
+        assertTrue(player.state.value is PreviewState.Playing)
+
+        assertTrue(player.pause())
+        engine.emit(PreviewEngineEvent.PlayingChanged(false))
+        assertTrue(player.state.value is PreviewState.Buffered)
+        assertEquals(1, engine.playCount)
+        assertEquals(1, engine.pauseCount)
+    }
+
+    @Test
+    fun `播放中的401刷新后恢复位置并继续原试听意图`() = runBlocking {
+        val engine = FakePreviewEngine().apply { position = 12_345 }
+        val source = QueuePreviewSource(
+            PreviewGrant("https://private.invalid/old", Instant.MAX),
+            PreviewGrant("https://private.invalid/new", Instant.MAX),
+        )
+        val player = PreviewPlayer(engine, source)
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(player.play())
+
+        engine.emit(PreviewEngineEvent.HttpError(401))
+        engine.emit(PreviewEngineEvent.Ready)
+
+        assertEquals(listOf(12_345L), engine.seeks)
+        assertEquals(2, engine.playCount)
+        assertTrue(player.state.value is PreviewState.Playing)
+    }
+
+    @Test
+    fun `授权失败或第二次鉴权失败后手动重试开启新的单次刷新预算`() = runBlocking {
+        val engine = FakePreviewEngine()
+        var attempt = 0
+        val player = PreviewPlayer(engine) {
+            attempt += 1
+            if (attempt == 1) throw java.io.IOException("offline")
+            PreviewGrant("https://private.invalid/$attempt", Instant.MAX)
+        }
+
+        player.prepare(SONG_ID)
+        assertTrue(player.state.value is PreviewState.Error)
+
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(player.state.value is PreviewState.Buffered)
+        assertTrue(player.play())
+        assertEquals(2, attempt)
+    }
+
+    @Test
+    fun `第二次401进入错误后手动重试可重新缓冲并播放`() = runBlocking {
+        val engine = FakePreviewEngine()
+        val source = QueuePreviewSource(
+            PreviewGrant("https://private.invalid/first", Instant.MAX),
+            PreviewGrant("https://private.invalid/refresh", Instant.MAX),
+            PreviewGrant("https://private.invalid/manual-retry", Instant.MAX),
+        )
+        val player = PreviewPlayer(engine, source)
+        player.prepare(SONG_ID)
+
+        engine.emit(PreviewEngineEvent.HttpError(401))
+        engine.emit(PreviewEngineEvent.HttpError(401))
+        assertEquals("试听加载失败，请重试", (player.state.value as PreviewState.Error).message)
+
+        player.prepare(SONG_ID)
+        engine.emit(PreviewEngineEvent.Ready)
+
+        assertEquals(3, source.callCount)
+        assertEquals("https://private.invalid/manual-retry", engine.loadedUrls.last())
+        assertTrue(player.state.value is PreviewState.Buffered)
+        assertTrue(player.play())
     }
 
     @Test
@@ -112,6 +200,8 @@ private class FakePreviewEngine : PreviewEngine {
     val seeks = mutableListOf<Long>()
     var position = 0L
     var released = false
+    var playCount = 0
+    var pauseCount = 0
 
     override val currentPositionMillis: Long
         get() = position
@@ -126,6 +216,14 @@ private class FakePreviewEngine : PreviewEngine {
 
     override fun seekTo(positionMillis: Long) {
         seeks += positionMillis
+    }
+
+    override fun play() {
+        playCount += 1
+    }
+
+    override fun pause() {
+        pauseCount += 1
     }
 
     override fun release() {

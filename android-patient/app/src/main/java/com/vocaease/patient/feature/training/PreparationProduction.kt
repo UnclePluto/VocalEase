@@ -8,6 +8,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Network
 import android.os.StatFs
 import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -120,6 +121,45 @@ class AndroidReadinessSource(
 
     private companion object {
         const val CAMERA_PROVIDER_TIMEOUT_SECONDS = 5L
+    }
+}
+
+class AndroidPreparationEnvironmentMonitor(context: Context) : PreparationEnvironmentMonitor {
+    private val connectivity = context.applicationContext.getSystemService(ConnectivityManager::class.java)
+    private val lock = Any()
+    private var callback: ConnectivityManager.NetworkCallback? = null
+
+    override fun start(onChanged: () -> Unit) {
+        val manager = connectivity ?: return
+        synchronized(lock) {
+            if (callback != null) return
+            val registered = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = notifyIfCurrent(this, onChanged)
+                override fun onLost(network: Network) = notifyIfCurrent(this, onChanged)
+                override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
+                    notifyIfCurrent(this, onChanged)
+            }
+            callback = registered
+            try {
+                manager.registerDefaultNetworkCallback(registered)
+            } catch (error: RuntimeException) {
+                callback = null
+                throw error
+            }
+        }
+    }
+
+    override fun stop() {
+        val manager = connectivity ?: return
+        val registered = synchronized(lock) { callback.also { callback = null } } ?: return
+        runCatching { manager.unregisterNetworkCallback(registered) }
+    }
+
+    private fun notifyIfCurrent(
+        source: ConnectivityManager.NetworkCallback,
+        listener: () -> Unit,
+    ) {
+        if (synchronized(lock) { callback === source }) listener()
     }
 }
 

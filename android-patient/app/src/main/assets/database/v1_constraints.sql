@@ -162,6 +162,11 @@ CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_insert_v2 BEFORE INSERT ON
     OR NEW.creation_key NOT LIKE 'session-create:%:' || NEW.draft_id
     OR typeof(NEW.song_duration_seconds) != 'integer' OR NEW.song_duration_seconds <= 0
     OR (NEW.server_session_id IS NOT NULL AND (trim(NEW.server_session_id) = '' OR length(NEW.server_session_id) > 128))
+    OR NEW.status NOT IN ('PENDING','BOUND','HANDOFF_PENDING','HANDED_OFF','ABANDONED')
+    OR (NEW.status IN ('PENDING','BOUND','HANDOFF_PENDING') AND NEW.active_song_id IS NOT NEW.song_id)
+    OR (NEW.status IN ('HANDED_OFF','ABANDONED') AND NEW.active_song_id IS NOT NULL)
+    OR (NEW.status = 'PENDING' AND NEW.server_session_id IS NOT NULL)
+    OR (NEW.status IN ('BOUND','HANDOFF_PENDING','HANDED_OFF') AND NEW.server_session_id IS NULL)
     OR typeof(NEW.created_at) != 'integer' OR typeof(NEW.expires_at) != 'integer'
     OR NEW.created_at < 0 OR NEW.expires_at < NEW.created_at
     OR NEW.expires_at - NEW.created_at > 604800000
@@ -172,12 +177,25 @@ CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_update_v2 BEFORE UPDATE ON
   SELECT CASE WHEN NEW.account_scope != OLD.account_scope OR NEW.draft_id != OLD.draft_id
     OR NEW.song_id != OLD.song_id OR NEW.creation_key != OLD.creation_key
     OR NEW.created_at != OLD.created_at OR NEW.expires_at != OLD.expires_at
-    OR (OLD.server_session_id IS NOT NULL AND (
-      NEW.server_session_id IS NOT OLD.server_session_id OR NEW.song_title != OLD.song_title
-      OR NEW.song_artist != OLD.song_artist OR NEW.song_duration_seconds != OLD.song_duration_seconds))
-    OR (OLD.server_session_id IS NULL AND NEW.server_session_id IS NULL AND (
-      NEW.song_title != OLD.song_title OR NEW.song_artist != OLD.song_artist
-      OR NEW.song_duration_seconds != OLD.song_duration_seconds))
+    OR NOT (
+      (NEW.status = OLD.status AND NEW.server_session_id IS OLD.server_session_id
+        AND NEW.active_song_id IS OLD.active_song_id AND NEW.song_title = OLD.song_title
+        AND NEW.song_artist = OLD.song_artist AND NEW.song_duration_seconds = OLD.song_duration_seconds)
+      OR (OLD.status = 'PENDING' AND NEW.status = 'BOUND' AND OLD.server_session_id IS NULL
+        AND NEW.server_session_id IS NOT NULL AND NEW.active_song_id = OLD.song_id)
+      OR (OLD.status = 'BOUND' AND NEW.status = 'HANDOFF_PENDING'
+        AND NEW.server_session_id IS OLD.server_session_id AND NEW.active_song_id = OLD.song_id
+        AND NEW.song_title = OLD.song_title AND NEW.song_artist = OLD.song_artist
+        AND NEW.song_duration_seconds = OLD.song_duration_seconds)
+      OR (OLD.status = 'HANDOFF_PENDING' AND NEW.status = 'HANDED_OFF'
+        AND NEW.server_session_id IS OLD.server_session_id AND NEW.active_song_id IS NULL
+        AND NEW.song_title = OLD.song_title AND NEW.song_artist = OLD.song_artist
+        AND NEW.song_duration_seconds = OLD.song_duration_seconds)
+      OR (OLD.status IN ('PENDING','BOUND','HANDOFF_PENDING') AND NEW.status = 'ABANDONED'
+        AND NEW.server_session_id IS OLD.server_session_id AND NEW.active_song_id IS NULL
+        AND NEW.song_title = OLD.song_title AND NEW.song_artist = OLD.song_artist
+        AND NEW.song_duration_seconds = OLD.song_duration_seconds)
+    )
     OR trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = '' OR trim(NEW.song_id) = ''
     OR trim(NEW.song_title) = '' OR trim(NEW.song_artist) = '' OR trim(NEW.creation_key) = ''
     OR length(NEW.account_scope) > 128 OR length(NEW.draft_id) > 128 OR length(NEW.song_id) > 128
@@ -185,6 +203,11 @@ CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_update_v2 BEFORE UPDATE ON
     OR NEW.creation_key NOT LIKE 'session-create:%:' || NEW.draft_id
     OR typeof(NEW.song_duration_seconds) != 'integer' OR NEW.song_duration_seconds <= 0
     OR (NEW.server_session_id IS NOT NULL AND (trim(NEW.server_session_id) = '' OR length(NEW.server_session_id) > 128))
+    OR NEW.status NOT IN ('PENDING','BOUND','HANDOFF_PENDING','HANDED_OFF','ABANDONED')
+    OR (NEW.status IN ('PENDING','BOUND','HANDOFF_PENDING') AND NEW.active_song_id IS NOT NEW.song_id)
+    OR (NEW.status IN ('HANDED_OFF','ABANDONED') AND NEW.active_song_id IS NOT NULL)
+    OR (NEW.status = 'PENDING' AND NEW.server_session_id IS NOT NULL)
+    OR (NEW.status IN ('BOUND','HANDOFF_PENDING','HANDED_OFF') AND NEW.server_session_id IS NULL)
     OR typeof(NEW.created_at) != 'integer' OR typeof(NEW.expires_at) != 'integer'
     OR NEW.created_at < 0 OR NEW.expires_at < NEW.created_at
     OR NEW.expires_at - NEW.created_at > 604800000

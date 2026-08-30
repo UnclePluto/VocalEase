@@ -3,12 +3,14 @@ package com.vocaease.patient.feature.training
 import androidx.lifecycle.ViewModel
 import com.vocaease.patient.core.database.SessionBindingMismatchException
 import com.vocaease.patient.core.database.StaleAccountScopeException
+import com.vocaease.patient.core.database.PreparationDraftStatus
 import com.vocaease.patient.core.media.PreviewSession
 import com.vocaease.patient.core.media.PreviewState
 import com.vocaease.patient.core.network.NetworkContractException
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -41,6 +43,11 @@ fun interface ReadinessSource {
     suspend fun inspect(durationSeconds: Long, previewBuffered: Boolean): DeviceReadiness
 }
 
+interface PreparationEnvironmentMonitor {
+    fun start(onChanged: () -> Unit)
+    fun stop()
+}
+
 data class CreatedTrainingSession(
     val sessionId: UUID,
     val patientId: UUID,
@@ -59,6 +66,7 @@ data class PreparationDraft(
     val songDurationSeconds: Int,
     val serverSessionId: String?,
     val creationKey: String,
+    val status: PreparationDraftStatus,
     val createdAt: Long,
     val expiresAt: Long,
 )
@@ -66,8 +74,13 @@ data class PreparationDraft(
 interface PreparationDraftStore {
     val accountScopeHash: String
     suspend fun find(draftId: String): PreparationDraft?
+    suspend fun findActive(songId: String): PreparationDraft?
     suspend fun create(draft: PreparationDraft)
+    suspend fun findOrCreate(candidate: PreparationDraft): PreparationDraft
     suspend fun bindServerSession(draftId: String, session: CreatedTrainingSession)
+    suspend fun markHandoffPending(draftId: String, serverSessionId: String, publishNavigation: () -> Unit)
+    suspend fun acknowledgeHandoff(draftId: String): Boolean
+    suspend fun abandon(draftId: String): Boolean
 }
 
 fun interface PreparationDraftStoreProvider {
@@ -105,6 +118,7 @@ class PreparationViewModel(
     private val songId: String,
     private val songSource: PreparationSongSource,
     private val readinessSource: ReadinessSource,
+    private val environmentMonitor: PreparationEnvironmentMonitor,
     private val preview: PreviewSession,
     private val storageProvider: PreparationDraftStoreProvider,
     private val sessionCreator: TrainingSessionCreator,
@@ -115,7 +129,11 @@ class PreparationViewModel(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     private val creationMutex = Mutex()
+    private val readinessMutex = Mutex()
+    private val stateLock = Any()
     private val operationGeneration = AtomicLong()
+    private val readinessGeneration = AtomicLong()
+    private val environmentStarted = AtomicBoolean()
     private val mutableState = MutableStateFlow(PreparationUiState())
     val state: StateFlow<PreparationUiState> = mutableState.asStateFlow()
 
@@ -126,22 +144,15 @@ class PreparationViewModel(
     }
 
     suspend fun load() {
-        mutableState.value = mutableState.value.copy(isLoading = true, errorMessage = null)
+        updateState { it.copy(isLoading = true, errorMessage = null) }
         try {
             val song = songSource.load(songId)
+            updateState { it.copy(song = song) }
             preview.prepare(song.id.toString())
-            val readiness = readinessSource.inspect(
-                song.durationSeconds.toLong(),
-                preview.state.value is PreviewState.Buffered,
-            )
-            mutableState.value = mutableState.value.copy(
-                song = song,
-                previewState = preview.state.value,
-                preflight = TrainingPreflight.evaluate(readiness),
-                isLoading = false,
-            )
+            refreshReadiness()
+            updateState { it.copy(isLoading = false) }
         } catch (error: CancellationException) {
-            mutableState.value = mutableState.value.copy(isLoading = false)
+            updateState { it.copy(isLoading = false) }
             throw error
         } catch (error: IOException) {
             publishLoadFailure()
@@ -155,71 +166,113 @@ class PreparationViewModel(
     }
 
     suspend fun refreshReadiness() {
-        val song = mutableState.value.song ?: return
-        val readiness = readinessSource.inspect(
-            song.durationSeconds.toLong(),
-            preview.state.value is PreviewState.Buffered,
-        )
-        mutableState.value = mutableState.value.copy(
-            previewState = preview.state.value,
-            preflight = TrainingPreflight.evaluate(readiness),
-        )
+        val request = readinessGeneration.incrementAndGet()
+        readinessMutex.withLock {
+            if (request != readinessGeneration.get()) return@withLock
+            val song = currentState().song ?: return@withLock
+            val readiness = readinessSource.inspect(
+                song.durationSeconds.toLong(),
+                preview.state.value.isReadyForTraining(),
+            )
+            if (request != readinessGeneration.get()) return@withLock
+            val currentPreview = preview.state.value
+            updateState { current ->
+                if (current.song?.id != song.id) current else current.copy(
+                    previewState = currentPreview,
+                    preflight = TrainingPreflight.evaluate(
+                        readiness.copy(previewBuffered = currentPreview.isReadyForTraining()),
+                    ),
+                )
+            }
+        }
+    }
+
+    fun onEnvironmentStarted() {
+        if (environmentStarted.compareAndSet(false, true)) {
+            environmentMonitor.start(::scheduleReadinessRefresh)
+        }
+        scheduleReadinessRefresh()
+    }
+
+    fun onEnvironmentResumed() {
+        scheduleReadinessRefresh()
+    }
+
+    fun onEnvironmentStopped() {
+        if (environmentStarted.compareAndSet(true, false)) environmentMonitor.stop()
     }
 
     suspend fun startTraining() {
         creationMutex.withLock {
-            if (mutableState.value.navigateToRecordingDraftId != null) return@withLock
+            if (currentState().navigateToRecordingDraftId != null) return@withLock
             refreshReadiness()
-            val song = mutableState.value.song ?: return@withLock
-            if (!mutableState.value.preflight.canStart) return@withLock
+            val startingState = currentState()
+            val song = startingState.song ?: return@withLock
+            if (!startingState.preflight.canStart) return@withLock
             val operation = operationGeneration.incrementAndGet()
-            mutableState.value = mutableState.value.copy(isCreatingSession = true, errorMessage = null)
+            updateState { it.copy(isCreatingSession = true, errorMessage = null) }
             try {
                 val store = storageProvider.current()
                 val expectedScope = savedState.accountScopeHash
                 if (expectedScope != null && expectedScope != store.accountScopeHash) {
                     throw StaleAccountScopeException()
                 }
-                val draftId = savedState.draftId ?: idFactory().also {
-                    savedState.draftId = it
-                    savedState.accountScopeHash = store.accountScopeHash
+                val savedDraftId = savedState.draftId
+                val savedDraft = if (savedDraftId == null) null else store.find(savedDraftId)
+                    ?.takeIf { it.isActiveFor(song) }
+                var draft = savedDraft ?: store.findActive(song.id.toString()) ?: run {
+                    val candidate = newDraft(store, idFactory(), song)
+                    store.findOrCreate(candidate)
                 }
-                val draft = store.find(draftId) ?: run {
-                    val created = newDraft(store, draftId, song)
-                    store.create(created)
-                    created
-                }
+                savedState.draftId = draft.draftId
+                savedState.accountScopeHash = store.accountScopeHash
                 if (
                     draft.songId != song.id.toString() ||
-                    draft.creationKey != creationKey(store.accountScopeHash, draftId)
+                    draft.creationKey != creationKey(store.accountScopeHash, draft.draftId) ||
+                    draft.status !in ACTIVE_PREPARATION_STATUSES
                 ) {
                     throw IllegalStateException("演唱草稿恢复信息不一致")
                 }
-                if (draft.serverSessionId == null) {
+                if (draft.status == PreparationDraftStatus.PENDING) {
                     checkOperation(operation)
                     val session = sessionCreator.create(song.id, draft.creationKey)
                     checkOperation(operation)
-                    store.bindServerSession(draftId, session)
+                    store.bindServerSession(draft.draftId, session)
+                    draft = requireNotNull(store.find(draft.draftId))
                 }
-                for (second in 3 downTo 1) {
-                    checkOperation(operation)
-                    mutableState.value = mutableState.value.copy(countdownSecond = second)
-                    countdownTick(second)
+                val sessionId = draft.serverSessionId ?: throw SessionBindingMismatchException()
+                if (draft.status != PreparationDraftStatus.HANDOFF_PENDING) {
+                    for (second in 3 downTo 1) {
+                        checkOperation(operation)
+                        updateState { it.copy(countdownSecond = second) }
+                        countdownTick(second)
+                        checkOperation(operation)
+                        val persisted = store.find(draft.draftId)
+                            ?: throw SessionBindingMismatchException()
+                        if (
+                            persisted.serverSessionId != sessionId ||
+                            persisted.status !in setOf(
+                                PreparationDraftStatus.BOUND,
+                                PreparationDraftStatus.HANDOFF_PENDING,
+                            )
+                        ) {
+                            throw SessionBindingMismatchException()
+                        }
+                    }
                 }
-                mutableState.value = mutableState.value.copy(
-                    isCreatingSession = false,
-                    countdownSecond = null,
-                    navigateToRecordingDraftId = draftId,
-                )
+                checkOperation(operation)
+                store.markHandoffPending(draft.draftId, sessionId) {
+                    publishNavigation(operation, draft.draftId)
+                }
             } catch (error: CancellationException) {
-                mutableState.value = mutableState.value.copy(isCreatingSession = false, countdownSecond = null)
+                updateState { it.copy(isCreatingSession = false, countdownSecond = null) }
                 throw error
             } catch (_: StaleAccountScopeException) {
                 publishCreationFailure("账号已切换，请重新进入演唱准备页")
             } catch (_: SessionBindingMismatchException) {
                 publishCreationFailure("会话信息校验失败，请重新进入演唱准备页")
             } catch (_: PreparationOperationCancelledException) {
-                mutableState.value = mutableState.value.copy(isCreatingSession = false, countdownSecond = null)
+                updateState { it.copy(isCreatingSession = false, countdownSecond = null) }
             } catch (_: IOException) {
                 publishCreationFailure("创建演唱会话失败，请重试")
             } catch (_: HttpException) {
@@ -232,18 +285,49 @@ class PreparationViewModel(
         }
     }
 
+    fun togglePreview() {
+        when (preview.state.value) {
+            PreviewState.Buffered -> preview.play()
+            PreviewState.Playing -> preview.pause()
+            else -> Unit
+        }
+    }
+
+    suspend fun retryPreview() {
+        val song = currentState().song ?: return
+        preview.prepare(song.id.toString())
+        refreshReadiness()
+    }
+
     fun consumeRecordingNavigation() {
-        mutableState.value = mutableState.value.copy(navigateToRecordingDraftId = null)
+        updateState { it.copy(navigateToRecordingDraftId = null) }
     }
 
     fun cancelPreparation() {
-        operationGeneration.incrementAndGet()
-        mutableState.value = mutableState.value.copy(isCreatingSession = false, countdownSecond = null)
+        synchronized(stateLock) {
+            operationGeneration.incrementAndGet()
+            mutableState.value = mutableState.value.copy(isCreatingSession = false, countdownSecond = null)
+        }
+    }
+
+    suspend fun abandonPreparation() {
+        cancelPreparation()
+        val draftId = savedState.draftId ?: currentState().song?.id?.toString()?.let { song ->
+            runCatching { storageProvider.current().findActive(song)?.draftId }.getOrNull()
+        } ?: return
+        runCatching { storageProvider.current().abandon(draftId) }
+        savedState.draftId = null
+        savedState.accountScopeHash = null
     }
 
     override fun onCleared() {
         cancelPreparation()
+        onEnvironmentStopped()
         preview.release()
+    }
+
+    private fun scheduleReadinessRefresh() {
+        viewModelScope.launch(dispatcher) { refreshReadiness() }
     }
 
     private fun newDraft(
@@ -260,6 +344,7 @@ class PreparationViewModel(
             songDurationSeconds = song.durationSeconds,
             serverSessionId = null,
             creationKey = creationKey(store.accountScopeHash, draftId),
+            status = PreparationDraftStatus.PENDING,
             createdAt = createdAt,
             expiresAt = if (createdAt > Long.MAX_VALUE - RETENTION_MILLIS) {
                 Long.MAX_VALUE
@@ -270,18 +355,13 @@ class PreparationViewModel(
     }
 
     private fun publishLoadFailure() {
-        mutableState.value = mutableState.value.copy(
-            isLoading = false,
-            errorMessage = "演唱准备加载失败，请重试",
-        )
+        updateState { it.copy(isLoading = false, errorMessage = "演唱准备加载失败，请重试") }
     }
 
     private fun publishCreationFailure(message: String) {
-        mutableState.value = mutableState.value.copy(
-            isCreatingSession = false,
-            countdownSecond = null,
-            errorMessage = message,
-        )
+        updateState {
+            it.copy(isCreatingSession = false, countdownSecond = null, errorMessage = message)
+        }
     }
 
     private fun creationKey(accountScopeHash: String, draftId: String) =
@@ -292,9 +372,40 @@ class PreparationViewModel(
         if (operationGeneration.get() != expected) throw PreparationOperationCancelledException()
     }
 
+    private fun publishNavigation(expectedOperation: Long, draftId: String) {
+        synchronized(stateLock) {
+            if (operationGeneration.get() != expectedOperation || !mutableState.value.isCreatingSession) {
+                throw PreparationOperationCancelledException()
+            }
+            mutableState.value = mutableState.value.copy(
+                isCreatingSession = false,
+                countdownSecond = null,
+                navigateToRecordingDraftId = draftId,
+            )
+        }
+    }
+
+    private fun currentState(): PreparationUiState = synchronized(stateLock) { mutableState.value }
+
+    private inline fun updateState(transform: (PreparationUiState) -> PreparationUiState) {
+        synchronized(stateLock) { mutableState.value = transform(mutableState.value) }
+    }
+
     private companion object {
         const val RETENTION_MILLIS = 7L * 24L * 60L * 60L * 1_000L
     }
 }
 
 private class PreparationOperationCancelledException : IllegalStateException()
+
+private val ACTIVE_PREPARATION_STATUSES = setOf(
+    PreparationDraftStatus.PENDING,
+    PreparationDraftStatus.BOUND,
+    PreparationDraftStatus.HANDOFF_PENDING,
+)
+
+private fun PreparationDraft.isActiveFor(song: PreparationSong): Boolean =
+    songId == song.id.toString() && status in ACTIVE_PREPARATION_STATUSES
+
+private fun PreviewState.isReadyForTraining(): Boolean =
+    this is PreviewState.Buffered || this is PreviewState.Playing

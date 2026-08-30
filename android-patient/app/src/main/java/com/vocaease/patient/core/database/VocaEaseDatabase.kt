@@ -40,6 +40,12 @@ class DatabaseConverters {
     @TypeConverter
     fun toUploadOverallState(value: String): UploadOverallState = enumValueOrReject(value)
 
+    @TypeConverter
+    fun fromPreparationDraftStatus(value: PreparationDraftStatus): String = value.name
+
+    @TypeConverter
+    fun toPreparationDraftStatus(value: String): PreparationDraftStatus = enumValueOrReject(value)
+
     private inline fun <reified T : Enum<T>> enumValueOrReject(value: String): T =
         enumValues<T>().firstOrNull { it.name == value }
             ?: throw IllegalArgumentException("数据库状态值无效")
@@ -47,7 +53,7 @@ class DatabaseConverters {
 
 @Database(
     entities = [DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -65,6 +71,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
         ): VocaEaseDatabase {
             val builder = Room.databaseBuilder(context.applicationContext, VocaEaseDatabase::class.java, name)
                 .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_2_3)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -107,6 +114,33 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_expires_at` " +
                         "ON `preparation_drafts` (`account_scope`, `expires_at`)",
+                )
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `preparation_drafts` ADD COLUMN `status` TEXT NOT NULL DEFAULT 'ABANDONED'")
+                db.execSQL("ALTER TABLE `preparation_drafts` ADD COLUMN `active_song_id` TEXT")
+                db.execSQL(
+                    """
+                    UPDATE preparation_drafts AS candidate
+                    SET status = CASE WHEN server_session_id IS NULL THEN 'PENDING' ELSE 'BOUND' END,
+                        active_song_id = song_id
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM preparation_drafts AS older
+                      WHERE older.account_scope = candidate.account_scope
+                        AND older.song_id = candidate.song_id
+                        AND (
+                          older.created_at < candidate.created_at OR
+                          (older.created_at = candidate.created_at AND older.draft_id < candidate.draft_id)
+                        )
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_active_song_id` " +
+                        "ON `preparation_drafts` (`account_scope`, `active_song_id`)",
                 )
             }
         }

@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -34,11 +35,15 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.toRoute
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import android.Manifest
 import android.app.Activity
@@ -64,6 +69,7 @@ import com.vocaease.patient.feature.profile.ProfileViewModel
 import com.vocaease.patient.core.media.PreviewPlayer
 import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
 import com.vocaease.patient.feature.training.AndroidReadinessSource
+import com.vocaease.patient.feature.training.AndroidPreparationEnvironmentMonitor
 import com.vocaease.patient.feature.training.PreparationScreen
 import com.vocaease.patient.feature.training.PreparationViewModel
 import com.vocaease.patient.feature.training.SavedStatePreparationState
@@ -330,6 +336,7 @@ private fun PreparationRoute(
                     songId = songId,
                     songSource = VocaEasePreparationSongSource(container.patientApi),
                     readinessSource = AndroidReadinessSource(activity, { permissionsRequested }, container.dispatchers.io),
+                    environmentMonitor = AndroidPreparationEnvironmentMonitor(activity.applicationContext),
                     preview = preview,
                     storageProvider = AccountScopedPreparationDraftStoreProvider(container.draftStorage),
                     sessionCreator = VocaEaseTrainingSessionCreator(container.patientApi),
@@ -351,6 +358,26 @@ private fun PreparationRoute(
         scope.launch { viewModel.refreshReadiness() }
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(viewModel, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> viewModel.onEnvironmentStarted()
+                Lifecycle.Event.ON_RESUME -> viewModel.onEnvironmentResumed()
+                Lifecycle.Event.ON_STOP -> viewModel.onEnvironmentStopped()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            viewModel.onEnvironmentStarted()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.onEnvironmentStopped()
+        }
+    }
+
     LaunchedEffect(viewModel) { viewModel.load() }
     LaunchedEffect(state.navigateToRecordingDraftId) {
         state.navigateToRecordingDraftId?.let { draftId ->
@@ -358,12 +385,17 @@ private fun PreparationRoute(
             onRecording(draftId)
         }
     }
+    val abandonAndBack = {
+        scope.launch {
+            viewModel.abandonPreparation()
+            onBack()
+        }
+        Unit
+    }
+    BackHandler(onBack = abandonAndBack)
     PreparationScreen(
         state = state,
-        onBack = {
-            viewModel.cancelPreparation()
-            onBack()
-        },
+        onBack = abandonAndBack,
         onStart = { scope.launch { viewModel.startTraining() } },
         onRequestPermissions = {
             permissionsRequested = true
@@ -378,6 +410,8 @@ private fun PreparationRoute(
             )
         },
         onRetry = { scope.launch { viewModel.load() } },
+        onPreviewToggle = viewModel::togglePreview,
+        onRetryPreview = { scope.launch { viewModel.retryPreview() } },
     )
 }
 

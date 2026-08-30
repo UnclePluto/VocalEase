@@ -1,6 +1,7 @@
 package com.vocaease.patient.feature.training
 
 import com.vocaease.patient.core.database.StaleAccountScopeException
+import com.vocaease.patient.core.database.PreparationDraftStatus
 import com.vocaease.patient.core.media.PreviewState
 import com.vocaease.patient.core.media.PreviewSession
 import java.io.IOException
@@ -98,7 +99,10 @@ class PreparationViewModelTest {
     @Test
     fun `已持久server session的进程恢复不再调用创建接口`() = runBlocking {
         val store = FakePreparationStore().apply {
-            drafts += pendingDraft(DRAFT_ID).copy(serverSessionId = SESSION_ID)
+            drafts += pendingDraft(DRAFT_ID).copy(
+                serverSessionId = SESSION_ID,
+                status = PreparationDraftStatus.BOUND,
+            )
         }
         val saver = MemoryPreparationState(DRAFT_ID, store.accountScopeHash)
         val remote = FakeSessionCreator { error("不应调用") }
@@ -112,9 +116,47 @@ class PreparationViewModelTest {
     }
 
     @Test
+    fun `SavedState缺失仍从Room恢复pending并复用原draft与creation key`() = runBlocking {
+        val recoveredDraftId = "70000000-0000-4000-8000-000000000007"
+        val store = FakePreparationStore().apply { drafts += pendingDraft(recoveredDraftId) }
+        val remote = FakeSessionCreator { createdSession() }
+        val viewModel = viewModel(store, remote, saver = MemoryPreparationState())
+        viewModel.load()
+
+        viewModel.startTraining()
+
+        assertEquals(1, store.drafts.size)
+        assertEquals(listOf(pendingDraft(recoveredDraftId).creationKey), remote.keys)
+        assertEquals(recoveredDraftId, viewModel.state.value.navigateToRecordingDraftId)
+    }
+
+    @Test
+    fun `交接意图提交后导航前崩溃且SavedState缺失仍恢复同一session`() = runBlocking {
+        val recoveredDraftId = "70000000-0000-4000-8000-000000000008"
+        val store = FakePreparationStore().apply {
+            drafts += pendingDraft(recoveredDraftId).copy(
+                serverSessionId = SESSION_ID,
+                status = PreparationDraftStatus.HANDOFF_PENDING,
+            )
+        }
+        val remote = FakeSessionCreator { error("已绑定会话不得重新创建") }
+        val viewModel = viewModel(store, remote, saver = MemoryPreparationState())
+        viewModel.load()
+
+        viewModel.startTraining()
+
+        assertTrue(remote.keys.isEmpty())
+        assertEquals(1, store.drafts.size)
+        assertEquals(recoveredDraftId, viewModel.state.value.navigateToRecordingDraftId)
+    }
+
+    @Test
     fun `录制导航事件消费后不会在返回准备页时重复触发`() = runBlocking {
         val store = FakePreparationStore().apply {
-            drafts += pendingDraft(DRAFT_ID).copy(serverSessionId = SESSION_ID)
+            drafts += pendingDraft(DRAFT_ID).copy(
+                serverSessionId = SESSION_ID,
+                status = PreparationDraftStatus.BOUND,
+            )
         }
         val viewModel = viewModel(
             store = store,
@@ -181,6 +223,59 @@ class PreparationViewModelTest {
     }
 
     @Test
+    fun `最后一次倒计时返回时取消或换号都不能迟到导航`() = runBlocking {
+        listOf(false, true).forEach { switchAccount ->
+            val store = FakePreparationStore()
+            lateinit var viewModel: PreparationViewModel
+            viewModel = viewModel(
+                store = store,
+                remote = FakeSessionCreator { createdSession() },
+                countdown = { second ->
+                    if (second == 1) {
+                        if (switchAccount) store.invalidateForAccountSwitch()
+                        else viewModel.cancelPreparation()
+                    }
+                },
+            )
+            viewModel.load()
+
+            viewModel.startTraining()
+
+            assertNull(viewModel.state.value.navigateToRecordingDraftId)
+            assertFalse(viewModel.state.value.isCreatingSession)
+            assertNull(viewModel.state.value.countdownSecond)
+        }
+    }
+
+    @Test
+    fun `preview和readiness事件不能覆盖创建中与倒计时状态`() = runBlocking {
+        val preview = FakePreviewSession()
+        lateinit var viewModel: PreparationViewModel
+        viewModel = viewModel(
+            store = FakePreparationStore(),
+            remote = FakeSessionCreator { createdSession() },
+            preview = preview,
+            countdown = { second ->
+                preview.emit(PreviewState.Buffering)
+                viewModel.refreshReadiness()
+                assertTrue(viewModel.state.value.isCreatingSession)
+                assertEquals(second, viewModel.state.value.countdownSecond)
+                preview.emit(PreviewState.Buffered)
+                viewModel.refreshReadiness()
+                assertTrue(viewModel.state.value.isCreatingSession)
+                assertEquals(second, viewModel.state.value.countdownSecond)
+            },
+        )
+        viewModel.load()
+
+        viewModel.startTraining()
+
+        assertEquals(DRAFT_ID, viewModel.state.value.navigateToRecordingDraftId)
+        assertFalse(viewModel.state.value.isCreatingSession)
+        assertNull(viewModel.state.value.countdownSecond)
+    }
+
+    @Test
     fun `门禁未通过或离线时绝不创建本地draft和服务端session`() = runBlocking {
         val store = FakePreparationStore()
         val remote = FakeSessionCreator { createdSession() }
@@ -194,17 +289,52 @@ class PreparationViewModelTest {
         assertFalse(viewModel.state.value.preflight.canStart)
     }
 
+    @Test
+    fun `页面恢复和网络变化会重检全部门禁且离开后注销观察`() = runBlocking {
+        val readiness = FakeReadinessSource(readiness(online = false))
+        val environment = FakePreparationEnvironmentMonitor()
+        val viewModel = viewModel(
+            store = FakePreparationStore(),
+            remote = FakeSessionCreator { createdSession() },
+            readinessSource = readiness,
+            environmentMonitor = environment,
+        )
+        viewModel.load()
+        assertFalse(viewModel.state.value.preflight.canStart)
+
+        viewModel.onEnvironmentStarted()
+        assertEquals(1, environment.startCount)
+        readiness.value = readiness().copy(availableBytes = Long.MAX_VALUE, frontCameraAvailable = true)
+        environment.emitChange()
+        assertTrue(viewModel.state.value.preflight.canStart)
+
+        val beforeResume = readiness.inspectCount
+        viewModel.onEnvironmentResumed()
+        assertTrue(readiness.inspectCount > beforeResume)
+
+        viewModel.onEnvironmentStopped()
+        val stoppedCount = readiness.inspectCount
+        readiness.value = readiness(online = false)
+        environment.emitChange()
+        assertEquals(stoppedCount, readiness.inspectCount)
+        assertEquals(1, environment.stopCount)
+    }
+
     private fun viewModel(
         store: FakePreparationStore,
         remote: FakeSessionCreator,
         saver: MemoryPreparationState = MemoryPreparationState(),
         readiness: DeviceReadiness = readiness(),
+        readinessSource: FakeReadinessSource = FakeReadinessSource(readiness),
+        environmentMonitor: PreparationEnvironmentMonitor = FakePreparationEnvironmentMonitor(),
+        preview: FakePreviewSession = FakePreviewSession(),
         countdown: suspend (Int) -> Unit = {},
     ) = PreparationViewModel(
         songId = SONG_ID,
         songSource = PreparationSongSource { song() },
-        readinessSource = FakeReadinessSource(readiness),
-        preview = FakePreviewSession(),
+        readinessSource = readinessSource,
+        environmentMonitor = environmentMonitor,
+        preview = preview,
         storageProvider = PreparationDraftStoreProvider { store },
         sessionCreator = remote,
         savedState = saver,
@@ -239,8 +369,11 @@ class PreparationViewModelTest {
     )
 
     private inner class FakeReadinessSource(var value: DeviceReadiness) : ReadinessSource {
-        override suspend fun inspect(durationSeconds: Long, previewBuffered: Boolean): DeviceReadiness =
-            value.copy(durationSeconds = durationSeconds, previewBuffered = previewBuffered)
+        var inspectCount = 0
+        override suspend fun inspect(durationSeconds: Long, previewBuffered: Boolean): DeviceReadiness {
+            inspectCount += 1
+            return value.copy(durationSeconds = durationSeconds, previewBuffered = previewBuffered)
+        }
     }
 
     private companion object {
@@ -252,9 +385,15 @@ class PreparationViewModelTest {
 }
 
 private class FakePreviewSession : PreviewSession {
-    override val state: StateFlow<PreviewState> = MutableStateFlow(PreviewState.Buffered)
+    private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Buffered)
+    override val state: StateFlow<PreviewState> = mutableState
     override suspend fun prepare(songId: String) = Unit
+    override fun play(): Boolean = true
+    override fun pause(): Boolean = true
     override fun release() = Unit
+    fun emit(value: PreviewState) {
+        mutableState.value = value
+    }
 }
 
 private class FakeSessionCreator(
@@ -272,6 +411,26 @@ private class MemoryPreparationState(
     override var accountScopeHash: String? = null,
 ) : PreparationSavedState
 
+private class FakePreparationEnvironmentMonitor : PreparationEnvironmentMonitor {
+    var startCount = 0
+    var stopCount = 0
+    private var listener: (() -> Unit)? = null
+
+    override fun start(onChanged: () -> Unit) {
+        startCount += 1
+        listener = onChanged
+    }
+
+    override fun stop() {
+        stopCount += 1
+        listener = null
+    }
+
+    fun emitChange() {
+        listener?.invoke()
+    }
+}
+
 private class FakePreparationStore : PreparationDraftStore {
     override val accountScopeHash = "a".repeat(64)
     val drafts = mutableListOf<PreparationDraft>()
@@ -281,11 +440,22 @@ private class FakePreparationStore : PreparationDraftStore {
 
     override suspend fun find(draftId: String): PreparationDraft? = drafts.firstOrNull { it.draftId == draftId }
 
+    override suspend fun findActive(songId: String): PreparationDraft? = drafts.firstOrNull {
+        it.songId == songId && it.status in setOf(
+            PreparationDraftStatus.PENDING,
+            PreparationDraftStatus.BOUND,
+            PreparationDraftStatus.HANDOFF_PENDING,
+        )
+    }
+
     override suspend fun create(draft: PreparationDraft) {
         check(valid)
         createCount += 1
         drafts += draft
     }
+
+    override suspend fun findOrCreate(candidate: PreparationDraft): PreparationDraft =
+        findActive(candidate.songId) ?: candidate.also { create(it) }
 
     override suspend fun bindServerSession(draftId: String, session: CreatedTrainingSession) {
         if (!valid) throw StaleAccountScopeException()
@@ -294,7 +464,37 @@ private class FakePreparationStore : PreparationDraftStore {
             throw IOException("process died before commit")
         }
         val index = drafts.indexOfFirst { it.draftId == draftId }
-        drafts[index] = drafts[index].copy(serverSessionId = session.sessionId.toString())
+        drafts[index] = drafts[index].copy(
+            serverSessionId = session.sessionId.toString(),
+            status = PreparationDraftStatus.BOUND,
+        )
+    }
+
+    override suspend fun markHandoffPending(
+        draftId: String,
+        serverSessionId: String,
+        publishNavigation: () -> Unit,
+    ) {
+        if (!valid) throw StaleAccountScopeException()
+        val index = drafts.indexOfFirst { it.draftId == draftId }
+        val draft = drafts[index]
+        if (draft.serverSessionId != serverSessionId) error("session mismatch")
+        drafts[index] = draft.copy(status = PreparationDraftStatus.HANDOFF_PENDING)
+        publishNavigation()
+    }
+
+    override suspend fun acknowledgeHandoff(draftId: String): Boolean {
+        val index = drafts.indexOfFirst { it.draftId == draftId }
+        if (index < 0 || drafts[index].status != PreparationDraftStatus.HANDOFF_PENDING) return false
+        drafts[index] = drafts[index].copy(status = PreparationDraftStatus.HANDED_OFF)
+        return true
+    }
+
+    override suspend fun abandon(draftId: String): Boolean {
+        val index = drafts.indexOfFirst { it.draftId == draftId }
+        if (index < 0) return false
+        drafts[index] = drafts[index].copy(status = PreparationDraftStatus.ABANDONED)
+        return true
     }
 
     fun invalidateForAccountSwitch() {
@@ -310,6 +510,7 @@ private fun pendingDraft(draftId: String) = PreparationDraft(
     songDurationSeconds = 265,
     serverSessionId = null,
     creationKey = "session-create:${"a".repeat(64)}:$draftId",
+    status = PreparationDraftStatus.PENDING,
     createdAt = 1_000L,
     expiresAt = 1_000L + 7L * 24L * 60L * 60L * 1_000L,
 )

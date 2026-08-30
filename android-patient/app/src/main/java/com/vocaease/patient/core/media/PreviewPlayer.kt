@@ -35,6 +35,7 @@ sealed interface PreviewState {
     data object Idle : PreviewState
     data object Buffering : PreviewState
     data object Buffered : PreviewState
+    data object Playing : PreviewState
     data class Error(val message: String) : PreviewState
     data object Released : PreviewState
 }
@@ -42,6 +43,7 @@ sealed interface PreviewState {
 sealed interface PreviewEngineEvent {
     data object Buffering : PreviewEngineEvent
     data object Ready : PreviewEngineEvent
+    data class PlayingChanged(val isPlaying: Boolean) : PreviewEngineEvent
     data class HttpError(val status: Int) : PreviewEngineEvent
     data object PlaybackError : PreviewEngineEvent
 }
@@ -51,12 +53,16 @@ interface PreviewEngine {
     fun setListener(listener: suspend (PreviewEngineEvent) -> Unit)
     fun load(url: String)
     fun seekTo(positionMillis: Long)
+    fun play()
+    fun pause()
     fun release()
 }
 
 interface PreviewSession {
     val state: StateFlow<PreviewState>
     suspend fun prepare(songId: String)
+    fun play(): Boolean
+    fun pause(): Boolean
     fun release()
 }
 
@@ -71,6 +77,7 @@ class PreviewPlayer(
     private var songId: String? = null
     private var currentGrant: PreviewGrant? = null
     private var refreshUsed = false
+    private var resumeAfterReady = false
     @Volatile
     private var released = false
 
@@ -83,6 +90,7 @@ class PreviewPlayer(
             if (released) return@withLock
             this.songId = songId
             refreshUsed = false
+            resumeAfterReady = false
             mutableState.value = PreviewState.Buffering
             try {
                 loadGrant(grantSource.fetch(songId), positionMillis = null)
@@ -100,6 +108,20 @@ class PreviewPlayer(
         }
     }
 
+    override fun play(): Boolean = synchronized(engineLock) {
+        if (released || mutableState.value !is PreviewState.Buffered) return@synchronized false
+        engine.play()
+        mutableState.value = PreviewState.Playing
+        true
+    }
+
+    override fun pause(): Boolean = synchronized(engineLock) {
+        if (released || mutableState.value !is PreviewState.Playing) return@synchronized false
+        engine.pause()
+        mutableState.value = PreviewState.Buffered
+        true
+    }
+
     override fun release() {
         synchronized(engineLock) {
             if (released) return
@@ -114,8 +136,27 @@ class PreviewPlayer(
         mutex.withLock {
             if (released) return@withLock
             when (event) {
-                PreviewEngineEvent.Ready -> mutableState.value = PreviewState.Buffered
+                PreviewEngineEvent.Ready -> {
+                    mutableState.value = PreviewState.Buffered
+                    if (resumeAfterReady) {
+                        resumeAfterReady = false
+                        synchronized(engineLock) {
+                            if (!released) {
+                                engine.play()
+                                mutableState.value = PreviewState.Playing
+                            }
+                        }
+                    }
+                }
                 PreviewEngineEvent.Buffering -> mutableState.value = PreviewState.Buffering
+                is PreviewEngineEvent.PlayingChanged -> {
+                    when {
+                        event.isPlaying && mutableState.value is PreviewState.Buffered ->
+                            mutableState.value = PreviewState.Playing
+                        !event.isPlaying && mutableState.value is PreviewState.Playing ->
+                            mutableState.value = PreviewState.Buffered
+                    }
+                }
                 is PreviewEngineEvent.HttpError -> handleHttpError(event.status)
                 PreviewEngineEvent.PlaybackError -> publishErrorUnlessReleased()
             }
@@ -129,6 +170,7 @@ class PreviewPlayer(
             return
         }
         refreshUsed = true
+        resumeAfterReady = mutableState.value is PreviewState.Playing
         val position = engine.currentPositionMillis.coerceAtLeast(0)
         mutableState.value = PreviewState.Buffering
         try {
@@ -184,6 +226,10 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
                     ?.responseCode
                 dispatch(status?.let(PreviewEngineEvent::HttpError) ?: PreviewEngineEvent.PlaybackError)
             }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                dispatch(PreviewEngineEvent.PlayingChanged(isPlaying))
+            }
         })
     }
 
@@ -203,6 +249,14 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
 
     override fun seekTo(positionMillis: Long) {
         scope.launch { player.seekTo(positionMillis) }
+    }
+
+    override fun play() {
+        scope.launch { player.play() }
+    }
+
+    override fun pause() {
+        scope.launch { player.pause() }
     }
 
     override fun release() {

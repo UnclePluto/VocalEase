@@ -102,6 +102,37 @@ class PreparationScreenTest {
     }
 
     @Test
+    fun 试听按钮和错误重试都是可操作状态而不是缓冲文案() {
+        var previewToggle = 0
+        var previewRetry = 0
+        composeRule.setContent {
+            VocaEaseTheme {
+                PreparationScreen(
+                    state = state().copy(
+                        previewState = PreviewState.Error("试听加载失败，请重试"),
+                        preflight = PreflightResult(setOf(PreflightBlocker.PREVIEW_BUFFER), null, false),
+                    ),
+                    onBack = {},
+                    onStart = {},
+                    onRequestPermissions = {},
+                    onOpenSettings = {},
+                    onRetry = {},
+                    onPreviewToggle = { previewToggle += 1 },
+                    onRetryPreview = { previewRetry += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("试听加载失败，请重试").assertIsDisplayed()
+        composeRule.onNodeWithText("歌曲正在缓冲").assertDoesNotExist()
+        composeRule.onNodeWithText("重新试听").performClick()
+        composeRule.runOnIdle {
+            assertEquals(0, previewToggle)
+            assertEquals(1, previewRetry)
+        }
+    }
+
+    @Test
     fun 基准截图尺寸为390乘844且页面无裁剪() {
         composeRule.setContent {
             VocaEaseTheme {
