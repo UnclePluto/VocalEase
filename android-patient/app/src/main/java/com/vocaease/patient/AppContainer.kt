@@ -29,6 +29,10 @@ import com.vocaease.patient.feature.profile.AccountScopedPendingUploadCounter
 import com.vocaease.patient.feature.training.LocalUploadQueueSignals
 import com.vocaease.patient.feature.upload.UploadCoordinator
 import com.vocaease.patient.feature.upload.VocaEaseUploadRemote
+import com.vocaease.patient.feature.history.AccountScopedAnalysisAccount
+import com.vocaease.patient.feature.history.AnalysisSyncCoordinator
+import com.vocaease.patient.feature.history.AndroidAnalysisWorkScheduler
+import com.vocaease.patient.feature.history.VocaEaseAnalysisDetailRemote
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -117,12 +121,19 @@ class AndroidAppContainer(context: Context) : AppContainer {
         override val io: CoroutineDispatcher = Dispatchers.IO
         override val default: CoroutineDispatcher = Dispatchers.Default
     }
+    private val analysisCoordinator = AnalysisSyncCoordinator(
+        scopeProvider = { AccountScopedAnalysisAccount(draftStorage.current()) },
+        remoteFactory = { scope -> VocaEaseAnalysisDetailRemote(patientApi, scope.accountScopeHash) },
+        scheduler = AndroidAnalysisWorkScheduler(context),
+        nowEpochMillis = clock::nowEpochMilliseconds,
+    )
     override val repositoryFactory = RepositoryFactory { name ->
         when (name) {
             "auth" -> authRepository
             "draft-storage" -> draftStorage
             "patient" -> patientRepository
             "songs" -> songRepository
+            "analysis-worker" -> analysisCoordinator
             else -> error("仓库尚未提供：$name")
         }
     }
@@ -132,6 +143,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
         storageProvider = draftStorage,
         remoteFactory = { scopeHash -> VocaEaseUploadRemote(patientApi, scopeHash) },
         nowEpochMillis = clock::nowEpochMilliseconds,
+        onAnalyzing = analysisCoordinator::schedule,
     )
     override val uploadFactory = UploadFactory { uploadCoordinator }
 
@@ -145,6 +157,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
         accountSession.addLeaseChangedListener {
             recordingPlaybackHandoff.discardAll()
             previousUploadScope?.let(uploadCoordinator::cancelAccount)
+            previousUploadScope?.let(analysisCoordinator::cancelAccount)
             val storage = runCatching { draftStorage.current() }.getOrNull()
             previousUploadScope = storage?.accountScopeHash
             cleanupScheduler.replaceFor(storage)

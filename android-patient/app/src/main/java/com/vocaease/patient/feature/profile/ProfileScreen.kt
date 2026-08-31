@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -45,6 +46,8 @@ import com.vocaease.patient.ui.theme.MinimumTouchTargetSize
 import com.vocaease.patient.ui.theme.TextPrimary
 import com.vocaease.patient.ui.theme.TextSecondary
 import java.util.Locale
+import com.vocaease.patient.feature.history.HistoryItem
+import com.vocaease.patient.feature.history.HistoryCard
 
 @Composable
 fun ProfileScreen(
@@ -55,6 +58,8 @@ fun ProfileScreen(
     onSettingsClick: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
+    historyItems: List<HistoryItem> = emptyList(),
+    onHistoryItemClick: (String) -> Unit = {},
 ) {
     val hasPatientContent = state.patientStatus == ProfilePatientStatus.CONTENT ||
         (state.patientStatus == ProfilePatientStatus.ERROR && state.patientName.isNotBlank())
@@ -169,15 +174,30 @@ fun ProfileScreen(
             }
         }
         if (hasPatientContent) item {
-            Text(
-                "演唱与治疗",
-                modifier = Modifier.padding(top = 10.dp),
-                color = TextPrimary,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold,
-            )
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (historyItems.isEmpty()) "演唱与治疗" else "演唱历史",
+                    color = TextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (historyItems.isNotEmpty()) {
+                    Box(
+                        Modifier.size(MinimumTouchTargetSize).clickable(role = Role.Button, onClick = onHistoryClick),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("全部", color = TextSecondary, fontSize = 12.sp) }
+                }
+            }
         }
-        if (hasPatientContent) item { ProfileEntry("演唱历史", "查看全部记录", onHistoryClick) }
+        if (hasPatientContent && historyItems.isEmpty()) item { ProfileEntry("演唱历史", "查看全部记录", onHistoryClick) }
+        if (hasPatientContent) items(historyItems.take(4), key = { "history-${it.sessionId}" }) { item ->
+            HistoryCard(item, onHistoryItemClick)
+        }
+        if (hasPatientContent && historyItems.isNotEmpty()) item { Spacer(Modifier.height(20.dp)) }
+        if (hasPatientContent) item {
+            Text("演唱与治疗", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
         if (hasPatientContent) item {
             ProfileEntry(
                 "治疗计划",

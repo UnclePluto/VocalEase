@@ -406,6 +406,20 @@ class UploadCoordinatorAccountTest {
     }
 
     @Test
+    fun worker进入ANALYZING后用服务端session调度分析而非draftId() = runBlocking {
+        val storage = prepareQueued(patientA, "analysis-handoff")
+        advanceJobTo("analysis-handoff", UploadPipelineStage.ANALYZING)
+        val scheduled = mutableListOf<String>()
+        val coordinator = coordinator(BlockingUploader(), FakeScheduler(), onAnalyzing = { scheduled += it })
+        val contract = UploadWorkContract(storage.accountScopeHash, "analysis-handoff")
+
+        assertEquals(UploadRunResult.Analyzing, coordinator.run(contract) {})
+
+        assertEquals(listOf("session-analysis-handoff"), scheduled)
+        Unit
+    }
+
+    @Test
     fun confirm网络异常在真实Room先持久WAITING_NETWORK且不回退步骤状态() = runBlocking {
         val storage = prepareQueued(patientA, "confirm-network")
         advanceJobTo("confirm-network", UploadPipelineStage.CONFIRMING_AUDIO)
@@ -672,6 +686,7 @@ class UploadCoordinatorAccountTest {
         scheduler: FakeScheduler,
         remote: UploadRemote = FakeRemote(),
         wait: suspend (Long) -> Unit = {},
+        onAnalyzing: suspend (String) -> Unit = {},
     ) = UploadCoordinator(
         context = context,
         storageProvider = provider,
@@ -680,6 +695,7 @@ class UploadCoordinatorAccountTest {
         nowEpochMillis = { 1_000 },
         uploaderFactory = { uploader },
         wait = wait,
+        onAnalyzing = onAnalyzing,
     )
 
     private class BlockingUploader : QiniuUploader {

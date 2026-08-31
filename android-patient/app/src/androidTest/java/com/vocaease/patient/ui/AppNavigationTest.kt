@@ -22,6 +22,11 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import com.vocaease.patient.feature.profile.ProfileScreen
 import com.vocaease.patient.feature.profile.ProfileUiState
 import com.vocaease.patient.feature.profile.ProfilePatientStatus
+import com.vocaease.patient.feature.history.HistoryItem
+import com.vocaease.patient.feature.history.HistoryStatus
+import androidx.test.platform.app.InstrumentationRegistry
+import android.os.Build
+import org.junit.Assert.assertEquals
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
 import org.junit.Test
@@ -92,5 +97,66 @@ class AppNavigationTest {
         composeRule.onNodeWithContentDescription("设置").performClick()
         composeRule.onNodeWithText("设置").assertIsDisplayed()
         composeRule.onNodeWithText("去唱歌").assertDoesNotExist()
+    }
+
+    @Test
+    fun 我的历史行进入真实Result参数且返回释放到历史页() {
+        composeRule.setContent {
+            AuthenticatedApp(
+                initialRoute = AppRoute.Profile,
+                profileContent = { navigation ->
+                    Button(onClick = navigation.openHistory) { Text("打开演唱历史") }
+                },
+                historyContent = { _, onResult ->
+                    Button(onClick = { onResult("session-closed-loop") }) { Text("小幸运历史行") }
+                },
+                resultContent = { sessionId, onBack ->
+                    Text("结果会话:$sessionId")
+                    Button(onClick = onBack) { Text("返回历史") }
+                },
+            )
+        }
+
+        composeRule.onNodeWithText("打开演唱历史").performClick()
+        composeRule.onNodeWithText("去唱歌").assertDoesNotExist()
+        composeRule.onNodeWithText("小幸运历史行").performClick()
+        composeRule.onNodeWithText("结果会话:session-closed-loop").assertIsDisplayed()
+        composeRule.onNodeWithText("返回历史").performClick()
+        composeRule.onNodeWithText("小幸运历史行").assertIsDisplayed()
+        composeRule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab)).assertCountEquals(0)
+    }
+
+    @Test
+    fun f004p我的页历史卡与双标签基准截图为390乘844() {
+        val history = listOf(
+            HistoryItem("s1", null, "小幸运", "田馥甄", 265, HistoryStatus.COMPLETED, "91", 1, 4),
+            HistoryItem("s2", null, "晴天", "周杰伦", 269, HistoryStatus.COMPLETED, "85", 1, 3),
+            HistoryItem("s3", null, "后来", "刘若英", 341, HistoryStatus.FAILED, null, 1, 2),
+            HistoryItem("s4", null, "平凡之路", "朴树", 302, HistoryStatus.ANALYZING, null, 1, 1),
+        )
+        composeRule.setContent {
+            AuthenticatedApp(
+                initialRoute = AppRoute.Profile,
+                profileContent = { navigation ->
+                    ProfileScreen(
+                        state = ProfileUiState("Voca", 28, 8_640, patientStatus = ProfilePatientStatus.CONTENT),
+                        onHistoryClick = navigation.openHistory,
+                        onTreatmentPlanClick = navigation.openTreatmentPlan,
+                        onPendingUploadsClick = navigation.openPendingUploads,
+                        onSettingsClick = navigation.openSettings,
+                        onRetry = {}, historyItems = history, onHistoryItemClick = navigation.openResult,
+                    )
+                },
+            )
+        }
+        composeRule.onNodeWithText("小幸运").assertIsDisplayed()
+        composeRule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab)).assertCountEquals(2)
+        val image = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        if (Build.VERSION.SDK_INT >= 34) {
+            assertEquals(390, image.width)
+            assertEquals(844, image.height)
+        }
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("screencap -p /sdcard/task11-profile-390x844.png").close()
     }
 }

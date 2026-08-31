@@ -9,6 +9,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.IOException
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
@@ -36,7 +37,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(6, reopened.openHelper.readableDatabase.version)
+            assertEquals(7, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
@@ -117,7 +118,7 @@ class DatabaseSchemaTest {
             assertEquals("等待重试", job?.lastSafeError)
             assertEquals(null, job?.resumePipelineStage)
             assertEquals(0L, job?.operationVersion)
-            assertEquals(6, reopened.openHelper.readableDatabase.version)
+            assertEquals(7, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -152,7 +153,28 @@ class DatabaseSchemaTest {
             assertEquals(9, job?.attemptCount)
             assertEquals(54_321L, job?.nextRetryAt)
             assertEquals(0L, job?.operationVersion)
-            assertEquals(6, reopened.openHelper.readableDatabase.version)
+            assertEquals(7, reopened.openHelper.readableDatabase.version)
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun versionSixMigratesToAccountScopedAnalysisCheckpointWithoutSensitiveColumns() {
+        migrationHelper.createDatabase(DATABASE_NAME, 6).close()
+
+        val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
+        try {
+            assertEquals(7, reopened.openHelper.readableDatabase.version)
+            val columns = reopened.openHelper.readableDatabase.query("PRAGMA table_info(analysis_checkpoints)").use { cursor ->
+                buildList { while (cursor.moveToNext()) add(cursor.getString(1)) }
+            }
+            assertEquals(
+                listOf("account_scope", "session_id", "account_scope_hash", "incarnation_proof", "status", "analysis_generation", "poll_step", "next_deadline_at", "operation_version"),
+                columns,
+            )
+            assertFalse(columns.any { it.contains("url") || it.contains("payload") || it.contains("result") })
         } finally {
             reopened.close()
         }

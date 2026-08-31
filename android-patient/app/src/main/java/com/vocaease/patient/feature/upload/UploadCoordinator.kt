@@ -21,6 +21,7 @@ class UploadCoordinator(
     private val nowEpochMillis: () -> Long = System::currentTimeMillis,
     private val uploaderFactory: (File) -> QiniuUploader = ::QiniuV2Uploader,
     private val wait: suspend (Long) -> Unit = { delay(it) },
+    private val onAnalyzing: suspend (sessionId: String) -> Unit = {},
 ) : UploadWorkerGateway {
     private val applicationContext = context.applicationContext
     private val plaintextRoot = File(applicationContext.cacheDir, "upload-lease")
@@ -71,6 +72,7 @@ class UploadCoordinator(
             val storage = requireCurrentStorage(contract)
             val durableJob = storage.findUploadJob(contract.draftId) ?: return@withLock UploadRunResult.Paused
             if (durableJob.pipelineStage == UploadPipelineStage.ANALYZING) {
+                storage.findDraft(contract.draftId)?.sessionId?.let { onAnalyzing(it) }
                 storage.deleteSubmittedUploadMedia(contract.draftId)
                 return@withLock UploadRunResult.Analyzing
             }
@@ -86,7 +88,7 @@ class UploadCoordinator(
                 scheduler.cancel(contract)
             }
             try {
-                UploadOrchestrator(
+                val result = UploadOrchestrator(
                     store = store,
                     remote = remoteFactory(contract.accountScopeHash),
                     uploader = uploader,
@@ -95,6 +97,10 @@ class UploadCoordinator(
                     nowEpochMillis = nowEpochMillis,
                     onProgress = onProgress,
                 ).run()
+                if (result == UploadRunResult.Analyzing) {
+                    storage.findDraft(contract.draftId)?.sessionId?.let { onAnalyzing(it) }
+                }
+                result
             } finally {
                 registration.unregister()
                 active.remove(contract.uniqueWorkName, activeUpload)

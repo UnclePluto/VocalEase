@@ -11,6 +11,32 @@ CREATE TRIGGER IF NOT EXISTS drafts_guard_insert_v1 BEFORE INSERT ON drafts BEGI
   THEN RAISE(ABORT, 'draft constraint') END;
 END;
 -- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS analysis_checkpoints_guard_insert_v1 BEFORE INSERT ON analysis_checkpoints BEGIN
+  SELECT CASE WHEN trim(NEW.account_scope) = '' OR trim(NEW.session_id) = ''
+    OR length(NEW.account_scope) > 128 OR length(NEW.session_id) > 128
+    OR NEW.session_id GLOB '*[^A-Za-z0-9_-]*'
+    OR length(NEW.account_scope_hash) != 64 OR NEW.account_scope_hash GLOB '*[^0-9a-f]*'
+    OR length(NEW.incarnation_proof) != 64 OR NEW.incarnation_proof GLOB '*[^0-9a-f]*'
+    OR NEW.status NOT IN ('UPLOADED','PROCESSING','RETRYING','COMPLETED','FAILED','CANCELLED')
+    OR typeof(NEW.analysis_generation) != 'integer' OR NEW.analysis_generation < 0
+    OR typeof(NEW.poll_step) != 'integer' OR NEW.poll_step < 0 OR NEW.poll_step > 3
+    OR typeof(NEW.next_deadline_at) != 'integer' OR NEW.next_deadline_at < 0
+    OR typeof(NEW.operation_version) != 'integer' OR NEW.operation_version != 0
+  THEN RAISE(ABORT, 'analysis checkpoint constraint') END;
+END;
+-- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS analysis_checkpoints_guard_update_v1 BEFORE UPDATE ON analysis_checkpoints BEGIN
+  SELECT CASE WHEN NEW.account_scope != OLD.account_scope OR NEW.session_id != OLD.session_id
+    OR NEW.account_scope_hash != OLD.account_scope_hash OR NEW.incarnation_proof != OLD.incarnation_proof
+    OR NEW.operation_version != OLD.operation_version + 1
+    OR NEW.analysis_generation < OLD.analysis_generation
+    OR NEW.poll_step < OLD.poll_step OR NEW.poll_step > 3
+    OR NEW.status NOT IN ('UPLOADED','PROCESSING','RETRYING','COMPLETED','FAILED','CANCELLED')
+    OR (OLD.status IN ('COMPLETED','FAILED','CANCELLED') AND NEW.status != OLD.status)
+    OR typeof(NEW.next_deadline_at) != 'integer' OR NEW.next_deadline_at < 0
+  THEN RAISE(ABORT, 'analysis checkpoint transition') END;
+END;
+-- VOCAEASE-STATEMENT
 CREATE TRIGGER IF NOT EXISTS drafts_guard_update_v1 BEFORE UPDATE ON drafts BEGIN
   SELECT CASE WHEN NEW.account_scope != OLD.account_scope OR NEW.draft_id != OLD.draft_id
     OR NEW.session_id != OLD.session_id OR NEW.creation_key != OLD.creation_key

@@ -73,8 +73,9 @@ class DatabaseConverters {
     entities = [
         DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class,
         UploadLocalActionEntity::class,
+        AnalysisCheckpointEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -84,6 +85,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
     abstract fun uploadDao(): UploadDao
     abstract fun preparationDraftDao(): PreparationDraftDao
     abstract fun uploadLocalActionDao(): UploadLocalActionDao
+    abstract fun analysisCheckpointDao(): AnalysisCheckpointDao
 
     companion object {
         fun create(
@@ -97,6 +99,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_3_4)
                 .addMigrations(MIGRATION_4_5)
                 .addMigrations(MIGRATION_5_6)
+                .addMigrations(MIGRATION_6_7)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -210,6 +213,31 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `upload_jobs` ADD COLUMN `operation_version` INTEGER NOT NULL DEFAULT 0")
             }
         }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `analysis_checkpoints` (
+                      `account_scope` TEXT NOT NULL,
+                      `session_id` TEXT NOT NULL,
+                      `account_scope_hash` TEXT NOT NULL,
+                      `incarnation_proof` TEXT NOT NULL,
+                      `status` TEXT NOT NULL,
+                      `analysis_generation` INTEGER NOT NULL,
+                      `poll_step` INTEGER NOT NULL,
+                      `next_deadline_at` INTEGER NOT NULL,
+                      `operation_version` INTEGER NOT NULL,
+                      PRIMARY KEY(`account_scope`, `session_id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_analysis_checkpoints_account_scope_next_deadline_at` " +
+                        "ON `analysis_checkpoints` (`account_scope`, `next_deadline_at`)",
+                )
+            }
+        }
     }
 }
 
@@ -223,6 +251,7 @@ internal object DatabaseConstraintInstaller {
         "upload_jobs_guard_insert_v1", "upload_jobs_guard_update_v1",
         "upload_local_actions_guard_insert_v1", "upload_local_actions_guard_update_v1",
         "preparation_drafts_guard_insert_v2", "preparation_drafts_guard_update_v2",
+        "analysis_checkpoints_guard_insert_v1", "analysis_checkpoints_guard_update_v1",
     )
 
     fun callback(context: Context) = object : RoomDatabase.Callback() {

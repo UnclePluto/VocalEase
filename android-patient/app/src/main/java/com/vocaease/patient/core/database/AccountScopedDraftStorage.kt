@@ -10,6 +10,11 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.vocaease.patient.feature.history.AnalysisCheckpoint
+import com.vocaease.patient.feature.history.AnalysisStatus
+import com.vocaease.patient.feature.history.HistoryLocalRecord
+import com.vocaease.patient.feature.history.HistoryStatus
+import kotlinx.coroutines.flow.first
 
 class StaleAccountScopeException internal constructor() : IllegalStateException("当前账户存储已失效")
 class SessionBindingMismatchException internal constructor() : IllegalArgumentException("服务端会话与本地草稿不一致")
@@ -644,6 +649,93 @@ class AccountScopedDraftStorage internal constructor(
 
     suspend fun findUploadJob(draftId: String): UploadJobEntity? = checked {
         database.uploadDao().find(lease.patientId, draftId)
+    }
+
+    suspend fun loadPendingHistoryRecords(): List<HistoryLocalRecord> = checked {
+        database.uploadDao().observeAll(lease.patientId).first().mapNotNull { job ->
+            val draft = database.draftDao().find(lease.patientId, job.draftId) ?: return@mapNotNull null
+            val preparation = database.preparationDraftDao().find(lease.patientId, job.draftId) ?: return@mapNotNull null
+            if (draft.sessionId != preparation.serverSessionId) return@mapNotNull null
+            HistoryLocalRecord(
+                sessionId = draft.sessionId,
+                draftId = draft.draftId,
+                songTitle = preparation.songTitle,
+                artist = preparation.songArtist,
+                durationSeconds = preparation.songDurationSeconds,
+                status = when (job.pipelineStage) {
+                    UploadPipelineStage.PAUSED -> HistoryStatus.QUEUED
+                    UploadPipelineStage.WAITING_NETWORK -> HistoryStatus.WAITING_NETWORK
+                    UploadPipelineStage.REQUESTING_AUDIO_GRANT,
+                    UploadPipelineStage.UPLOADING_AUDIO,
+                    UploadPipelineStage.REQUESTING_VIDEO_GRANT,
+                    UploadPipelineStage.UPLOADING_VIDEO -> HistoryStatus.UPLOADING
+                    UploadPipelineStage.WAITING_AUDIO_RECEIPT,
+                    UploadPipelineStage.WAITING_VIDEO_RECEIPT -> HistoryStatus.WAITING_CALLBACK
+                    UploadPipelineStage.CONFIRMING_AUDIO,
+                    UploadPipelineStage.CONFIRMING_VIDEO -> HistoryStatus.CONFIRMING
+                    UploadPipelineStage.SUBMITTING -> HistoryStatus.SUBMITTING
+                    UploadPipelineStage.ANALYZING -> HistoryStatus.ANALYZING
+                    UploadPipelineStage.FAILED -> HistoryStatus.FAILED
+                },
+                updatedAtEpochMillis = maxOf(
+                    draft.createdAt,
+                    job.nextRetryAt ?: 0,
+                    job.audioConfirmedAt ?: 0,
+                    job.videoConfirmedAt ?: 0,
+                ),
+            )
+        }
+    }
+
+    suspend fun loadAnalysisCheckpoint(sessionId: String): AnalysisCheckpoint? = checked {
+        require(sessionId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+        database.analysisCheckpointDao().find(lease.patientId, sessionId)?.let { entity ->
+            if (entity.accountScopeHash != accountScopeHash || entity.incarnationProof != cleanupScopeToken) {
+                throw StaleAccountScopeException()
+            }
+            AnalysisCheckpoint(
+                accountScopeHash = entity.accountScopeHash,
+                sessionId = entity.sessionId,
+                incarnationProof = entity.incarnationProof,
+                status = AnalysisStatus.valueOf(entity.status),
+                analysisGeneration = entity.analysisGeneration,
+                pollStep = entity.pollStep,
+                nextDeadlineEpochMillis = entity.nextDeadlineAt,
+                version = entity.operationVersion,
+            )
+        }
+    }
+
+    suspend fun persistAnalysisCheckpoint(expectedVersion: Long?, checkpoint: AnalysisCheckpoint): Boolean = checked {
+        require(checkpoint.accountScopeHash == accountScopeHash && checkpoint.incarnationProof == cleanupScopeToken)
+        require(checkpoint.status != AnalysisStatus.UNKNOWN)
+        val entity = AnalysisCheckpointEntity(
+            accountScope = lease.patientId,
+            sessionId = checkpoint.sessionId,
+            accountScopeHash = checkpoint.accountScopeHash,
+            incarnationProof = checkpoint.incarnationProof,
+            status = checkpoint.status.name,
+            analysisGeneration = checkpoint.analysisGeneration,
+            pollStep = checkpoint.pollStep,
+            nextDeadlineAt = checkpoint.nextDeadlineEpochMillis,
+            operationVersion = checkpoint.version,
+        )
+        if (expectedVersion == null) {
+            database.analysisCheckpointDao().insert(entity) != -1L
+        } else {
+            checkpoint.version == expectedVersion + 1 && database.analysisCheckpointDao().checkpoint(
+                accountScope = lease.patientId,
+                sessionId = entity.sessionId,
+                accountScopeHash = entity.accountScopeHash,
+                incarnationProof = entity.incarnationProof,
+                status = entity.status,
+                analysisGeneration = entity.analysisGeneration,
+                pollStep = entity.pollStep,
+                nextDeadlineAt = entity.nextDeadlineAt,
+                nextVersion = entity.operationVersion,
+                expectedVersion = expectedVersion,
+            ) == 1
+        }
     }
 
     suspend fun copyUploadMediaTo(draftId: String, type: MediaType, destination: File): Long = checked {

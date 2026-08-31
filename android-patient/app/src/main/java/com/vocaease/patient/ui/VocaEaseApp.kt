@@ -14,8 +14,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -83,6 +85,7 @@ import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingPlayback
 import com.vocaease.patient.core.media.LinearizedReviewPlayer
 import com.vocaease.patient.core.media.Media3ReviewPlayerEngine
+import com.vocaease.patient.core.media.Media3PrivateVideoEngine
 import com.vocaease.patient.core.media.RecordingEnvironmentInterruptionCoordinator
 import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
 import com.vocaease.patient.feature.training.AndroidReadinessSource
@@ -106,6 +109,22 @@ import com.vocaease.patient.feature.upload.PendingUploadsScreen
 import com.vocaease.patient.feature.upload.PendingUploadsViewModel
 import com.vocaease.patient.feature.upload.UploadCoordinator
 import com.vocaease.patient.feature.upload.UploadNotificationPermission
+import com.vocaease.patient.feature.history.AccountScopedHistoryLocalSource
+import com.vocaease.patient.feature.history.AnalysisRetryCoordinator
+import com.vocaease.patient.feature.history.AnalysisRetryOutcome
+import com.vocaease.patient.feature.history.HistoryRepository
+import com.vocaease.patient.feature.history.HistoryScreen
+import com.vocaease.patient.feature.history.HistoryViewModel
+import com.vocaease.patient.feature.history.PrivateSessionVideoPlayer
+import com.vocaease.patient.feature.history.PrivateVideoRouteLifecycle
+import com.vocaease.patient.feature.history.PrivateVideoState
+import com.vocaease.patient.feature.history.ResultContentState
+import com.vocaease.patient.feature.history.ResultScreen
+import com.vocaease.patient.feature.history.ResultViewModel
+import com.vocaease.patient.feature.history.VocaEaseAnalysisRetryRemote
+import com.vocaease.patient.feature.history.VocaEaseHistoryRemoteSource
+import com.vocaease.patient.feature.history.VocaEasePrivateVideoRemote
+import com.vocaease.patient.feature.history.VocaEaseResultSessionRemote
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
@@ -121,6 +140,8 @@ typealias ProfileContent = @Composable (ProfileNavigation) -> Unit
 typealias PreparationContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
 typealias RecordingContent = @Composable (String, () -> Unit, (String) -> Unit) -> Unit
 typealias ReviewContent = @Composable (String, () -> Unit, (String) -> Unit, (String) -> Unit) -> Unit
+typealias HistoryContent = @Composable (() -> Unit, (String) -> Unit) -> Unit
+typealias ResultContent = @Composable (String, () -> Unit) -> Unit
 
 private sealed interface RecordingPlaybackClaim {
     data object Loading : RecordingPlaybackClaim
@@ -130,6 +151,7 @@ private sealed interface RecordingPlaybackClaim {
 
 data class ProfileNavigation(
     val openHistory: () -> Unit,
+    val openResult: (String) -> Unit,
     val openTreatmentPlan: () -> Unit,
     val openPendingUploads: () -> Unit,
     val openSettings: () -> Unit,
@@ -179,6 +201,8 @@ internal fun AuthenticatedApp(
     preparationContent: PreparationContent = { _, _, _ -> PlaceholderScreen("准备演唱") },
     recordingContent: RecordingContent = { _, _, _ -> PlaceholderScreen("正在录制") },
     reviewContent: ReviewContent = { _, _, _, _ -> PlaceholderScreen("本地回看") },
+    historyContent: HistoryContent = { onBack, onResult -> HistoryRoute(onBack, onResult) },
+    resultContent: ResultContent = { sessionId, onBack -> ResultRoute(sessionId, onBack) },
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -201,6 +225,8 @@ internal fun AuthenticatedApp(
             preparationContent = preparationContent,
             recordingContent = recordingContent,
             reviewContent = reviewContent,
+            historyContent = historyContent,
+            resultContent = resultContent,
         )
     }
 }
@@ -290,6 +316,8 @@ private fun AppNavHost(
     preparationContent: PreparationContent,
     recordingContent: RecordingContent,
     reviewContent: ReviewContent,
+    historyContent: HistoryContent,
+    resultContent: ResultContent,
 ) {
     NavHost(
         navController = navController,
@@ -305,6 +333,7 @@ private fun AppNavHost(
             profileContent(
                 ProfileNavigation(
                     openHistory = { navController.navigate(AppRoute.History) },
+                    openResult = { sessionId -> navController.navigate(AppRoute.Result(sessionId)) },
                     openTreatmentPlan = { navController.navigate(AppRoute.TreatmentPlan) },
                     openPendingUploads = { navController.navigate(AppRoute.PendingUploads) },
                     openSettings = { navController.navigate(AppRoute.Settings) },
@@ -350,8 +379,16 @@ private fun AppNavHost(
         }
         composable<AppRoute.PendingUploads> { PendingUploadsRoute { navController.popBackStack() } }
         composable<AppRoute.TreatmentPlan> { PlaceholderScreen("治疗计划") }
-        composable<AppRoute.History> { PlaceholderScreen("演唱记录") }
-        composable<AppRoute.Result> { PlaceholderScreen("分析结果") }
+        composable<AppRoute.History> {
+            historyContent(
+                { navController.popBackStack() },
+                { sessionId -> navController.navigate(AppRoute.Result(sessionId)) },
+            )
+        }
+        composable<AppRoute.Result> { entry ->
+            val route = entry.toRoute<AppRoute.Result>()
+            resultContent(route.sessionId) { navController.popBackStack() }
+        }
         composable<AppRoute.Settings> { PlaceholderScreen("设置") }
     }
 }
@@ -382,8 +419,22 @@ private fun ProfileRoute(navigation: ProfileNavigation) {
         factory = ProfileViewModel.factory(container.patientRepository, container.pendingUploadCounter),
     )
     val state by profileViewModel.state.collectAsState()
+    val storage = remember(container) { container.draftStorage.current() }
+    val historyRepository = remember(storage, container) {
+        HistoryRepository(
+            AccountScopedHistoryLocalSource(storage),
+            VocaEaseHistoryRemoteSource(container.patientApi, storage.accountScopeHash),
+            storage::isLeaseActive,
+        )
+    }
+    val historyViewModel: HistoryViewModel = viewModel(
+        key = "profile-history:${storage.accountScopeHash}:${storage.cleanupScopeToken}",
+        factory = HistoryViewModel.factory(historyRepository, container.dispatchers.io),
+    )
+    val historyState by historyViewModel.state.collectAsState()
     val scope = rememberCoroutineScope()
     LaunchedEffect(profileViewModel) { profileViewModel.start() }
+    LaunchedEffect(historyViewModel) { historyViewModel.start() }
     ProfileScreen(
         state = state,
         onHistoryClick = navigation.openHistory,
@@ -391,6 +442,8 @@ private fun ProfileRoute(navigation: ProfileNavigation) {
         onPendingUploadsClick = navigation.openPendingUploads,
         onSettingsClick = navigation.openSettings,
         onRetry = { scope.launch { profileViewModel.refresh() } },
+        historyItems = historyState.items,
+        onHistoryItemClick = navigation.openResult,
     )
 }
 
@@ -411,6 +464,120 @@ private fun PendingUploadsRoute(onBack: () -> Unit) {
         onResume = pendingViewModel::resume,
         onRetry = pendingViewModel::retry,
         onDelete = pendingViewModel::delete,
+    )
+}
+
+@Composable
+private fun HistoryRoute(onBack: () -> Unit, onResult: (String) -> Unit) {
+    val container = LocalAppContainer.current
+    val storage = remember(container) { container.draftStorage.current() }
+    val repository = remember(storage, container) {
+        HistoryRepository(
+            local = AccountScopedHistoryLocalSource(storage),
+            remote = VocaEaseHistoryRemoteSource(container.patientApi, storage.accountScopeHash),
+            leaseActive = storage::isLeaseActive,
+        )
+    }
+    val historyViewModel: HistoryViewModel = viewModel(
+        key = "history:${storage.accountScopeHash}:${storage.cleanupScopeToken}",
+        factory = HistoryViewModel.factory(repository, container.dispatchers.io),
+    )
+    val state by historyViewModel.state.collectAsState()
+    LaunchedEffect(historyViewModel) { historyViewModel.start() }
+    HistoryScreen(
+        state = state,
+        onBack = onBack,
+        onRetry = historyViewModel::retry,
+        onLoadMore = historyViewModel::loadMore,
+        onItemClick = onResult,
+    )
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun ResultRoute(sessionId: String, onBack: () -> Unit) {
+    val container = LocalAppContainer.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val playerLifecycle = remember(sessionId) { PrivateVideoRouteLifecycle() }
+    val storage = remember(sessionId, container) { container.draftStorage.current() }
+    val retryRemote = remember(sessionId, storage, container) {
+        VocaEaseAnalysisRetryRemote(container.patientApi, storage.accountScopeHash)
+    }
+    val retryCoordinator = remember(retryRemote) { AnalysisRetryCoordinator(retryRemote, maxAttempts = 3) }
+    val resultViewModel: ResultViewModel = viewModel(
+        key = "result:${storage.accountScopeHash}:${storage.cleanupScopeToken}:$sessionId",
+        factory = ResultViewModel.factory(
+            sessionId = sessionId,
+            remote = VocaEaseResultSessionRemote(container.patientApi, storage.accountScopeHash),
+            retryAction = {
+                val detail = retryRemote.detail(sessionId)
+                retryCoordinator.retry(detail)
+            },
+            dispatcher = container.dispatchers.io,
+        ),
+    )
+    val state by resultViewModel.state.collectAsState()
+    val playerView = remember(context) {
+        PlayerView(context).apply {
+            useController = true
+            contentDescription = "私有演唱录像"
+        }
+    }
+    val engine by produceState<Media3PrivateVideoEngine?>(null, playerView) {
+        value = Media3PrivateVideoEngine.create(context, playerView)
+    }
+    val privatePlayer = remember(engine, storage, container) {
+        engine?.let { readyEngine ->
+            PrivateSessionVideoPlayer(
+                remote = VocaEasePrivateVideoRemote(container.patientApi, storage.accountScopeHash),
+                engine = readyEngine,
+                nowEpochMillis = container.clock::nowEpochMilliseconds,
+                leaseActive = storage::isLeaseActive,
+                launchPlaybackError = playerLifecycle::launch,
+            )
+        }
+    }
+    val privateVideoState = privatePlayer?.stateFlow?.collectAsState()?.value
+    LaunchedEffect(resultViewModel) { resultViewModel.start() }
+    LaunchedEffect(privatePlayer, state.content?.contentState, sessionId) {
+        if (state.content?.contentState == ResultContentState.COMPLETED) privatePlayer?.open(sessionId)
+    }
+    DisposableEffect(resultViewModel) {
+        onDispose { resultViewModel.stop() }
+    }
+    if (privatePlayer != null) {
+        DisposableEffect(privatePlayer, storage) {
+            val registration = storage.onLeaseInvalidated {
+                playerLifecycle.launch { privatePlayer.invalidateLease() }
+            }
+            onDispose {
+                registration.unregister()
+                playerLifecycle.releaseWhenReady { privatePlayer.releaseAndAwait() }
+            }
+        }
+    }
+    ResultScreen(
+        state = state,
+        videoContent = {
+            when (val videoState = privateVideoState) {
+                is PrivateVideoState.Ready -> AndroidView(factory = { playerView }, modifier = Modifier.fillMaxSize())
+                is PrivateVideoState.Failed -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(videoState.message, color = AppWhite, fontSize = 12.sp)
+                    TextButton(onClick = { scope.launch { privatePlayer.open(sessionId) } }) {
+                        Text("重试视频", color = AppWhite)
+                    }
+                }
+                PrivateVideoState.Unavailable -> Text("视频暂不可用", color = AppWhite, fontSize = 12.sp)
+                PrivateVideoState.Loading, null -> CircularProgressIndicator(color = BrandGreen)
+            }
+        },
+        onBack = onBack,
+        onRetryLoad = {
+            resultViewModel.stop()
+            resultViewModel.start()
+        },
+        onRetryAnalysis = { scope.launch { resultViewModel.retryAnalysis() } },
     )
 }
 
