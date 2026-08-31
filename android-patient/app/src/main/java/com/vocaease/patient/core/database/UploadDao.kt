@@ -57,6 +57,7 @@ internal interface UploadDao {
             audio_confirmed_at = :audioConfirmedAt, video_confirmed_at = :videoConfirmedAt,
             attempt_count = :attemptCount, next_retry_at = :nextRetryAt, last_safe_error = :lastSafeError,
             progress_percent = :progressPercent, receipt_wait_attempt = :receiptWaitAttempt
+            , resume_pipeline_stage = :resumePipelineStage
         WHERE account_scope = :accountScope AND draft_id = :draftId
         """,
     )
@@ -90,6 +91,7 @@ internal interface UploadDao {
         lastSafeError: String?,
         progressPercent: Int,
         receiptWaitAttempt: Int,
+        resumePipelineStage: UploadPipelineStage? = null,
     ): Int
 
     @Query("DELETE FROM upload_jobs WHERE account_scope = :accountScope AND draft_id = :draftId")

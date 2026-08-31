@@ -53,6 +53,40 @@ enum class UploadPipelineStage {
     FAILED,
 }
 
+internal object UploadPipelineTransitionPolicy {
+    val edges: Map<UploadPipelineStage, Set<UploadPipelineStage>> = mapOf(
+        UploadPipelineStage.PAUSED to setOf(
+            UploadPipelineStage.WAITING_NETWORK,
+            UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.UPLOADING_AUDIO,
+            UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.CONFIRMING_AUDIO,
+            UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.UPLOADING_VIDEO,
+            UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.CONFIRMING_VIDEO,
+            UploadPipelineStage.SUBMITTING,
+        ),
+        UploadPipelineStage.WAITING_NETWORK to setOf(
+            UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.UPLOADING_AUDIO,
+            UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.CONFIRMING_AUDIO,
+            UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.UPLOADING_VIDEO,
+            UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.CONFIRMING_VIDEO,
+            UploadPipelineStage.SUBMITTING, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED,
+        ),
+        UploadPipelineStage.REQUESTING_AUDIO_GRANT to setOf(UploadPipelineStage.UPLOADING_AUDIO, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.UPLOADING_AUDIO to setOf(UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.WAITING_AUDIO_RECEIPT to setOf(UploadPipelineStage.CONFIRMING_AUDIO, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.CONFIRMING_AUDIO to setOf(UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.REQUESTING_VIDEO_GRANT to setOf(UploadPipelineStage.UPLOADING_VIDEO, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.UPLOADING_VIDEO to setOf(UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.WAITING_VIDEO_RECEIPT to setOf(UploadPipelineStage.CONFIRMING_VIDEO, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.CONFIRMING_VIDEO to setOf(UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.SUBMITTING, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.SUBMITTING to setOf(UploadPipelineStage.ANALYZING, UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
+        UploadPipelineStage.ANALYZING to emptySet(),
+        UploadPipelineStage.FAILED to setOf(UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED),
+    )
+
+    fun allows(from: UploadPipelineStage, to: UploadPipelineStage): Boolean =
+        to == from || to in edges.getValue(from)
+}
+
 @Entity(
     tableName = "upload_jobs",
     primaryKeys = ["account_scope", "draft_id"],
@@ -101,6 +135,7 @@ data class UploadJobEntity(
     @ColumnInfo(name = "last_safe_error") val lastSafeError: String?,
     @ColumnInfo(name = "progress_percent") val progressPercent: Int = 0,
     @ColumnInfo(name = "receipt_wait_attempt") val receiptWaitAttempt: Int = 0,
+    @ColumnInfo(name = "resume_pipeline_stage") val resumePipelineStage: UploadPipelineStage? = null,
 ) {
     init {
         require(accountScope.isNotBlank())
@@ -111,6 +146,16 @@ data class UploadJobEntity(
         require(listOf(audioGrantKey, videoGrantKey, submitKey).all { it.length <= 128 })
         require(attemptCount >= 0)
         require(nextRetryAt == null || nextRetryAt >= 0)
+        require(
+            resumePipelineStage == null || (
+                pipelineStage in setOf(UploadPipelineStage.PAUSED, UploadPipelineStage.WAITING_NETWORK) &&
+                    resumePipelineStage !in setOf(
+                        UploadPipelineStage.PAUSED,
+                        UploadPipelineStage.ANALYZING,
+                        UploadPipelineStage.FAILED,
+                    )
+                )
+        )
         require(lastSafeError == null || lastSafeError.length <= 256)
         require(progressPercent in 0..100)
         require(receiptWaitAttempt in 0..4)
@@ -158,6 +203,7 @@ data class UploadJobEntity(
             lastSafeError = null,
             progressPercent = 0,
             receiptWaitAttempt = 0,
+            resumePipelineStage = null,
         )
     }
 }

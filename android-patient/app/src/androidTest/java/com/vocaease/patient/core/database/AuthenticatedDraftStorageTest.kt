@@ -285,6 +285,166 @@ class AuthenticatedDraftStorageTest {
     }
 
     @Test
+    fun 上传解密副本必须同时匹配持久size和content摘要() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "upload-content-binding")
+        storage.publishRecordingMedia(
+            "upload-content-binding",
+            plainFile("upload-content-video", 257),
+            plainFile("upload-content-audio", 129),
+            2_000,
+        )
+        assertTrue(storage.enqueueReviewDraft("upload-content-binding"))
+        database.openHelper.writableDatabase.execSQL(
+            "UPDATE media SET sha256=? WHERE account_scope=? AND draft_id=? AND type='AUDIO'",
+            arrayOf("0".repeat(64), PATIENT_A_UUID, "upload-content-binding"),
+        )
+        val destination = plainFile("upload-content-destination", 1)
+
+        assertThrows(ReviewMediaInvalidException::class.java) {
+            runBlocking { storage.copyUploadMediaTo("upload-content-binding", MediaType.AUDIO, destination) }
+        }
+        assertFalse(destination.exists())
+        Unit
+    }
+
+    @Test
+    fun 删除intent在每个checkpoint前后崩溃都自动收敛且不撤销其他草稿reader() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "keep")
+        storage.publishRecordingMedia("keep", plainFile("keep-video", 257), plainFile("keep-audio", 129), 2_000)
+        val keepMedia = database.mediaDao().findAll(PATIENT_A_UUID, "keep").first()
+        val keepReader = storage.encryptedMediaDataSource(keepMedia.encryptedRelativePath).also {
+            it.open(androidx.media3.datasource.DataSpec(android.net.Uri.parse("vocaease://review/keep")))
+        }
+        val boundaries = UploadLocalActionStage.entries.flatMap { stage -> listOf(stage to true, stage to false) }
+            .filter { (stage, _) -> stage != UploadLocalActionStage.INTENT_WRITTEN }
+        boundaries.forEachIndexed { index, target ->
+            val id = "delete-crash-$index"
+            insertDraft(storage, id)
+            storage.publishRecordingMedia(id, plainFile("$id-video", 257), plainFile("$id-audio", 129), 2_000)
+            assertTrue(storage.enqueueReviewDraft(id))
+            storage.requestQueuedUploadDelete(id)
+            assertThrows(SimulatedLocalActionCrash::class.java) {
+                runBlocking {
+                    storage.resumeUploadLocalAction(id) { stage, before ->
+                        if (stage == target.first && before == target.second) throw SimulatedLocalActionCrash()
+                    }
+                }
+            }
+            storage.resumeUploadLocalAction(id)
+            assertEquals(null, storage.findDraft(id))
+            assertEquals(null, database.uploadDao().find(PATIENT_A_UUID, id))
+            assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, id).isEmpty())
+            assertEquals(null, database.uploadLocalActionDao().find(PATIENT_A_UUID, id))
+        }
+        assertEquals(1, keepReader.read(ByteArray(1), 0, 1))
+        keepReader.close()
+        Unit
+    }
+
+    @Test
+    fun ANALYZING清理在每个checkpoint前后崩溃都从intent恢复且不再要求VALID媒体() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        val stages = listOf(
+            UploadLocalActionStage.MEDIA_INVALIDATED,
+            UploadLocalActionStage.AUDIO_DELETED,
+            UploadLocalActionStage.VIDEO_DELETED,
+            UploadLocalActionStage.MEDIA_ROWS_DELETED,
+            UploadLocalActionStage.DRAFT_FINALIZED,
+        )
+        stages.flatMap { stage -> listOf(stage to true, stage to false) }.forEachIndexed { index, target ->
+            val id = "cleanup-crash-$index"
+            insertDraft(storage, id)
+            storage.publishRecordingMedia(id, plainFile("$id-video", 257), plainFile("$id-audio", 129), 2_000)
+            assertTrue(storage.enqueueReviewDraft(id))
+            advanceJobToAnalyzing(id)
+            storage.requestSubmittedUploadCleanup(id)
+            assertThrows(SimulatedLocalActionCrash::class.java) {
+                runBlocking {
+                    storage.resumeUploadLocalAction(id) { stage, before ->
+                        if (stage == target.first && before == target.second) throw SimulatedLocalActionCrash()
+                    }
+                }
+            }
+            storage.resumeUploadLocalAction(id)
+            assertEquals(DraftState.SUBMITTED, storage.findDraft(id)?.state)
+            assertEquals(UploadPipelineStage.ANALYZING, database.uploadDao().find(PATIENT_A_UUID, id)?.pipelineStage)
+            assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, id).isEmpty())
+            assertEquals(null, database.uploadLocalActionDao().find(PATIENT_A_UUID, id))
+        }
+        Unit
+    }
+
+    @Test
+    fun 公开清理入口不会重复获取账户锁且已提交任务不能走排队删除() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "cleanup-entry")
+        storage.publishRecordingMedia(
+            "cleanup-entry",
+            plainFile("cleanup-entry-video", 257),
+            plainFile("cleanup-entry-audio", 129),
+            2_000,
+        )
+        assertTrue(storage.enqueueReviewDraft("cleanup-entry"))
+        advanceJobToAnalyzing("cleanup-entry")
+
+        kotlinx.coroutines.withTimeout(2_000) {
+            storage.deleteSubmittedUploadMedia("cleanup-entry")
+        }
+        assertEquals(DraftState.SUBMITTED, storage.findDraft("cleanup-entry")?.state)
+        assertTrue(database.mediaDao().findAll(PATIENT_A_UUID, "cleanup-entry").isEmpty())
+
+        insertDraft(storage, "submitted-delete")
+        storage.publishRecordingMedia(
+            "submitted-delete",
+            plainFile("submitted-delete-video", 257),
+            plainFile("submitted-delete-audio", 129),
+            2_000,
+        )
+        assertTrue(storage.enqueueReviewDraft("submitted-delete"))
+        advanceJobToAnalyzing("submitted-delete")
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { storage.requestQueuedUploadDelete("submitted-delete") }
+        }
+        assertEquals(DraftState.READY_TO_UPLOAD, storage.findDraft("submitted-delete")?.state)
+        assertEquals(null, database.uploadLocalActionDao().find(PATIENT_A_UUID, "submitted-delete"))
+        assertEquals(2, database.mediaDao().findAll(PATIENT_A_UUID, "submitted-delete").size)
+        Unit
+    }
+
+    @Test
+    fun cleanupIntent落盘后迟到worker检查点不能推进任务() = runBlocking {
+        sessions.authenticate(PATIENT_A_UUID)
+        val storage = provider.current()
+        insertDraft(storage, "late-worker-cleanup")
+        storage.publishRecordingMedia(
+            "late-worker-cleanup",
+            plainFile("late-worker-video", 257),
+            plainFile("late-worker-audio", 129),
+            2_000,
+        )
+        assertTrue(storage.enqueueReviewDraft("late-worker-cleanup"))
+        advanceJobToAnalyzing("late-worker-cleanup")
+        storage.requestSubmittedUploadCleanup("late-worker-cleanup")
+        val late = requireNotNull(database.uploadDao().find(PATIENT_A_UUID, "late-worker-cleanup"))
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { storage.checkpointUpload("late-worker-cleanup", late.toCheckpoint()) }
+        }
+        assertEquals(
+            UploadLocalActionStage.INTENT_WRITTEN,
+            database.uploadLocalActionDao().find(PATIENT_A_UUID, "late-worker-cleanup")?.stage,
+        )
+        assertEquals(UploadPipelineStage.ANALYZING, storage.findUploadJob("late-worker-cleanup")?.pipelineStage)
+        Unit
+    }
+
+    @Test
     fun 重录使旧双密文先失效再删除且保留会话和creationKey() = runBlocking {
         sessions.authenticate(PATIENT_A_UUID)
         val storage = provider.current()
@@ -574,11 +734,106 @@ class AuthenticatedDraftStorageTest {
         lastSafeError = null,
     )
 
+    private suspend fun advanceJobToAnalyzing(draftId: String) {
+        val initial = requireNotNull(database.uploadDao().find(PATIENT_A_UUID, draftId))
+        val waitingNetwork = initial.copy(overallState = UploadOverallState.WAITING_NETWORK, pipelineStage = UploadPipelineStage.WAITING_NETWORK)
+        val requestingAudio = waitingNetwork.copy(
+            overallState = UploadOverallState.UPLOADING, pipelineStage = UploadPipelineStage.REQUESTING_AUDIO_GRANT,
+            audioGrantState = UploadStepState.REQUESTING_GRANT,
+        )
+        val uploadingAudio = requestingAudio.copy(
+            pipelineStage = UploadPipelineStage.UPLOADING_AUDIO, audioGrantState = UploadStepState.GRANT_READY,
+            audioUploadState = UploadStepState.UPLOADING, audioAssetKey = "asset-a-$draftId", audioObjectKey = "object-a-$draftId",
+        )
+        val waitingAudio = uploadingAudio.copy(
+            overallState = UploadOverallState.WAITING_CALLBACK, pipelineStage = UploadPipelineStage.WAITING_AUDIO_RECEIPT,
+            audioUploadState = UploadStepState.UPLOADED, audioReceiptState = UploadStepState.WAITING_RECEIPT, progressPercent = 50,
+        )
+        val confirmingAudio = waitingAudio.copy(
+            overallState = UploadOverallState.CONFIRMING, pipelineStage = UploadPipelineStage.CONFIRMING_AUDIO,
+            audioConfirmState = UploadStepState.CONFIRMING,
+        )
+        val requestingVideo = confirmingAudio.copy(
+            overallState = UploadOverallState.UPLOADING, pipelineStage = UploadPipelineStage.REQUESTING_VIDEO_GRANT,
+            audioReceiptState = UploadStepState.RECEIPT_RECEIVED, audioConfirmState = UploadStepState.CONFIRMED,
+            audioReceipt = "trusted", audioConfirmedAt = 1, videoGrantState = UploadStepState.REQUESTING_GRANT,
+        )
+        val uploadingVideo = requestingVideo.copy(
+            pipelineStage = UploadPipelineStage.UPLOADING_VIDEO, videoGrantState = UploadStepState.GRANT_READY,
+            videoUploadState = UploadStepState.UPLOADING, videoAssetKey = "asset-v-$draftId", videoObjectKey = "object-v-$draftId",
+        )
+        val waitingVideo = uploadingVideo.copy(
+            overallState = UploadOverallState.WAITING_CALLBACK, pipelineStage = UploadPipelineStage.WAITING_VIDEO_RECEIPT,
+            videoUploadState = UploadStepState.UPLOADED, videoReceiptState = UploadStepState.WAITING_RECEIPT, progressPercent = 100,
+        )
+        val confirmingVideo = waitingVideo.copy(
+            overallState = UploadOverallState.CONFIRMING, pipelineStage = UploadPipelineStage.CONFIRMING_VIDEO,
+            videoConfirmState = UploadStepState.CONFIRMING,
+        )
+        val submitting = confirmingVideo.copy(
+            overallState = UploadOverallState.SUBMITTING, pipelineStage = UploadPipelineStage.SUBMITTING,
+            videoReceiptState = UploadStepState.RECEIPT_RECEIVED, videoConfirmState = UploadStepState.CONFIRMED,
+            videoReceipt = "trusted", videoConfirmedAt = 2, submitState = UploadStepState.SUBMITTING,
+        )
+        val analyzing = submitting.copy(
+            overallState = UploadOverallState.ANALYZING, pipelineStage = UploadPipelineStage.ANALYZING,
+            submitState = UploadStepState.SUBMITTED,
+        )
+        listOf(
+            waitingNetwork, requestingAudio, uploadingAudio, waitingAudio, confirmingAudio,
+            requestingVideo, uploadingVideo, waitingVideo, confirmingVideo, submitting, analyzing,
+        ).forEach { checkpointJob(it) }
+    }
+
+    private suspend fun checkpointJob(job: UploadJobEntity) = database.uploadDao().checkpoint(
+        accountScope = job.accountScope, draftId = job.draftId, overallState = job.overallState,
+        pipelineStage = job.pipelineStage, audioGrantState = job.audioGrantState, videoGrantState = job.videoGrantState,
+        audioUploadState = job.audioUploadState, videoUploadState = job.videoUploadState,
+        audioReceiptState = job.audioReceiptState, videoReceiptState = job.videoReceiptState,
+        audioConfirmState = job.audioConfirmState, videoConfirmState = job.videoConfirmState,
+        submitState = job.submitState, audioGrantKey = job.audioGrantKey, videoGrantKey = job.videoGrantKey,
+        submitKey = job.submitKey, audioAssetKey = job.audioAssetKey, videoAssetKey = job.videoAssetKey,
+        audioObjectKey = job.audioObjectKey, videoObjectKey = job.videoObjectKey, audioReceipt = job.audioReceipt,
+        videoReceipt = job.videoReceipt, audioConfirmedAt = job.audioConfirmedAt, videoConfirmedAt = job.videoConfirmedAt,
+        attemptCount = job.attemptCount, nextRetryAt = job.nextRetryAt, lastSafeError = job.lastSafeError,
+        progressPercent = job.progressPercent, receiptWaitAttempt = job.receiptWaitAttempt,
+    )
+
+    private fun UploadJobEntity.toCheckpoint() = UploadCheckpoint(
+        overallState = overallState,
+        pipelineStage = pipelineStage,
+        audioGrantState = audioGrantState,
+        videoGrantState = videoGrantState,
+        audioUploadState = audioUploadState,
+        videoUploadState = videoUploadState,
+        audioReceiptState = audioReceiptState,
+        videoReceiptState = videoReceiptState,
+        audioConfirmState = audioConfirmState,
+        videoConfirmState = videoConfirmState,
+        submitState = submitState,
+        audioAssetKey = audioAssetKey,
+        videoAssetKey = videoAssetKey,
+        audioObjectKey = audioObjectKey,
+        videoObjectKey = videoObjectKey,
+        audioReceipt = audioReceipt,
+        videoReceipt = videoReceipt,
+        audioConfirmedAt = audioConfirmedAt,
+        videoConfirmedAt = videoConfirmedAt,
+        attemptCount = attemptCount,
+        nextRetryAt = nextRetryAt,
+        lastSafeError = lastSafeError,
+        progressPercent = progressPercent,
+        receiptWaitAttempt = receiptWaitAttempt,
+        resumePipelineStage = resumePipelineStage,
+    )
+
     private companion object {
         const val PATIENT_A_UUID = "11111111-1111-4111-8111-111111111111"
         const val PATIENT_B_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     }
 }
+
+private class SimulatedLocalActionCrash : RuntimeException()
 
 private class BlockingAuthenticatedAccountSession : AuthenticatedAccountSession {
     private val mutex = Mutex()

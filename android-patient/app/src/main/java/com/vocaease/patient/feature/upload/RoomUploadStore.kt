@@ -16,14 +16,17 @@ class RoomUploadStore(
         val job = storage.findUploadJob(draftId) ?: return
         storage.checkpointUpload(
             draftId,
-            job.checkpoint(UploadPipelineStage.PAUSED, UploadOverallState.PAUSED, USER_PAUSED_MARKER),
+            job.checkpoint(
+                UploadPipelineStage.PAUSED, UploadOverallState.PAUSED, USER_PAUSED_MARKER,
+                resumePipelineStage = job.resumePipelineStage ?: job.pipelineStage,
+            ),
         )
     }
 
     suspend fun resumeFromPause() {
         val job = storage.findUploadJob(draftId) ?: return
         require(job.pipelineStage == UploadPipelineStage.PAUSED)
-        val stage = when {
+        val stage = job.resumePipelineStage ?: when {
             job.submitState == UploadStepState.SUBMITTING -> UploadPipelineStage.SUBMITTING
             job.videoConfirmState == UploadStepState.CONFIRMING -> UploadPipelineStage.CONFIRMING_VIDEO
             job.videoReceiptState == UploadStepState.WAITING_RECEIPT -> UploadPipelineStage.WAITING_VIDEO_RECEIPT
@@ -35,7 +38,26 @@ class RoomUploadStore(
             job.audioGrantState == UploadStepState.REQUESTING_GRANT -> UploadPipelineStage.REQUESTING_AUDIO_GRANT
             else -> UploadPipelineStage.WAITING_NETWORK
         }
-        storage.checkpointUpload(draftId, job.checkpoint(stage, stage.overall(), null))
+        storage.checkpointUpload(
+            draftId,
+            job.checkpoint(stage, stage.overall(), null, resumePipelineStage = null),
+        )
+    }
+
+    suspend fun resumeRetryableFailure(): Boolean {
+        val job = storage.findUploadJob(draftId) ?: return false
+        if (job.pipelineStage != UploadPipelineStage.FAILED || job.nextRetryAt == null) return false
+        storage.checkpointUpload(
+            draftId,
+            job.checkpoint(
+                UploadPipelineStage.WAITING_NETWORK,
+                UploadOverallState.WAITING_NETWORK,
+                error = null,
+                resumePipelineStage = UploadPipelineStage.REQUESTING_AUDIO_GRANT,
+                nextRetryAt = null,
+            ),
+        )
+        return true
     }
 
     override suspend fun load(): UploadRecord {
@@ -63,6 +85,9 @@ class RoomUploadStore(
             receiptWaitAttempt = job.receiptWaitAttempt,
             progressPercent = job.progressPercent,
             safeError = job.lastSafeError,
+            attemptCount = job.attemptCount,
+            nextRetryAtEpochMillis = job.nextRetryAt,
+            resumeStage = job.resumePipelineStage?.toFeature(),
         )
     }
 
@@ -80,7 +105,7 @@ class RoomUploadStore(
             videoReceiptState = receiptState(record, UploadMediaKind.VIDEO),
             audioConfirmState = confirmState(record, UploadMediaKind.AUDIO),
             videoConfirmState = confirmState(record, UploadMediaKind.VIDEO),
-            submitState = when (record.stage) {
+            submitState = when (record.activeStage()) {
                 UploadStage.SUBMITTING -> UploadStepState.SUBMITTING
                 UploadStage.ANALYZING -> UploadStepState.SUBMITTED
                 UploadStage.FAILED -> UploadStepState.TERMINAL_FAILURE
@@ -94,11 +119,12 @@ class RoomUploadStore(
             videoReceipt = if (record.videoConfirmed) "trusted-callback" else null,
             audioConfirmedAt = if (record.audioConfirmed) now else null,
             videoConfirmedAt = if (record.videoConfirmed) now else null,
-            attemptCount = 0,
-            nextRetryAt = null,
+            attemptCount = record.attemptCount,
+            nextRetryAt = record.nextRetryAtEpochMillis,
             lastSafeError = record.safeError,
             progressPercent = record.progressPercent,
             receiptWaitAttempt = record.receiptWaitAttempt,
+            resumePipelineStage = record.resumeStage?.toDatabase(),
         )
         storage.checkpointUpload(draftId, checkpoint)
     }
@@ -146,6 +172,8 @@ class RoomUploadStore(
         stage: UploadPipelineStage,
         overall: UploadOverallState,
         error: String?,
+        resumePipelineStage: UploadPipelineStage? = this.resumePipelineStage,
+        nextRetryAt: Long? = this.nextRetryAt,
     ) = UploadCheckpoint(
         overallState = overall, pipelineStage = stage,
         audioGrantState = audioGrantState, videoGrantState = videoGrantState,
@@ -159,11 +187,12 @@ class RoomUploadStore(
         audioConfirmedAt = audioConfirmedAt, videoConfirmedAt = videoConfirmedAt,
         attemptCount = attemptCount, nextRetryAt = nextRetryAt, lastSafeError = error,
         progressPercent = progressPercent, receiptWaitAttempt = receiptWaitAttempt,
+        resumePipelineStage = resumePipelineStage,
     )
 
     private fun grantState(record: UploadRecord, kind: UploadMediaKind): UploadStepState {
         val binding = if (kind == UploadMediaKind.AUDIO) record.audioBinding else record.videoBinding
-        val requesting = record.stage == if (kind == UploadMediaKind.AUDIO) UploadStage.REQUESTING_AUDIO_GRANT else UploadStage.REQUESTING_VIDEO_GRANT
+        val requesting = record.activeStage() == if (kind == UploadMediaKind.AUDIO) UploadStage.REQUESTING_AUDIO_GRANT else UploadStage.REQUESTING_VIDEO_GRANT
         return when {
             binding != null -> UploadStepState.GRANT_READY
             record.stage == UploadStage.FAILED -> UploadStepState.TERMINAL_FAILURE
@@ -174,7 +203,7 @@ class RoomUploadStore(
 
     private fun uploadState(record: UploadRecord, kind: UploadMediaKind): UploadStepState {
         val uploaded = if (kind == UploadMediaKind.AUDIO) record.audioUploaded else record.videoUploaded
-        val uploading = record.stage == if (kind == UploadMediaKind.AUDIO) UploadStage.UPLOADING_AUDIO else UploadStage.UPLOADING_VIDEO
+        val uploading = record.activeStage() == if (kind == UploadMediaKind.AUDIO) UploadStage.UPLOADING_AUDIO else UploadStage.UPLOADING_VIDEO
         return when {
             uploaded -> UploadStepState.UPLOADED
             record.stage == UploadStage.FAILED -> UploadStepState.TERMINAL_FAILURE
@@ -185,7 +214,7 @@ class RoomUploadStore(
 
     private fun receiptState(record: UploadRecord, kind: UploadMediaKind): UploadStepState {
         val confirmed = if (kind == UploadMediaKind.AUDIO) record.audioConfirmed else record.videoConfirmed
-        val waitingOrConfirming = record.stage in if (kind == UploadMediaKind.AUDIO) {
+        val waitingOrConfirming = record.activeStage() in if (kind == UploadMediaKind.AUDIO) {
             setOf(UploadStage.WAITING_AUDIO_RECEIPT, UploadStage.CONFIRMING_AUDIO)
         } else setOf(UploadStage.WAITING_VIDEO_RECEIPT, UploadStage.CONFIRMING_VIDEO)
         return when {
@@ -198,17 +227,21 @@ class RoomUploadStore(
 
     private fun confirmState(record: UploadRecord, kind: UploadMediaKind): UploadStepState {
         val confirmed = if (kind == UploadMediaKind.AUDIO) record.audioConfirmed else record.videoConfirmed
-        val confirming = record.stage == if (kind == UploadMediaKind.AUDIO) UploadStage.CONFIRMING_AUDIO else UploadStage.CONFIRMING_VIDEO
+        val activeStage = record.activeStage()
+        val confirming = activeStage == if (kind == UploadMediaKind.AUDIO) UploadStage.CONFIRMING_AUDIO else UploadStage.CONFIRMING_VIDEO
         return when {
             confirmed -> UploadStepState.CONFIRMED
             record.stage == UploadStage.FAILED -> UploadStepState.TERMINAL_FAILURE
-            confirming || (record.receiptWaitAttempt > 0 && waitingFor(record.stage, kind)) -> UploadStepState.CONFIRMING
+            confirming || (record.receiptWaitAttempt > 0 && waitingFor(activeStage, kind)) -> UploadStepState.CONFIRMING
             else -> UploadStepState.PENDING
         }
     }
 
     private fun waitingFor(stage: UploadStage, kind: UploadMediaKind): Boolean =
         stage == if (kind == UploadMediaKind.AUDIO) UploadStage.WAITING_AUDIO_RECEIPT else UploadStage.WAITING_VIDEO_RECEIPT
+
+    private fun UploadRecord.activeStage(): UploadStage =
+        if (stage in setOf(UploadStage.PAUSED, UploadStage.WAITING_NETWORK)) resumeStage ?: stage else stage
 
     private fun UploadStage.overall() = when (this) {
         UploadStage.PAUSED -> UploadOverallState.PAUSED

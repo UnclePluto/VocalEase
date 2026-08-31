@@ -4,6 +4,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.security.SecureRandom
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 
 fun interface UploadPlaintextSource {
@@ -22,17 +23,30 @@ class PlaintextUploadLeaseManager(
 
     override suspend fun open(kind: UploadMediaKind, media: UploadMedia): PlaintextUploadLease {
         val directory = privateJobDirectory()
-        val file = File(directory, randomName())
-        require(file.canonicalFile.parentFile == directory.canonicalFile)
+        val staging = File(directory, randomName())
+        var stable: File? = null
+        require(staging.canonicalFile.parentFile == directory.canonicalFile)
         try {
-            check(file.createNewFile())
-            setOwnerOnly(file, directory = false)
-            val copied = source.copy(kind, file)
-            check(copied == media.sizeBytes && file.length() == media.sizeBytes) { "解密媒体长度不一致" }
-            setOwnerOnly(file, directory = false)
-            return Lease(file, directory)
+            check(staging.createNewFile())
+            setOwnerOnly(staging, directory = false)
+            val copied = source.copy(kind, staging)
+            check(copied == media.sizeBytes && staging.length() == media.sizeBytes) { "解密媒体长度不一致" }
+            val contentSha256 = sha256(staging)
+            val generation = sha256("$opaqueJobId\u0000${kind.name}\u0000${media.mimeType}\u0000${media.sizeBytes}\u0000$contentSha256")
+            stable = File(directory, "${kind.name.lowercase()}-$generation.upload")
+            require(stable.canonicalFile.parentFile == directory.canonicalFile)
+            if (Files.exists(stable.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                require(!Files.isSymbolicLink(stable.toPath()) && stable.isFile) { "上传明文目标无效" }
+                check(stable.delete()) { "无法替换遗留上传明文" }
+            }
+            check(staging.renameTo(stable)) { "无法建立稳定上传明文" }
+            val stableMtime = STABLE_MTIME_BASE_MILLIS
+            check(stable.setLastModified(stableMtime) && stable.lastModified() == stableMtime) { "无法设置稳定上传源时间" }
+            setOwnerOnly(stable, directory = false)
+            return Lease(stable, directory)
         } catch (error: Exception) {
-            file.delete()
+            staging.delete()
+            stable?.delete()
             deleteIfEmpty(directory)
             throw error
         }
@@ -53,7 +67,23 @@ class PlaintextUploadLeaseManager(
     }
 
     private fun randomName(): String = ByteArray(16).also(SecureRandom()::nextBytes)
-        .joinToString("") { "%02x".format(it) } + ".upload"
+        .joinToString("") { "%02x".format(it) } + ".staging"
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
 
     private class Lease(
         override val file: File,
@@ -71,6 +101,7 @@ class PlaintextUploadLeaseManager(
     companion object {
         private val OPAQUE_JOB = Regex("[0-9a-f]{64}")
         private const val ORPHAN_AGE_MILLIS = 60L * 60 * 1_000
+        private const val STABLE_MTIME_BASE_MILLIS = 946_684_800_000L
 
         fun cleanupOrphans(root: File, nowEpochMillis: Long, activeOpaqueJobIds: Set<String> = emptySet()) {
             require(nowEpochMillis >= 0)
@@ -82,8 +113,8 @@ class PlaintextUploadLeaseManager(
                 ) return@forEach
                 val children = candidate.listFiles().orEmpty()
                 if (children.any { Files.isSymbolicLink(it.toPath()) || !it.isFile }) return@forEach
-                val newest = children.maxOfOrNull(File::lastModified) ?: candidate.lastModified()
-                if (newest <= nowEpochMillis - ORPHAN_AGE_MILLIS) {
+                // 文件 mtime 必须稳定以匹配七牛的跨进程 sourceId；遗留年龄因此以 job 目录更新时间为准。
+                if (candidate.lastModified() <= nowEpochMillis - ORPHAN_AGE_MILLIS) {
                     children.forEach { it.delete() }
                     deleteIfEmpty(candidate)
                 }

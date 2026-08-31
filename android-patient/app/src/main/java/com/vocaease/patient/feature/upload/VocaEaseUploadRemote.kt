@@ -94,6 +94,11 @@ class VocaEaseUploadRemote(
                     },
                     mimeType = media.mime,
                     sizeBytes = media.size,
+                    status = when (media.status) {
+                        "uploading" -> RemoteMediaState.UPLOADING
+                        "ready" -> RemoteMediaState.READY
+                        else -> RemoteMediaState.UNKNOWN
+                    },
                 )
             },
         )

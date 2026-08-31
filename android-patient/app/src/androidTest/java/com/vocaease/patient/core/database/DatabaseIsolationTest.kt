@@ -153,6 +153,9 @@ class DatabaseIsolationTest {
         assertThrows(IllegalArgumentException::class.java) {
             uploadJob("patient-a", "draft-1").copy(videoGrantKey = "")
         }
+        assertThrows(IllegalArgumentException::class.java) {
+            uploadJob("patient-a", "draft-1").copy(resumePipelineStage = UploadPipelineStage.ANALYZING)
+        }
     }
 
     @Test

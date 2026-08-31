@@ -650,61 +650,186 @@ class AccountScopedDraftStorage internal constructor(
         require(destination.isFile && !java.nio.file.Files.isSymbolicLink(destination.toPath()))
         val media = database.mediaDao().find(lease.patientId, draftId, type) ?: throw ReviewMediaInvalidException()
         require(media.validationState == MediaValidationState.VALID && media.sizeBytes > 0)
-        fileStore.open(lease.patientId, media.encryptedRelativePath).use { reader ->
-            require(reader.length == media.sizeBytes)
-            FileOutputStream(destination, false).buffered().use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var position = 0L
-                while (position < reader.length) {
-                    val read = reader.read(position, buffer, 0, minOf(buffer.size.toLong(), reader.length - position).toInt())
-                    check(read > 0)
-                    output.write(buffer, 0, read)
-                    position += read
+        try {
+            fileStore.open(lease.patientId, media.encryptedRelativePath).use { reader ->
+                require(reader.length == media.sizeBytes)
+                FileOutputStream(destination, false).buffered().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var position = 0L
+                    while (position < reader.length) {
+                        val read = reader.read(position, buffer, 0, minOf(buffer.size.toLong(), reader.length - position).toInt())
+                        check(read > 0)
+                        output.write(buffer, 0, read)
+                        position += read
+                    }
+                    buffer.fill(0)
+                    output.flush()
                 }
-                buffer.fill(0)
-                output.flush()
+                require(destination.length() == media.sizeBytes)
             }
-            require(destination.length() == media.sizeBytes)
+            if (destination.sha256() != media.sha256) {
+                database.mediaDao().updateValidation(lease.patientId, draftId, type, MediaValidationState.INVALID)
+                throw ReviewMediaInvalidException()
+            }
             media.sizeBytes
+        } catch (error: Exception) {
+            destination.delete()
+            throw error
         }
     }
 
-    suspend fun deleteSubmittedUploadMedia(draftId: String) = checked {
-        val paths = database.withTransaction {
-            val job = database.uploadDao().find(lease.patientId, draftId) ?: return@withTransaction emptyList()
-            require(job.pipelineStage == UploadPipelineStage.ANALYZING)
-            val draft = database.draftDao().find(lease.patientId, draftId) ?: return@withTransaction emptyList()
-            database.draftDao().updateState(lease.patientId, draftId, DraftState.SUBMITTED, draft.durationMs, null)
-            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
-            database.mediaDao().findAll(lease.patientId, draftId).map { it.encryptedRelativePath }
-        }
-        fileStore.revokeEncryptedMediaReaders(lease.patientId, paths.toSet())
-        paths.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
-        database.withTransaction { database.mediaDao().deleteAll(lease.patientId, draftId) }
+    suspend fun requestSubmittedUploadCleanup(draftId: String) = requestUploadLocalAction(
+        draftId,
+        UploadLocalActionType.CLEANUP_SUBMITTED,
+    )
+
+    suspend fun requestQueuedUploadDelete(draftId: String) = requestUploadLocalAction(
+        draftId,
+        UploadLocalActionType.DELETE_QUEUED,
+    )
+
+    suspend fun deleteSubmittedUploadMedia(draftId: String) {
+        requestSubmittedUploadCleanup(draftId)
+        resumeUploadLocalAction(draftId)
     }
 
-    suspend fun deleteQueuedUploadDraft(draftId: String) = checked {
-        val paths = database.withTransaction {
-            val job = database.uploadDao().find(lease.patientId, draftId) ?: return@withTransaction emptyList()
-            require(job.pipelineStage !in setOf(UploadPipelineStage.SUBMITTING, UploadPipelineStage.ANALYZING)) {
-                "任务已经提交，不能删除"
+    suspend fun deleteQueuedUploadDraft(draftId: String) {
+        requestQueuedUploadDelete(draftId)
+        resumeUploadLocalAction(draftId)
+    }
+
+    suspend fun recoverUploadLocalActions() {
+        val draftIds = checked {
+            database.uploadLocalActionDao().findAll(lease.patientId).map { it.draftId }
+        }
+        draftIds.forEach { resumeUploadLocalAction(it) }
+    }
+
+    suspend fun resumeUploadLocalAction(
+        draftId: String,
+        fault: UploadLocalActionFaultInjector = UploadLocalActionFaultInjector.NONE,
+    ) = checked {
+        while (true) {
+            val action = database.uploadLocalActionDao().find(lease.patientId, draftId) ?: return@checked
+            when (action.stage) {
+                UploadLocalActionStage.INTENT_WRITTEN -> {
+                    fault.onBoundary(UploadLocalActionStage.MEDIA_INVALIDATED, true)
+                    database.withTransaction {
+                        database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
+                        check(database.uploadLocalActionDao().advance(
+                            lease.patientId, draftId, action.stage, UploadLocalActionStage.MEDIA_INVALIDATED,
+                        ) == 1)
+                    }
+                    fault.onBoundary(UploadLocalActionStage.MEDIA_INVALIDATED, false)
+                }
+                UploadLocalActionStage.MEDIA_INVALIDATED -> {
+                    fileStore.revokeEncryptedMediaReaders(lease.patientId, setOf(action.audioEncryptedRelativePath))
+                    fileStore.deleteEncryptedMedia(lease.patientId, action.audioEncryptedRelativePath)
+                    fault.onBoundary(UploadLocalActionStage.AUDIO_DELETED, true)
+                    advanceLocalAction(draftId, action.stage, UploadLocalActionStage.AUDIO_DELETED)
+                    fault.onBoundary(UploadLocalActionStage.AUDIO_DELETED, false)
+                }
+                UploadLocalActionStage.AUDIO_DELETED -> {
+                    fileStore.revokeEncryptedMediaReaders(lease.patientId, setOf(action.videoEncryptedRelativePath))
+                    fileStore.deleteEncryptedMedia(lease.patientId, action.videoEncryptedRelativePath)
+                    fault.onBoundary(UploadLocalActionStage.VIDEO_DELETED, true)
+                    advanceLocalAction(draftId, action.stage, UploadLocalActionStage.VIDEO_DELETED)
+                    fault.onBoundary(UploadLocalActionStage.VIDEO_DELETED, false)
+                }
+                UploadLocalActionStage.VIDEO_DELETED -> {
+                    fault.onBoundary(UploadLocalActionStage.MEDIA_ROWS_DELETED, true)
+                    database.withTransaction {
+                        database.mediaDao().deleteAll(lease.patientId, draftId)
+                        check(database.uploadLocalActionDao().advance(
+                            lease.patientId, draftId, action.stage, UploadLocalActionStage.MEDIA_ROWS_DELETED,
+                        ) == 1)
+                    }
+                    fault.onBoundary(UploadLocalActionStage.MEDIA_ROWS_DELETED, false)
+                }
+                UploadLocalActionStage.MEDIA_ROWS_DELETED -> when (action.action) {
+                    UploadLocalActionType.CLEANUP_SUBMITTED -> {
+                        fault.onBoundary(UploadLocalActionStage.DRAFT_FINALIZED, true)
+                        database.withTransaction {
+                            val draft = database.draftDao().find(lease.patientId, draftId)
+                            if (draft != null) {
+                                check(database.draftDao().updateState(
+                                    lease.patientId, draftId, DraftState.SUBMITTED, draft.durationMs, null,
+                                ) == 1)
+                            }
+                            check(database.uploadLocalActionDao().advance(
+                                lease.patientId, draftId, action.stage, UploadLocalActionStage.DRAFT_FINALIZED,
+                            ) == 1)
+                        }
+                        fault.onBoundary(UploadLocalActionStage.DRAFT_FINALIZED, false)
+                    }
+                    UploadLocalActionType.DELETE_QUEUED -> {
+                        fault.onBoundary(UploadLocalActionStage.PREPARATION_DELETED, true)
+                        database.withTransaction {
+                            database.preparationDraftDao().delete(lease.patientId, draftId)
+                            check(database.uploadLocalActionDao().advance(
+                                lease.patientId, draftId, action.stage, UploadLocalActionStage.PREPARATION_DELETED,
+                            ) == 1)
+                        }
+                        fault.onBoundary(UploadLocalActionStage.PREPARATION_DELETED, false)
+                    }
+                }
+                UploadLocalActionStage.PREPARATION_DELETED -> {
+                    require(action.action == UploadLocalActionType.DELETE_QUEUED)
+                    fault.onBoundary(UploadLocalActionStage.DRAFT_FINALIZED, true)
+                    database.draftDao().delete(lease.patientId, draftId)
+                    fault.onBoundary(UploadLocalActionStage.DRAFT_FINALIZED, false)
+                    return@checked
+                }
+                UploadLocalActionStage.DRAFT_FINALIZED -> {
+                    require(action.action == UploadLocalActionType.CLEANUP_SUBMITTED)
+                    database.uploadLocalActionDao().delete(lease.patientId, draftId)
+                    return@checked
+                }
             }
-            database.mediaDao().updateAllValidation(lease.patientId, draftId, MediaValidationState.INVALID)
-            database.mediaDao().findAll(lease.patientId, draftId).map { it.encryptedRelativePath }
         }
-        fileStore.revokeEncryptedMediaReaders(lease.patientId, paths.toSet())
-        paths.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it) }
+    }
+
+    private suspend fun requestUploadLocalAction(draftId: String, action: UploadLocalActionType) = checked {
         database.withTransaction {
+            val existing = database.uploadLocalActionDao().find(lease.patientId, draftId)
+            if (existing != null) {
+                require(existing.action == action) { "本地收尾操作冲突" }
+                return@withTransaction
+            }
             val job = database.uploadDao().find(lease.patientId, draftId) ?: return@withTransaction
-            require(job.pipelineStage !in setOf(UploadPipelineStage.SUBMITTING, UploadPipelineStage.ANALYZING))
-            database.draftDao().delete(lease.patientId, draftId)
-            database.preparationDraftDao().delete(lease.patientId, draftId)
+            when (action) {
+                UploadLocalActionType.CLEANUP_SUBMITTED -> require(job.pipelineStage == UploadPipelineStage.ANALYZING)
+                UploadLocalActionType.DELETE_QUEUED -> require(
+                    job.pipelineStage !in setOf(UploadPipelineStage.SUBMITTING, UploadPipelineStage.ANALYZING),
+                ) { "任务已经提交，不能删除" }
+            }
+            val media = database.mediaDao().findAll(lease.patientId, draftId)
+            if (action == UploadLocalActionType.CLEANUP_SUBMITTED && media.isEmpty() &&
+                database.draftDao().find(lease.patientId, draftId)?.state == DraftState.SUBMITTED
+            ) return@withTransaction
+            val audio = media.singleOrNull { it.type == MediaType.AUDIO } ?: throw ReviewMediaInvalidException()
+            val video = media.singleOrNull { it.type == MediaType.VIDEO } ?: throw ReviewMediaInvalidException()
+            database.uploadLocalActionDao().insert(
+                UploadLocalActionEntity(
+                    lease.patientId, draftId, action, UploadLocalActionStage.INTENT_WRITTEN,
+                    audio.encryptedRelativePath, video.encryptedRelativePath,
+                ),
+            )
         }
+    }
+
+    private suspend fun advanceLocalAction(
+        draftId: String,
+        from: UploadLocalActionStage,
+        to: UploadLocalActionStage,
+    ) {
+        check(database.uploadLocalActionDao().advance(lease.patientId, draftId, from, to) == 1)
     }
 
     suspend fun checkpointUpload(draftId: String, checkpoint: UploadCheckpoint): Int = checked {
         database.withTransaction {
             val current = database.uploadDao().find(lease.patientId, draftId) ?: error("上传任务不存在")
+            require(database.uploadLocalActionDao().find(lease.patientId, draftId) == null) { "上传任务正在本地收尾" }
             require(allowedTransition(current.overallState, checkpoint.overallState)) { "非法上传状态转换" }
             require(allowedPipelineTransition(current.pipelineStage, checkpoint.pipelineStage)) { "非法上传管线状态转换" }
             require(
@@ -752,6 +877,7 @@ class AccountScopedDraftStorage internal constructor(
                 lastSafeError = checkpoint.lastSafeError,
                 progressPercent = checkpoint.progressPercent,
                 receiptWaitAttempt = checkpoint.receiptWaitAttempt,
+                resumePipelineStage = checkpoint.resumePipelineStage,
             ).also { check(it == 1) { "上传检查点未持久化" } }
         }
     }
@@ -801,7 +927,7 @@ class AccountScopedDraftStorage internal constructor(
         to == from || to in STEP_TRANSITIONS.getValue(from)
 
     private fun allowedPipelineTransition(from: UploadPipelineStage, to: UploadPipelineStage): Boolean =
-        to == from || to in PIPELINE_TRANSITIONS.getValue(from)
+        UploadPipelineTransitionPolicy.allows(from, to)
 
     private companion object {
         fun stableUploadKey(kind: String, draftId: String): String {
@@ -815,38 +941,20 @@ class AccountScopedDraftStorage internal constructor(
                 UploadOverallState.WAITING_NETWORK, UploadOverallState.UPLOADING, UploadOverallState.WAITING_CALLBACK,
                 UploadOverallState.CONFIRMING, UploadOverallState.SUBMITTING, UploadOverallState.CANCELLED,
             ),
-            UploadOverallState.WAITING_NETWORK to setOf(UploadOverallState.UPLOADING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED, UploadOverallState.FAILED),
+            UploadOverallState.WAITING_NETWORK to setOf(
+                UploadOverallState.UPLOADING, UploadOverallState.WAITING_CALLBACK, UploadOverallState.CONFIRMING,
+                UploadOverallState.SUBMITTING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED,
+                UploadOverallState.FAILED,
+            ),
             UploadOverallState.UPLOADING to setOf(UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.PAUSED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
-            UploadOverallState.WAITING_CALLBACK to setOf(UploadOverallState.CONFIRMING, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
-            UploadOverallState.CONFIRMING to setOf(UploadOverallState.UPLOADING, UploadOverallState.READY_TO_SUBMIT, UploadOverallState.SUBMITTING, UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.WAITING_CALLBACK to setOf(UploadOverallState.CONFIRMING, UploadOverallState.WAITING_NETWORK, UploadOverallState.PAUSED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.CONFIRMING to setOf(UploadOverallState.UPLOADING, UploadOverallState.READY_TO_SUBMIT, UploadOverallState.SUBMITTING, UploadOverallState.WAITING_CALLBACK, UploadOverallState.WAITING_NETWORK, UploadOverallState.PAUSED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
             UploadOverallState.READY_TO_SUBMIT to setOf(UploadOverallState.SUBMITTING, UploadOverallState.PAUSED, UploadOverallState.CANCELLED),
-            UploadOverallState.SUBMITTING to setOf(UploadOverallState.ANALYZING, UploadOverallState.WAITING_NETWORK, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
+            UploadOverallState.SUBMITTING to setOf(UploadOverallState.ANALYZING, UploadOverallState.WAITING_NETWORK, UploadOverallState.PAUSED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
             UploadOverallState.ANALYZING to setOf(UploadOverallState.COMPLETED, UploadOverallState.FAILED, UploadOverallState.CANCELLED),
             UploadOverallState.FAILED to setOf(UploadOverallState.PAUSED, UploadOverallState.WAITING_NETWORK, UploadOverallState.CANCELLED),
             UploadOverallState.CANCELLED to emptySet(),
             UploadOverallState.COMPLETED to emptySet(),
-        )
-        val PIPELINE_TRANSITIONS = mapOf(
-            UploadPipelineStage.PAUSED to setOf(
-                UploadPipelineStage.WAITING_NETWORK,
-                UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.UPLOADING_AUDIO,
-                UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.CONFIRMING_AUDIO,
-                UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.UPLOADING_VIDEO,
-                UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.CONFIRMING_VIDEO,
-                UploadPipelineStage.SUBMITTING,
-            ),
-            UploadPipelineStage.WAITING_NETWORK to setOf(UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.REQUESTING_AUDIO_GRANT to setOf(UploadPipelineStage.UPLOADING_AUDIO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.UPLOADING_AUDIO to setOf(UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.WAITING_AUDIO_RECEIPT to setOf(UploadPipelineStage.CONFIRMING_AUDIO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.CONFIRMING_AUDIO to setOf(UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.REQUESTING_VIDEO_GRANT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.REQUESTING_VIDEO_GRANT to setOf(UploadPipelineStage.UPLOADING_VIDEO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.UPLOADING_VIDEO to setOf(UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.WAITING_VIDEO_RECEIPT to setOf(UploadPipelineStage.CONFIRMING_VIDEO, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.CONFIRMING_VIDEO to setOf(UploadPipelineStage.WAITING_VIDEO_RECEIPT, UploadPipelineStage.SUBMITTING, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.SUBMITTING to setOf(UploadPipelineStage.ANALYZING, UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED),
-            UploadPipelineStage.ANALYZING to emptySet(),
-            UploadPipelineStage.FAILED to setOf(UploadPipelineStage.WAITING_NETWORK, UploadPipelineStage.PAUSED),
         )
         val STEP_TRANSITIONS = mapOf(
             UploadStepState.PENDING to setOf(
@@ -915,6 +1023,7 @@ data class UploadCheckpoint(
     val pipelineStage: UploadPipelineStage = UploadPipelineStage.PAUSED,
     val progressPercent: Int = 0,
     val receiptWaitAttempt: Int = 0,
+    val resumePipelineStage: UploadPipelineStage? = null,
 )
 
 data class EncryptedMediaAsset(val relativePath: String, val encryptedSizeBytes: Long)
@@ -953,6 +1062,14 @@ data class AccountScopedUploadBundle(
     val job: UploadJobEntity,
     val media: List<AccountScopedUploadMedia>,
 )
+
+fun interface UploadLocalActionFaultInjector {
+    fun onBoundary(nextStage: UploadLocalActionStage, beforeCheckpoint: Boolean)
+
+    companion object {
+        val NONE = UploadLocalActionFaultInjector { _, _ -> }
+    }
+}
 
 data class DraftSnapshot(
     val draftId: String,

@@ -34,13 +34,18 @@ class UploadCoordinator(
     suspend fun schedule(draftId: String) {
         val storage = storageProvider.current()
         val contract = UploadWorkContract(storage.accountScopeHash, draftId)
+        val durableJob = storage.findUploadJob(draftId) ?: return
+        if (durableJob.pipelineStage == UploadPipelineStage.ANALYZING) {
+            scheduler.enqueue(contract, replace = false)
+            return
+        }
         val store = RoomUploadStore(storage, draftId, nowEpochMillis)
         val current = store.load()
         when (current.stage) {
             UploadStage.PAUSED if current.safeError == RoomUploadStore.USER_PAUSED_MARKER -> return
             UploadStage.PAUSED -> store.resumeFromPause()
             UploadStage.FAILED -> return
-            UploadStage.ANALYZING -> return
+            UploadStage.ANALYZING -> Unit
             else -> Unit
         }
         scheduler.enqueue(contract, replace = false)
@@ -48,9 +53,11 @@ class UploadCoordinator(
 
     suspend fun retry(contract: UploadWorkContract) {
         val storage = requireCurrentStorage(contract)
+        if (storage.findUploadJob(contract.draftId)?.pipelineStage == UploadPipelineStage.ANALYZING) return
         val store = RoomUploadStore(storage, contract.draftId, nowEpochMillis)
         val current = store.load()
-        if (current.stage in setOf(UploadStage.FAILED, UploadStage.ANALYZING, UploadStage.SUBMITTING)) return
+        if (current.stage in setOf(UploadStage.ANALYZING, UploadStage.SUBMITTING)) return
+        if (current.stage == UploadStage.FAILED && !store.resumeRetryableFailure()) return
         if (current.stage == UploadStage.PAUSED) store.resumeFromPause()
         scheduler.enqueue(contract, replace = true)
     }
@@ -59,7 +66,9 @@ class UploadCoordinator(
         val lock = executionLocks.computeIfAbsent(contract.uniqueWorkName) { Mutex() }
         return lock.withLock {
             val storage = requireCurrentStorage(contract)
-            if (storage.findUploadJob(contract.draftId)?.pipelineStage == UploadPipelineStage.ANALYZING) {
+            val durableJob = storage.findUploadJob(contract.draftId) ?: return@withLock UploadRunResult.Paused
+            if (durableJob.pipelineStage == UploadPipelineStage.ANALYZING) {
+                storage.deleteSubmittedUploadMedia(contract.draftId)
                 return@withLock UploadRunResult.Analyzing
             }
             val store = RoomUploadStore(storage, contract.draftId, nowEpochMillis)
@@ -93,6 +102,7 @@ class UploadCoordinator(
 
     override suspend fun pause(contract: UploadWorkContract) {
         val storage = requireCurrentStorage(contract)
+        if (storage.findUploadJob(contract.draftId)?.pipelineStage == UploadPipelineStage.ANALYZING) return
         val store = RoomUploadStore(storage, contract.draftId, nowEpochMillis)
         val current = store.load()
         if (current.stage != UploadStage.ANALYZING && current.stage != UploadStage.PAUSED) {
@@ -108,10 +118,11 @@ class UploadCoordinator(
 
     suspend fun delete(contract: UploadWorkContract) {
         val storage = requireCurrentStorage(contract)
+        storage.requestQueuedUploadDelete(contract.draftId)
         stop(contract)
         scheduler.cancel(contract)
         executionLocks.computeIfAbsent(contract.uniqueWorkName) { Mutex() }.withLock {
-            storage.deleteQueuedUploadDraft(contract.draftId)
+            storage.resumeUploadLocalAction(contract.draftId)
         }
     }
 

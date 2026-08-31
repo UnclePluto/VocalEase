@@ -155,6 +155,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
             }
             uploadRecoveryJob = storage?.let { current ->
                 applicationScope.launch {
+                    current.recoverUploadLocalActions()
                     current.observeUploadJobs().first().forEach { job ->
                         runCatching { uploadCoordinator.schedule(job.draftId) }
                     }

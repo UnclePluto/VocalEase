@@ -95,6 +95,8 @@ class DatabaseConstraintTest {
             "UPDATE upload_jobs SET audio_confirm_state='CONFIRMED' WHERE account_scope='a' AND draft_id='d'",
             "UPDATE upload_jobs SET progress_percent=9 WHERE account_scope='a' AND draft_id='d'",
             "UPDATE upload_jobs SET attempt_count=0 WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET resume_pipeline_stage='ANALYZING' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET pipeline_stage='WAITING_NETWORK',overall_state='WAITING_NETWORK',resume_pipeline_stage='PAUSED' WHERE account_scope='a' AND draft_id='d'",
             "UPDATE media SET encrypted_relative_path='media/v1/${"b".repeat(32)}.vef' WHERE account_scope='a' AND draft_id='d' AND type='AUDIO'",
         ).forEach { sql -> assertThrows(SQLiteConstraintException::class.java) { db.execSQL(sql) } }
         Unit
@@ -129,6 +131,24 @@ class DatabaseConstraintTest {
 
         database.uploadDao().insert(UploadJobEntity.newPending("b", "d1", "grant:d1:audio", "grant:d1:video", "submit:d1"))
         assertEquals("grant:d1:audio", database.uploadDao().find("b", "d1")?.audioGrantKey)
+    }
+
+    @Test
+    fun kotlinPipelineEdgeTableExactlyMatchesRawSqlTrigger() {
+        val sql = ApplicationProvider.getApplicationContext<Context>().assets
+            .open("database/v1_constraints.sql")
+            .bufferedReader()
+            .use { it.readText() }
+        val triggerEdges = Regex(
+            "OLD\\.pipeline_stage = '([^']+)' AND NEW\\.pipeline_stage IN \\(([^)]*)\\)",
+        ).findAll(sql).associate { match ->
+            UploadPipelineStage.valueOf(match.groupValues[1]) to
+                Regex("'([^']+)'").findAll(match.groupValues[2]).map {
+                    UploadPipelineStage.valueOf(it.groupValues[1])
+                }.toSet()
+        }
+
+        assertEquals(UploadPipelineTransitionPolicy.edges.filterValues { it.isNotEmpty() }, triggerEdges)
     }
 
     private fun cloneUploadJobRaw(

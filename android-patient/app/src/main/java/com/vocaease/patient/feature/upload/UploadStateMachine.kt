@@ -1,5 +1,7 @@
 package com.vocaease.patient.feature.upload
 
+import com.vocaease.patient.core.database.UploadPipelineStage
+import com.vocaease.patient.core.database.UploadPipelineTransitionPolicy
 import java.io.Closeable
 import java.io.File
 
@@ -74,6 +76,9 @@ data class UploadRecord(
     val receiptWaitAttempt: Int = 0,
     val progressPercent: Int = 0,
     val safeError: String? = null,
+    val attemptCount: Int = 0,
+    val nextRetryAtEpochMillis: Long? = null,
+    val resumeStage: UploadStage? = null,
 ) {
     init {
         require(accountScopeHash.matches(Regex("[0-9a-f]{64}")) || accountScopeHash == "scope-hash")
@@ -84,6 +89,8 @@ data class UploadRecord(
         require(receiptWaitAttempt in 0..4)
         require(progressPercent in 0..100)
         require(safeError == null || safeError.length <= 256)
+        require(attemptCount >= 0)
+        require(nextRetryAtEpochMillis == null || nextRetryAtEpochMillis >= 0)
     }
 }
 
@@ -130,7 +137,10 @@ data class UploadSessionMedia(
     val kind: UploadMediaKind,
     val mimeType: String,
     val sizeBytes: Long,
+    val status: RemoteMediaState,
 )
+
+enum class RemoteMediaState { UPLOADING, READY, UNKNOWN }
 
 interface UploadRemote {
     suspend fun grant(request: UploadGrantRequest): UploadGrant
@@ -176,24 +186,12 @@ internal class UploadRemoteRetryableException : java.io.IOException("上传服�
 internal class UploadRemoteTerminalException : IllegalStateException("上传服务拒绝了当前任务")
 
 internal object UploadTransitions {
-    private val allowed = mapOf(
-        UploadStage.PAUSED to setOf(UploadStage.WAITING_NETWORK),
-        UploadStage.WAITING_NETWORK to setOf(UploadStage.REQUESTING_AUDIO_GRANT, UploadStage.PAUSED),
-        UploadStage.REQUESTING_AUDIO_GRANT to setOf(UploadStage.UPLOADING_AUDIO, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.UPLOADING_AUDIO to setOf(UploadStage.WAITING_AUDIO_RECEIPT, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.WAITING_AUDIO_RECEIPT to setOf(UploadStage.CONFIRMING_AUDIO, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.CONFIRMING_AUDIO to setOf(UploadStage.WAITING_AUDIO_RECEIPT, UploadStage.REQUESTING_VIDEO_GRANT, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.REQUESTING_VIDEO_GRANT to setOf(UploadStage.UPLOADING_VIDEO, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.UPLOADING_VIDEO to setOf(UploadStage.WAITING_VIDEO_RECEIPT, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.WAITING_VIDEO_RECEIPT to setOf(UploadStage.CONFIRMING_VIDEO, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.CONFIRMING_VIDEO to setOf(UploadStage.WAITING_VIDEO_RECEIPT, UploadStage.SUBMITTING, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.SUBMITTING to setOf(UploadStage.ANALYZING, UploadStage.FAILED, UploadStage.PAUSED),
-        UploadStage.FAILED to setOf(UploadStage.WAITING_NETWORK, UploadStage.PAUSED),
-        UploadStage.ANALYZING to emptySet(),
-    )
-
     fun requireAllowed(from: UploadStage, to: UploadStage) {
-        if (from == to) return
-        require(to in allowed.getValue(from)) { "非法上传状态转换：$from -> $to" }
+        require(
+            UploadPipelineTransitionPolicy.allows(
+                UploadPipelineStage.valueOf(from.name),
+                UploadPipelineStage.valueOf(to.name),
+            ),
+        ) { "非法上传状态转换：$from -> $to" }
     }
 }

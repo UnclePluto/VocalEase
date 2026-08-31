@@ -7,11 +7,49 @@ import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import android.database.sqlite.SQLiteConstraintException
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class UploadRecoveryTest {
+    @Test
+    fun localActionIntentAndEveryCleanupCheckpointSurviveReopenAndRejectSkippedStage() = runBlocking {
+        var database = VocaEaseDatabase.create(context, databaseName, allowMainThreadQueries = true)
+        database.draftDao().insert(draft())
+        val intent = UploadLocalActionEntity(
+            accountScope = "a",
+            draftId = "d",
+            action = UploadLocalActionType.CLEANUP_SUBMITTED,
+            stage = UploadLocalActionStage.INTENT_WRITTEN,
+            audioEncryptedRelativePath = "media/v1/${"a".repeat(32)}.vef",
+            videoEncryptedRelativePath = "media/v1/${"b".repeat(32)}.vef",
+        )
+        database.uploadLocalActionDao().insert(intent)
+        assertThrows(SQLiteConstraintException::class.java) {
+            database.openHelper.writableDatabase.execSQL(
+                "UPDATE upload_local_actions SET stage='VIDEO_DELETED' WHERE account_scope='a' AND draft_id='d'",
+            )
+        }
+        val stages = listOf(
+            UploadLocalActionStage.MEDIA_INVALIDATED,
+            UploadLocalActionStage.AUDIO_DELETED,
+            UploadLocalActionStage.VIDEO_DELETED,
+            UploadLocalActionStage.MEDIA_ROWS_DELETED,
+            UploadLocalActionStage.DRAFT_FINALIZED,
+        )
+        var previous = UploadLocalActionStage.INTENT_WRITTEN
+        stages.forEach { stage ->
+            assertEquals(1, database.uploadLocalActionDao().advance("a", "d", previous, stage))
+            database.close()
+            database = VocaEaseDatabase.create(context, databaseName, allowMainThreadQueries = true)
+            assertEquals(stage, database.uploadLocalActionDao().find("a", "d")?.stage)
+            previous = stage
+        }
+        database.close()
+    }
+
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val databaseName = "upload-recovery-${System.nanoTime()}.db"
 
@@ -104,6 +142,7 @@ class UploadRecoveryTest {
         audioConfirmedAt = job.audioConfirmedAt, videoConfirmedAt = job.videoConfirmedAt,
         attemptCount = job.attemptCount, nextRetryAt = job.nextRetryAt, lastSafeError = job.lastSafeError,
         progressPercent = job.progressPercent, receiptWaitAttempt = job.receiptWaitAttempt,
+        resumePipelineStage = job.resumePipelineStage,
     )
 
     private fun draft() = DraftEntity(

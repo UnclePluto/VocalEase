@@ -36,7 +36,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(4, reopened.openHelper.readableDatabase.version)
+            assertEquals(5, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
@@ -84,6 +84,38 @@ class DatabaseSchemaTest {
             assertEquals(UploadPipelineStage.PAUSED, job?.pipelineStage)
             assertEquals(0, job?.progressPercent)
             assertEquals(0, job?.receiptWaitAttempt)
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun versionFourRetryCountersAndDeadlineSurviveMigrationToVersionFive() {
+        migrationHelper.createDatabase(DATABASE_NAME, 4).use { sqlite ->
+            insertDraft(sqlite, "account-a", "retry-draft")
+            insertPendingUpload(
+                sqlite,
+                "account-a",
+                "retry-draft",
+                "grant:retry-draft:audio",
+                "grant:retry-draft:video",
+                "submit:retry-draft",
+            )
+            sqlite.execSQL(
+                "UPDATE upload_jobs SET attempt_count=7,next_retry_at=12345,last_safe_error='等待重试' " +
+                    "WHERE account_scope='account-a' AND draft_id='retry-draft'",
+            )
+        }
+
+        val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
+        try {
+            val job = kotlinx.coroutines.runBlocking { reopened.uploadDao().find("account-a", "retry-draft") }
+            assertEquals(7, job?.attemptCount)
+            assertEquals(12_345L, job?.nextRetryAt)
+            assertEquals("等待重试", job?.lastSafeError)
+            assertEquals(null, job?.resumePipelineStage)
+            assertEquals(5, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -195,15 +227,15 @@ class DatabaseSchemaTest {
         database.execSQL(
             """
             INSERT INTO upload_jobs(
-              account_scope,draft_id,overall_state,audio_grant_state,video_grant_state,
+              account_scope,draft_id,overall_state,pipeline_stage,audio_grant_state,video_grant_state,
               audio_upload_state,video_upload_state,audio_receipt_state,video_receipt_state,
               audio_confirm_state,video_confirm_state,submit_state,audio_grant_key,video_grant_key,
               submit_key,audio_asset_key,video_asset_key,audio_object_key,video_object_key,
               audio_receipt,video_receipt,audio_confirmed_at,video_confirmed_at,attempt_count,
-              next_retry_at,last_safe_error
+              next_retry_at,last_safe_error,progress_percent,receipt_wait_attempt
             ) VALUES(
-              ?,?,'PAUSED','PENDING','PENDING','PENDING','PENDING','PENDING','PENDING',
-              'PENDING','PENDING','PENDING',?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL
+              ?,?,'PAUSED','PAUSED','PENDING','PENDING','PENDING','PENDING','PENDING','PENDING',
+              'PENDING','PENDING','PENDING',?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,0,0
             )
             """.trimIndent(),
             arrayOf(accountScope, draftId, audioGrantKey, videoGrantKey, submitKey),

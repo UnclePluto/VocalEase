@@ -47,6 +47,18 @@ class DatabaseConverters {
     fun toUploadPipelineStage(value: String): UploadPipelineStage = enumValueOrReject(value)
 
     @TypeConverter
+    fun fromUploadLocalActionType(value: UploadLocalActionType): String = value.name
+
+    @TypeConverter
+    fun toUploadLocalActionType(value: String): UploadLocalActionType = enumValueOrReject(value)
+
+    @TypeConverter
+    fun fromUploadLocalActionStage(value: UploadLocalActionStage): String = value.name
+
+    @TypeConverter
+    fun toUploadLocalActionStage(value: String): UploadLocalActionStage = enumValueOrReject(value)
+
+    @TypeConverter
     fun fromPreparationDraftStatus(value: PreparationDraftStatus): String = value.name
 
     @TypeConverter
@@ -58,8 +70,11 @@ class DatabaseConverters {
 }
 
 @Database(
-    entities = [DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class],
-    version = 4,
+    entities = [
+        DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class,
+        UploadLocalActionEntity::class,
+    ],
+    version = 5,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -68,6 +83,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
     abstract fun mediaDao(): MediaDao
     abstract fun uploadDao(): UploadDao
     abstract fun preparationDraftDao(): PreparationDraftDao
+    abstract fun uploadLocalActionDao(): UploadLocalActionDao
 
     companion object {
         fun create(
@@ -79,6 +95,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_1_2)
                 .addMigrations(MIGRATION_2_3)
                 .addMigrations(MIGRATION_3_4)
+                .addMigrations(MIGRATION_4_5)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -162,6 +179,30 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 db.execSQL("UPDATE upload_jobs SET audio_grant_key='grant:' || draft_id || ':audio', video_grant_key='grant:' || draft_id || ':video', submit_key='submit:' || draft_id")
             }
         }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `upload_jobs` ADD COLUMN `resume_pipeline_stage` TEXT")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `upload_local_actions` (
+                      `account_scope` TEXT NOT NULL,
+                      `draft_id` TEXT NOT NULL,
+                      `action` TEXT NOT NULL,
+                      `stage` TEXT NOT NULL,
+                      `audio_encrypted_relative_path` TEXT NOT NULL,
+                      `video_encrypted_relative_path` TEXT NOT NULL,
+                      PRIMARY KEY(`account_scope`, `draft_id`),
+                      FOREIGN KEY(`account_scope`, `draft_id`) REFERENCES `drafts`(`account_scope`, `draft_id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_upload_local_actions_account_scope_draft_id` " +
+                        "ON `upload_local_actions` (`account_scope`, `draft_id`)",
+                )
+            }
+        }
     }
 }
 
@@ -173,6 +214,7 @@ internal object DatabaseConstraintInstaller {
         "drafts_guard_insert_v1", "drafts_guard_update_v1",
         "media_guard_insert_v1", "media_guard_update_v1",
         "upload_jobs_guard_insert_v1", "upload_jobs_guard_update_v1",
+        "upload_local_actions_guard_insert_v1", "upload_local_actions_guard_update_v1",
         "preparation_drafts_guard_insert_v2", "preparation_drafts_guard_update_v2",
     )
 

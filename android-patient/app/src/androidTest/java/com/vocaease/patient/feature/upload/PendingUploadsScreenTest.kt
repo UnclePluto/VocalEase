@@ -46,7 +46,7 @@ class PendingUploadsScreenTest {
         }
 
         composeRule.onNodeWithText("待上传记录").assertIsDisplayed()
-        composeRule.onNodeWithText("建议在本地保存期限前完成上传").assertIsDisplayed()
+        composeRule.onNodeWithText("建议在录制后7天内完成上传；上传失败任务会保留，可继续重试").assertIsDisplayed()
         composeRule.onNodeWithText("正在上传 37%").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("等待服务器确认").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("分析中").performScrollTo().assertIsDisplayed()

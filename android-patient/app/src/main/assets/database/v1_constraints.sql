@@ -63,6 +63,8 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_insert_v1 BEFORE INSERT ON upload
     OR NEW.submit_key != 'submit:' || NEW.draft_id
     OR NEW.overall_state NOT IN ('PAUSED','WAITING_NETWORK','UPLOADING','WAITING_CALLBACK','CONFIRMING','READY_TO_SUBMIT','SUBMITTING','ANALYZING','FAILED','CANCELLED','COMPLETED')
     OR NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING','FAILED')
+    OR (NEW.resume_pipeline_stage IS NOT NULL AND NEW.resume_pipeline_stage NOT IN ('WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING'))
+    OR (NEW.resume_pipeline_stage IS NOT NULL AND NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK'))
     OR NOT (
       (NEW.pipeline_stage = 'PAUSED' AND NEW.overall_state IN ('PAUSED','CANCELLED'))
       OR (NEW.pipeline_stage = 'WAITING_NETWORK' AND NEW.overall_state = 'WAITING_NETWORK')
@@ -137,6 +139,8 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     OR NEW.submit_key != 'submit:' || NEW.draft_id
     OR NEW.overall_state NOT IN ('PAUSED','WAITING_NETWORK','UPLOADING','WAITING_CALLBACK','CONFIRMING','READY_TO_SUBMIT','SUBMITTING','ANALYZING','FAILED','CANCELLED','COMPLETED')
     OR NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING','FAILED')
+    OR (NEW.resume_pipeline_stage IS NOT NULL AND NEW.resume_pipeline_stage NOT IN ('WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING'))
+    OR (NEW.resume_pipeline_stage IS NOT NULL AND NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK'))
     OR NOT (
       (NEW.pipeline_stage = 'PAUSED' AND NEW.overall_state IN ('PAUSED','CANCELLED'))
       OR (NEW.pipeline_stage = 'WAITING_NETWORK' AND NEW.overall_state = 'WAITING_NETWORK')
@@ -150,16 +154,16 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
     OR NOT (
       NEW.pipeline_stage = OLD.pipeline_stage
       OR (OLD.pipeline_stage = 'PAUSED' AND NEW.pipeline_stage IN ('WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING'))
-      OR (OLD.pipeline_stage = 'WAITING_NETWORK' AND NEW.pipeline_stage IN ('REQUESTING_AUDIO_GRANT','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'REQUESTING_AUDIO_GRANT' AND NEW.pipeline_stage IN ('UPLOADING_AUDIO','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'UPLOADING_AUDIO' AND NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'WAITING_AUDIO_RECEIPT' AND NEW.pipeline_stage IN ('CONFIRMING_AUDIO','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'CONFIRMING_AUDIO' AND NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','REQUESTING_VIDEO_GRANT','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'REQUESTING_VIDEO_GRANT' AND NEW.pipeline_stage IN ('UPLOADING_VIDEO','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'UPLOADING_VIDEO' AND NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'WAITING_VIDEO_RECEIPT' AND NEW.pipeline_stage IN ('CONFIRMING_VIDEO','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'CONFIRMING_VIDEO' AND NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','SUBMITTING','PAUSED','FAILED'))
-      OR (OLD.pipeline_stage = 'SUBMITTING' AND NEW.pipeline_stage IN ('ANALYZING','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'WAITING_NETWORK' AND NEW.pipeline_stage IN ('REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'REQUESTING_AUDIO_GRANT' AND NEW.pipeline_stage IN ('UPLOADING_AUDIO','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'UPLOADING_AUDIO' AND NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'WAITING_AUDIO_RECEIPT' AND NEW.pipeline_stage IN ('CONFIRMING_AUDIO','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'CONFIRMING_AUDIO' AND NEW.pipeline_stage IN ('WAITING_AUDIO_RECEIPT','REQUESTING_VIDEO_GRANT','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'REQUESTING_VIDEO_GRANT' AND NEW.pipeline_stage IN ('UPLOADING_VIDEO','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'UPLOADING_VIDEO' AND NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'WAITING_VIDEO_RECEIPT' AND NEW.pipeline_stage IN ('CONFIRMING_VIDEO','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'CONFIRMING_VIDEO' AND NEW.pipeline_stage IN ('WAITING_VIDEO_RECEIPT','SUBMITTING','WAITING_NETWORK','PAUSED','FAILED'))
+      OR (OLD.pipeline_stage = 'SUBMITTING' AND NEW.pipeline_stage IN ('ANALYZING','WAITING_NETWORK','PAUSED','FAILED'))
       OR (OLD.pipeline_stage = 'FAILED' AND NEW.pipeline_stage IN ('WAITING_NETWORK','PAUSED'))
     )
     OR (NEW.audio_grant_state != OLD.audio_grant_state AND instr(',PENDING>REQUESTING_GRANT,REQUESTING_GRANT>GRANT_READY,', ',' || OLD.audio_grant_state || '>' || NEW.audio_grant_state || ',') = 0 AND NEW.audio_grant_state NOT IN ('RETRYABLE_FAILURE','TERMINAL_FAILURE'))
@@ -222,6 +226,34 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload
           OR existing.submit_key IN (NEW.audio_grant_key,NEW.video_grant_key,NEW.submit_key))
     )
   THEN RAISE(ABORT, 'upload constraint') END;
+END;
+-- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS upload_local_actions_guard_insert_v1 BEFORE INSERT ON upload_local_actions BEGIN
+  SELECT CASE WHEN trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = ''
+    OR NEW.action NOT IN ('CLEANUP_SUBMITTED','DELETE_QUEUED')
+    OR NEW.stage != 'INTENT_WRITTEN'
+    OR NEW.audio_encrypted_relative_path NOT GLOB 'media/v1/*.vef'
+    OR NEW.video_encrypted_relative_path NOT GLOB 'media/v1/*.vef'
+    OR length(NEW.audio_encrypted_relative_path) != 45 OR length(NEW.video_encrypted_relative_path) != 45
+    OR substr(NEW.audio_encrypted_relative_path,10,32) GLOB '*[^0-9a-f]*'
+    OR substr(NEW.video_encrypted_relative_path,10,32) GLOB '*[^0-9a-f]*'
+    OR NEW.audio_encrypted_relative_path = NEW.video_encrypted_relative_path
+  THEN RAISE(ABORT, 'upload local action constraint') END;
+END;
+-- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS upload_local_actions_guard_update_v1 BEFORE UPDATE ON upload_local_actions BEGIN
+  SELECT CASE WHEN NEW.account_scope != OLD.account_scope OR NEW.draft_id != OLD.draft_id
+    OR NEW.action != OLD.action
+    OR NEW.audio_encrypted_relative_path != OLD.audio_encrypted_relative_path
+    OR NEW.video_encrypted_relative_path != OLD.video_encrypted_relative_path
+    OR NOT (
+      (OLD.stage='INTENT_WRITTEN' AND NEW.stage='MEDIA_INVALIDATED')
+      OR (OLD.stage='MEDIA_INVALIDATED' AND NEW.stage='AUDIO_DELETED')
+      OR (OLD.stage='AUDIO_DELETED' AND NEW.stage='VIDEO_DELETED')
+      OR (OLD.stage='VIDEO_DELETED' AND NEW.stage='MEDIA_ROWS_DELETED')
+      OR (OLD.stage='MEDIA_ROWS_DELETED' AND NEW.stage IN ('PREPARATION_DELETED','DRAFT_FINALIZED'))
+    )
+  THEN RAISE(ABORT, 'upload local action transition') END;
 END;
 -- VOCAEASE-STATEMENT
 CREATE TRIGGER IF NOT EXISTS preparation_drafts_guard_insert_v2 BEFORE INSERT ON preparation_drafts BEGIN

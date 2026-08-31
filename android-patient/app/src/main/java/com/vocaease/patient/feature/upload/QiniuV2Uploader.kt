@@ -11,15 +11,29 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.attribute.PosixFilePermission
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
+fun interface UploadHostAllowlist {
+    fun allows(host: String): Boolean
+}
+
+object OfficialQiniuUploadHostAllowlist : UploadHostAllowlist {
+    private val OFFICIAL = Regex("(?:upload|up)(?:-[a-z0-9-]+)?\\.qiniup\\.com")
+    override fun allows(host: String): Boolean = OFFICIAL.matches(host)
+}
+
 object QiniuV2Configuration {
-    fun create(recorderDirectory: File, uploadUrl: String): Configuration {
+    fun create(
+        recorderDirectory: File,
+        uploadUrl: String,
+        allowlist: UploadHostAllowlist = OfficialQiniuUploadHostAllowlist,
+    ): Configuration {
         require(recorderDirectory.isDirectory && !Files.isSymbolicLink(recorderDirectory.toPath()))
-        val host = validatedHost(uploadUrl)
+        val host = validatedHost(uploadUrl, allowlist)
         return Configuration.Builder()
             .useHttps(true)
             .accelerateUploading(false)
@@ -29,14 +43,18 @@ object QiniuV2Configuration {
             .buildV2()
     }
 
-    fun validatedHost(value: String): String {
+    fun validatedHost(
+        value: String,
+        allowlist: UploadHostAllowlist = OfficialQiniuUploadHostAllowlist,
+    ): String {
         val uri = runCatching { URI(value) }.getOrElse { throw IllegalArgumentException("上传地址无效") }
+        val host = uri.host?.lowercase()
         require(
             uri.scheme == "https" && uri.rawUserInfo == null && uri.rawFragment == null && uri.rawQuery == null &&
                 uri.path in setOf("", "/") && uri.port in setOf(-1, 443) &&
-                !uri.host.isNullOrBlank() && HOST.matches(uri.host) && !IP_LITERAL.matches(uri.host),
+                !host.isNullOrBlank() && HOST.matches(host) && !IP_LITERAL.matches(host) && allowlist.allows(host),
         ) { "上传地址无效" }
-        return "https://${uri.host.lowercase()}"
+        return "https://$host"
     }
 
     private val HOST = Regex("(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}")
@@ -62,50 +80,147 @@ object QiniuRecorderDirectory {
         setOwnerOnly(directory, directory = true)
         return directory
     }
+
+    fun forMedia(jobDirectory: File, kind: UploadMediaKind, sourceId: String): File {
+        require(jobDirectory.isDirectory && !Files.isSymbolicLink(jobDirectory.toPath()))
+        require(sourceId.isNotBlank())
+        val jobCanonical = jobDirectory.canonicalFile
+        val generation = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("${kind.name}\u0000$sourceId".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        val directory = File(jobCanonical, "${kind.name.lowercase()}-$generation").canonicalFile
+        require(directory.parentFile == jobCanonical)
+        require(!Files.exists(directory.toPath(), LinkOption.NOFOLLOW_LINKS) || !Files.isSymbolicLink(directory.toPath()))
+        directory.mkdirs()
+        require(directory.isDirectory)
+        setOwnerOnly(directory, directory = true)
+        return directory
+    }
 }
 
-class QiniuV2Uploader(
+internal sealed interface QiniuSdkResult {
+    data class Completed(val key: String?, val responseKey: String?) : QiniuSdkResult
+    data object Cancelled : QiniuSdkResult
+    data object Failed : QiniuSdkResult
+}
+
+internal fun interface QiniuSdkEngine {
+    fun put(
+        request: QiniuUploadRequest,
+        recorderDirectory: File,
+        validatedUploadHost: String,
+        onProgress: (Int) -> Unit,
+        shouldCancel: () -> Boolean,
+        callback: (QiniuSdkResult) -> Unit,
+    )
+}
+
+private object RealQiniuSdkEngine : QiniuSdkEngine {
+    override fun put(
+        request: QiniuUploadRequest,
+        recorderDirectory: File,
+        validatedUploadHost: String,
+        onProgress: (Int) -> Unit,
+        shouldCancel: () -> Boolean,
+        callback: (QiniuSdkResult) -> Unit,
+    ) {
+        val configuration = QiniuV2Configuration.create(
+            recorderDirectory,
+            validatedUploadHost,
+            UploadHostAllowlist { true },
+        )
+        val options = UploadOptions(
+            emptyMap(),
+            request.mimeType,
+            false,
+            { _, percent -> onProgress((percent * 100).toInt().coerceIn(0, 100)) },
+            shouldCancel,
+        )
+        UploadManager(configuration).put(
+            request.file,
+            request.grant.binding.objectKey,
+            request.grant.uploadToken,
+            { key, info, response ->
+                callback(
+                    when {
+                        info.isCancelled -> QiniuSdkResult.Cancelled
+                        !info.isOK -> QiniuSdkResult.Failed
+                        else -> QiniuSdkResult.Completed(
+                            key,
+                            response?.takeIf { it.has("key") }?.optString("key"),
+                        )
+                    },
+                )
+            },
+            options,
+        )
+    }
+}
+
+class QiniuV2Uploader internal constructor(
     private val recorderDirectory: File,
+    private val allowlist: UploadHostAllowlist,
+    private val sdkEngine: QiniuSdkEngine,
 ) : QiniuUploader {
-    private val cancelled = AtomicBoolean(false)
+    constructor(
+        recorderDirectory: File,
+        allowlist: UploadHostAllowlist = OfficialQiniuUploadHostAllowlist,
+    ) : this(recorderDirectory, allowlist, RealQiniuSdkEngine)
+
+    private val activeCancel = AtomicReference<(() -> Unit)?>(null)
 
     override suspend fun upload(request: QiniuUploadRequest, onProgress: (Int) -> Unit): QiniuUploadResult {
-        cancelled.set(false)
         require(request.file.isFile && !Files.isSymbolicLink(request.file.toPath()))
         require(request.file.length() == request.grant.binding.sizeBytes)
         require(request.mimeType == request.grant.binding.mimeType)
-        val manager = UploadManager(QiniuV2Configuration.create(recorderDirectory, request.grant.uploadUrl))
+        val sourceId = "${request.file.name}_${request.file.lastModified()}"
+        val mediaRecorderDirectory = QiniuRecorderDirectory.forMedia(recorderDirectory, request.kind, sourceId)
+        val validatedUploadHost = QiniuV2Configuration.validatedHost(request.grant.uploadUrl, allowlist)
         return suspendCancellableCoroutine { continuation ->
-            continuation.invokeOnCancellation { cancelled.set(true) }
-            val options = UploadOptions(
-                emptyMap(),
-                request.mimeType,
-                false,
-                { _, percent -> onProgress((percent * 100).toInt().coerceIn(0, 100)) },
-                { cancelled.get() || !continuation.isActive },
-            )
-            manager.put(
-                request.file,
-                request.grant.binding.objectKey,
-                request.grant.uploadToken,
-                { key, info, response ->
-                    if (!continuation.isActive) return@put
-                    when {
-                        info.isCancelled || cancelled.get() -> continuation.resume(QiniuUploadResult.Cancelled)
-                        !info.isOK -> continuation.resumeWithException(QiniuUploadException())
-                        key != request.grant.binding.objectKey -> continuation.resumeWithException(QiniuUploadException())
-                        response != null && response.has("key") && response.optString("key") != request.grant.binding.objectKey ->
+            val cancelled = AtomicBoolean(false)
+            val completed = AtomicBoolean(false)
+            lateinit var cancelAction: () -> Unit
+            fun complete(result: QiniuSdkResult) {
+                if (!completed.compareAndSet(false, true)) return
+                activeCancel.compareAndSet(cancelAction, null)
+                if (!continuation.isActive) return
+                when (result) {
+                    QiniuSdkResult.Cancelled -> continuation.resume(QiniuUploadResult.Cancelled)
+                    QiniuSdkResult.Failed -> continuation.resumeWithException(QiniuUploadException())
+                    is QiniuSdkResult.Completed -> {
+                        val expected = request.grant.binding.objectKey
+                        if (result.key != expected || result.responseKey?.let { it != expected } == true) {
                             continuation.resumeWithException(QiniuUploadException())
-                        else -> continuation.resume(QiniuUploadResult.Completed(request.grant.binding.objectKey))
+                        } else {
+                            continuation.resume(QiniuUploadResult.Completed(expected))
+                        }
                     }
+                }
+            }
+            cancelAction = {
+                cancelled.set(true)
+                complete(QiniuSdkResult.Cancelled)
+            }
+            check(activeCancel.compareAndSet(null, cancelAction)) { "同一上传器不能并发执行" }
+            continuation.invokeOnCancellation {
+                cancelled.set(true)
+                activeCancel.compareAndSet(cancelAction, null)
+            }
+            sdkEngine.put(
+                request,
+                mediaRecorderDirectory,
+                validatedUploadHost,
+                { progress ->
+                    if (!cancelled.get() && !completed.get() && continuation.isActive) onProgress(progress)
                 },
-                options,
+                { cancelled.get() || completed.get() || !continuation.isActive },
+                ::complete,
             )
         }
     }
 
     override fun cancel() {
-        cancelled.set(true)
+        activeCancel.getAndSet(null)?.invoke()
     }
 }
 

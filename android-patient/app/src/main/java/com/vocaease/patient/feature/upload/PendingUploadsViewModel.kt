@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.vocaease.patient.core.database.AccountScopedDraftStorage
 import com.vocaease.patient.core.database.UploadJobEntity
 import com.vocaease.patient.core.database.UploadPipelineStage
+import com.vocaease.patient.core.database.UploadPipelineTransitionPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -66,10 +67,10 @@ class PendingUploadsViewModel(
     }
 }
 
-private fun UploadJobEntity.toItem(title: String): PendingUploadItem {
+internal fun UploadJobEntity.toItem(title: String): PendingUploadItem {
     val status = when (pipelineStage) {
         UploadPipelineStage.PAUSED -> "已暂停"
-        UploadPipelineStage.WAITING_NETWORK -> "等待网络"
+        UploadPipelineStage.WAITING_NETWORK -> lastSafeError ?: "等待网络"
         UploadPipelineStage.REQUESTING_AUDIO_GRANT, UploadPipelineStage.REQUESTING_VIDEO_GRANT -> "正在准备上传"
         UploadPipelineStage.UPLOADING_AUDIO, UploadPipelineStage.UPLOADING_VIDEO -> "正在上传 $progressPercent%"
         UploadPipelineStage.WAITING_AUDIO_RECEIPT, UploadPipelineStage.WAITING_VIDEO_RECEIPT -> "等待服务器确认"
@@ -84,12 +85,11 @@ private fun UploadJobEntity.toItem(title: String): PendingUploadItem {
         songTitle = title,
         statusText = status,
         progressPercent = progressPercent,
-        canPause = pipelineStage !in setOf(UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED, UploadPipelineStage.ANALYZING),
+        canPause = pipelineStage != UploadPipelineStage.FAILED &&
+            UploadPipelineTransitionPolicy.allows(pipelineStage, UploadPipelineStage.PAUSED),
         canResume = pipelineStage == UploadPipelineStage.PAUSED,
         canDelete = beforeSubmit,
-        canRetry = pipelineStage !in setOf(
-            UploadPipelineStage.PAUSED, UploadPipelineStage.FAILED,
-            UploadPipelineStage.SUBMITTING, UploadPipelineStage.ANALYZING,
-        ),
+        canRetry = pipelineStage == UploadPipelineStage.WAITING_NETWORK ||
+            (pipelineStage == UploadPipelineStage.FAILED && nextRetryAt != null),
     )
 }

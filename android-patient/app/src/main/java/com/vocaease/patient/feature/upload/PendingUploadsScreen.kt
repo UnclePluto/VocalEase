@@ -87,7 +87,7 @@ fun PendingUploadsScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    "建议在本地保存期限前完成上传",
+                    "建议在录制后7天内完成上传；上传失败任务会保留，可继续重试",
                     modifier = Modifier.padding(16.dp),
                     color = TextSecondary,
                     fontSize = 13.sp,
