@@ -207,6 +207,36 @@ class AnalysisSyncTest {
     }
 
     @Test
+    fun `低floor可安全加入同scope已存在的高floor flight`() = runBlocking {
+        val highFloorGate = CompletableDeferred<AnalysisDetail>()
+        val unexpectedLowFloorGate = CompletableDeferred<AnalysisDetail>()
+        val highFloorEntered = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val synchronizer = AccountScopedSessionSynchronizer(
+            source = { _, sessionId ->
+                when (calls.incrementAndGet()) {
+                    1 -> {
+                        highFloorEntered.complete(Unit)
+                        highFloorGate.await().copy(sessionId = sessionId)
+                    }
+                    else -> unexpectedLowFloorGate.await().copy(sessionId = sessionId)
+                }
+            },
+            identity = { VersionedSessionIdentity(it.sessionId, it.generation, it.isTerminal()) },
+        )
+
+        val highFloor = async { synchronizer.fetch("a".repeat(64), "b".repeat(64), "s1", 2) }
+        highFloorEntered.await()
+        val lowFloor = async { synchronizer.fetch("a".repeat(64), "b".repeat(64), "s1", 0) }
+        yield()
+
+        assertEquals(1, calls.get())
+        highFloorGate.complete(detail(AnalysisStatus.PROCESSING, 2))
+        assertEquals(2, highFloor.await().generation)
+        assertEquals(2, lowFloor.await().generation)
+    }
+
+    @Test
     fun `前台每3秒查询且离页真实取消并在terminal停止`() = runBlocking {
         val delays = mutableListOf<Long>()
         val remote = QueueAnalysisRemote(

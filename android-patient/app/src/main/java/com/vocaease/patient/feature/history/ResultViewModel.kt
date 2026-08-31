@@ -96,6 +96,7 @@ class ResultViewModel(
             }
             if (operation != operationGeneration || fetched.id.toString() != sessionId) return
             val mapped = ResultMapper.map(fetched)
+            minimumGenerationFloor = maxOf(minimumGenerationFloor, mapped.analysisGeneration)
             val published = mutableState.value.content
             if (published == null || mapped.analysisGeneration >= published.analysisGeneration) {
                 mutableState.value = ResultScreenState(content = mapped)

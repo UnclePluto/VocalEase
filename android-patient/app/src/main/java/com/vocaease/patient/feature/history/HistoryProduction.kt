@@ -118,13 +118,17 @@ class VocaEaseResultSessionRemote(
     }
 }
 
-class ProductionAnalysisSessionSynchronizer(
-    private val api: PatientApi,
+class ProductionAnalysisSessionSynchronizer internal constructor(
+    private val sessionSource: suspend (accountScopeHash: String, sessionId: String) -> SingingSession,
 ) {
-    private val shared = AccountScopedSessionSynchronizer(
-        source = { accountScopeHash, sessionId ->
+    constructor(api: PatientApi) : this(
+        sessionSource = { accountScopeHash, sessionId ->
             VocaEaseResultSessionRemote(api, accountScopeHash).fetch(sessionId)
         },
+    )
+
+    private val shared = AccountScopedSessionSynchronizer(
+        source = sessionSource,
         identity = { session: SingingSession ->
             VersionedSessionIdentity(
                 session.id.toString(),

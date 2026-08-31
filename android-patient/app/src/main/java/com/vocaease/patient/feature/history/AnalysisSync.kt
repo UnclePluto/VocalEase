@@ -222,7 +222,12 @@ class AccountScopedSessionSynchronizer<T : Any>(
         val scopeKey = ScopeKey(accountScopeHash, incarnationProof, sessionId)
         val flightKey = FlightKey(scopeKey, minimumGeneration)
         val (deferred, leader) = synchronized(lock) {
-            inFlight[flightKey]?.let { it to false }
+            inFlight.entries
+                .asSequence()
+                .filter { (key) -> key.scope == scopeKey && key.minimumGeneration >= minimumGeneration }
+                .minByOrNull { (key) -> key.minimumGeneration }
+                ?.value
+                ?.let { it to false }
                 ?: CompletableDeferred<T>().also { inFlight[flightKey] = it } to true
         }
         if (leader) {

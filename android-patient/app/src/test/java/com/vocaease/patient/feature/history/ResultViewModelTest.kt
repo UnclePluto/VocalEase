@@ -159,6 +159,35 @@ class ResultViewModelTest {
         gate.complete(Unit)
         Unit
     }
+
+    @Test
+    fun `页面重建首次接受高generation后后续轮询单调提升floor`() = runBlocking {
+        val remote = QueueResultRemote(
+            session(SessionStatus.PROCESSING, 2),
+            session(SessionStatus.PROCESSING, 2),
+        )
+        val firstDelayGate = CompletableDeferred<Unit>()
+        val secondDelayGate = CompletableDeferred<Unit>()
+        var delayCount = 0
+        val viewModel = ResultViewModel(
+            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(3) }, Dispatchers.Unconfined,
+            delayMillis = {
+                delayCount += 1
+                if (delayCount == 1) firstDelayGate.await() else secondDelayGate.await()
+            },
+        )
+
+        viewModel.start()
+        assertEquals(listOf(0), remote.minimumGenerations)
+        firstDelayGate.complete(Unit)
+        yield()
+
+        assertEquals(listOf(0, 2), remote.minimumGenerations)
+        assertEquals(2, viewModel.state.value.content?.analysisGeneration)
+        viewModel.stop()
+        secondDelayGate.complete(Unit)
+        Unit
+    }
 }
 
 private class QueueResultRemote(vararg values: SingingSession) : ResultSessionRemote {
