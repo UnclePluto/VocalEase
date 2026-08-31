@@ -82,21 +82,25 @@ class DatabaseConstraintTest {
         )
         database.uploadDao().insert(UploadJobEntity.newPending("a", "d", "grant:d:audio", "grant:d:video", "submit:d"))
         val db = database.openHelper.writableDatabase
-        db.execSQL("UPDATE upload_jobs SET progress_percent=10,attempt_count=1 WHERE account_scope='a' AND draft_id='d'")
+        db.execSQL(
+            "UPDATE upload_jobs SET operation_version=operation_version+1,progress_percent=10,attempt_count=1 " +
+                "WHERE account_scope='a' AND draft_id='d'",
+        )
 
         listOf(
-            "UPDATE upload_jobs SET overall_state='UNKNOWN' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET audio_grant_key=' ' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET audio_grant_key='audio-2' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET last_safe_error='${"x".repeat(257)}' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET pipeline_stage='UPLOADING_AUDIO',overall_state='UPLOADING',audio_asset_key='asset',audio_object_key='object',audio_grant_state='GRANT_READY',audio_upload_state='UPLOADING' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET audio_grant_state='SUBMITTED' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET overall_state='ANALYZING' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET audio_confirm_state='CONFIRMED' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET progress_percent=9 WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET attempt_count=0 WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET resume_pipeline_stage='ANALYZING' WHERE account_scope='a' AND draft_id='d'",
-            "UPDATE upload_jobs SET pipeline_stage='WAITING_NETWORK',overall_state='WAITING_NETWORK',resume_pipeline_stage='PAUSED' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,overall_state='UNKNOWN' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_grant_key=' ' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_grant_key='audio-2' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,last_safe_error='${"x".repeat(257)}' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,pipeline_stage='UPLOADING_AUDIO',overall_state='UPLOADING',audio_asset_key='asset',audio_object_key='object',audio_grant_state='GRANT_READY',audio_upload_state='UPLOADING' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_grant_state='SUBMITTED' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,overall_state='ANALYZING' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_confirm_state='CONFIRMED' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,progress_percent=9 WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,attempt_count=0 WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,resume_pipeline_stage='ANALYZING' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,pipeline_stage='WAITING_NETWORK',overall_state='WAITING_NETWORK',resume_pipeline_stage='PAUSED' WHERE account_scope='a' AND draft_id='d'",
+            "UPDATE upload_jobs SET progress_percent=11 WHERE account_scope='a' AND draft_id='d'",
             "UPDATE media SET encrypted_relative_path='media/v1/${"b".repeat(32)}.vef' WHERE account_scope='a' AND draft_id='d' AND type='AUDIO'",
         ).forEach { sql -> assertThrows(SQLiteConstraintException::class.java) { db.execSQL(sql) } }
         Unit
@@ -111,10 +115,10 @@ class DatabaseConstraintTest {
         val db = database.openHelper.writableDatabase
 
         listOf(
-            "UPDATE upload_jobs SET audio_confirmed_at=-1 WHERE account_scope='a' AND draft_id='d1'",
-            "UPDATE upload_jobs SET audio_confirmed_at=0 WHERE account_scope='a' AND draft_id='d1'",
-            "UPDATE upload_jobs SET audio_asset_key='asset-only' WHERE account_scope='a' AND draft_id='d1'",
-            "UPDATE upload_jobs SET audio_asset_key='asset',audio_object_key='object',audio_receipt='receipt' WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_confirmed_at=-1 WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_confirmed_at=0 WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_asset_key='asset-only' WHERE account_scope='a' AND draft_id='d1'",
+            "UPDATE upload_jobs SET operation_version=operation_version+1,audio_asset_key='asset',audio_object_key='object',audio_receipt='receipt' WHERE account_scope='a' AND draft_id='d1'",
         ).forEach { sql -> assertThrows(SQLiteConstraintException::class.java) { db.execSQL(sql) } }
 
         assertThrows(SQLiteConstraintException::class.java) {

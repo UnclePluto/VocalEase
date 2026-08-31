@@ -58,7 +58,17 @@ internal interface UploadDao {
             attempt_count = :attemptCount, next_retry_at = :nextRetryAt, last_safe_error = :lastSafeError,
             progress_percent = :progressPercent, receipt_wait_attempt = :receiptWaitAttempt
             , resume_pipeline_stage = :resumePipelineStage
+            , operation_version = operation_version + 1
         WHERE account_scope = :accountScope AND draft_id = :draftId
+          AND operation_version = :expectedOperationVersion
+          AND overall_state = :expectedOverallState
+          AND pipeline_stage = :expectedPipelineStage
+          AND audio_grant_state = :expectedAudioGrantState AND video_grant_state = :expectedVideoGrantState
+          AND audio_upload_state = :expectedAudioUploadState AND video_upload_state = :expectedVideoUploadState
+          AND audio_receipt_state = :expectedAudioReceiptState AND video_receipt_state = :expectedVideoReceiptState
+          AND audio_confirm_state = :expectedAudioConfirmState AND video_confirm_state = :expectedVideoConfirmState
+          AND submit_state = :expectedSubmitState
+          AND resume_pipeline_stage IS :expectedResumePipelineStage
         """,
     )
     suspend fun checkpoint(
@@ -92,7 +102,26 @@ internal interface UploadDao {
         progressPercent: Int,
         receiptWaitAttempt: Int,
         resumePipelineStage: UploadPipelineStage? = null,
+        expectedOperationVersion: Long,
+        expectedOverallState: UploadOverallState,
+        expectedPipelineStage: UploadPipelineStage,
+        expectedAudioGrantState: UploadStepState,
+        expectedVideoGrantState: UploadStepState,
+        expectedAudioUploadState: UploadStepState,
+        expectedVideoUploadState: UploadStepState,
+        expectedAudioReceiptState: UploadStepState,
+        expectedVideoReceiptState: UploadStepState,
+        expectedAudioConfirmState: UploadStepState,
+        expectedVideoConfirmState: UploadStepState,
+        expectedSubmitState: UploadStepState,
+        expectedResumePipelineStage: UploadPipelineStage?,
     ): Int
+
+    @Query(
+        "UPDATE upload_jobs SET operation_version = operation_version + 1 " +
+            "WHERE account_scope = :accountScope AND draft_id = :draftId AND operation_version = :expectedOperationVersion",
+    )
+    suspend fun bumpOperationVersion(accountScope: String, draftId: String, expectedOperationVersion: Long): Int
 
     @Query("DELETE FROM upload_jobs WHERE account_scope = :accountScope AND draft_id = :draftId")
     suspend fun delete(accountScope: String, draftId: String): Int

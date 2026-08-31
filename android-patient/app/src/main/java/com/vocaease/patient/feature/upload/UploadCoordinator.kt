@@ -57,8 +57,11 @@ class UploadCoordinator(
         val store = RoomUploadStore(storage, contract.draftId, nowEpochMillis)
         val current = store.load()
         if (current.stage in setOf(UploadStage.ANALYZING, UploadStage.SUBMITTING)) return
-        if (current.stage == UploadStage.FAILED && !store.resumeRetryableFailure()) return
-        if (current.stage == UploadStage.PAUSED) store.resumeFromPause()
+        when (current.stage) {
+            UploadStage.WAITING_NETWORK, UploadStage.FAILED -> if (!store.manualRetry()) return
+            UploadStage.PAUSED -> store.resumeFromPause()
+            else -> Unit
+        }
         scheduler.enqueue(contract, replace = true)
     }
 

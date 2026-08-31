@@ -142,7 +142,10 @@ class AuthenticatedDraftStorageTest {
 
         linearSession.authenticate(PATIENT_A_UUID)
         storage = linearProvider.current()
-        runWhileSwitchWaits { assertEquals(1, it.checkpointUpload("linear", pendingCheckpoint())) }
+        val version = requireNotNull(storage.findUploadJob("linear")).operationVersion
+        runWhileSwitchWaits {
+            assertEquals(1, it.checkpointUpload("linear", version, pendingCheckpoint()))
+        }
         Unit
     }
 
@@ -434,7 +437,7 @@ class AuthenticatedDraftStorageTest {
         val late = requireNotNull(database.uploadDao().find(PATIENT_A_UUID, "late-worker-cleanup"))
 
         assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { storage.checkpointUpload("late-worker-cleanup", late.toCheckpoint()) }
+            runBlocking { storage.checkpointUpload("late-worker-cleanup", late.operationVersion, late.toCheckpoint()) }
         }
         assertEquals(
             UploadLocalActionStage.INTENT_WRITTEN,
@@ -785,7 +788,9 @@ class AuthenticatedDraftStorageTest {
         ).forEach { checkpointJob(it) }
     }
 
-    private suspend fun checkpointJob(job: UploadJobEntity) = database.uploadDao().checkpoint(
+    private suspend fun checkpointJob(job: UploadJobEntity): Int {
+        val current = requireNotNull(database.uploadDao().find(job.accountScope, job.draftId))
+        return database.uploadDao().checkpoint(
         accountScope = job.accountScope, draftId = job.draftId, overallState = job.overallState,
         pipelineStage = job.pipelineStage, audioGrantState = job.audioGrantState, videoGrantState = job.videoGrantState,
         audioUploadState = job.audioUploadState, videoUploadState = job.videoUploadState,
@@ -797,7 +802,15 @@ class AuthenticatedDraftStorageTest {
         videoReceipt = job.videoReceipt, audioConfirmedAt = job.audioConfirmedAt, videoConfirmedAt = job.videoConfirmedAt,
         attemptCount = job.attemptCount, nextRetryAt = job.nextRetryAt, lastSafeError = job.lastSafeError,
         progressPercent = job.progressPercent, receiptWaitAttempt = job.receiptWaitAttempt,
-    )
+        expectedOperationVersion = current.operationVersion,
+        expectedOverallState = current.overallState, expectedPipelineStage = current.pipelineStage,
+        expectedAudioGrantState = current.audioGrantState, expectedVideoGrantState = current.videoGrantState,
+        expectedAudioUploadState = current.audioUploadState, expectedVideoUploadState = current.videoUploadState,
+        expectedAudioReceiptState = current.audioReceiptState, expectedVideoReceiptState = current.videoReceiptState,
+        expectedAudioConfirmState = current.audioConfirmState, expectedVideoConfirmState = current.videoConfirmState,
+        expectedSubmitState = current.submitState, expectedResumePipelineStage = current.resumePipelineStage,
+        )
+    }
 
     private fun UploadJobEntity.toCheckpoint() = UploadCheckpoint(
         overallState = overallState,

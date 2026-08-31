@@ -119,7 +119,7 @@ class UploadRecoveryTest {
             waitingNetwork, requestingAudio, uploadingAudio, waitingAudio, confirmingAudio,
             requestingVideo, uploadingVideo, waitingVideo, confirmingVideo, submitting, analyzing,
         ).forEachIndexed { index, durable ->
-            val expected = durable.copy(attemptCount = index + 1)
+            val expected = durable.copy(attemptCount = index + 1, operationVersion = index + 1L)
             assertEquals(1, checkpoint(database.uploadDao(), expected))
             database.close()
             database = VocaEaseDatabase.create(context, databaseName, allowMainThreadQueries = true)
@@ -128,7 +128,9 @@ class UploadRecoveryTest {
         database.close()
     }
 
-    private suspend fun checkpoint(dao: UploadDao, job: UploadJobEntity): Int = dao.checkpoint(
+    private suspend fun checkpoint(dao: UploadDao, job: UploadJobEntity): Int {
+        val current = requireNotNull(dao.find(job.accountScope, job.draftId))
+        return dao.checkpoint(
         accountScope = job.accountScope, draftId = job.draftId, overallState = job.overallState,
         pipelineStage = job.pipelineStage,
         audioGrantState = job.audioGrantState, videoGrantState = job.videoGrantState,
@@ -143,7 +145,15 @@ class UploadRecoveryTest {
         attemptCount = job.attemptCount, nextRetryAt = job.nextRetryAt, lastSafeError = job.lastSafeError,
         progressPercent = job.progressPercent, receiptWaitAttempt = job.receiptWaitAttempt,
         resumePipelineStage = job.resumePipelineStage,
-    )
+        expectedOperationVersion = current.operationVersion,
+        expectedOverallState = current.overallState, expectedPipelineStage = current.pipelineStage,
+        expectedAudioGrantState = current.audioGrantState, expectedVideoGrantState = current.videoGrantState,
+        expectedAudioUploadState = current.audioUploadState, expectedVideoUploadState = current.videoUploadState,
+        expectedAudioReceiptState = current.audioReceiptState, expectedVideoReceiptState = current.videoReceiptState,
+        expectedAudioConfirmState = current.audioConfirmState, expectedVideoConfirmState = current.videoConfirmState,
+        expectedSubmitState = current.submitState, expectedResumePipelineStage = current.resumePipelineStage,
+        )
+    }
 
     private fun draft() = DraftEntity(
         accountScope = "a", draftId = "d", songId = "song", sessionId = "session", creationKey = "create",

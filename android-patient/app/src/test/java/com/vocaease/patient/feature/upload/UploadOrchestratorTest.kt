@@ -33,6 +33,27 @@ class UploadOrchestratorTest {
     }
 
     @Test
+    fun `SDK成功后本地receipt崩溃时READY对象跳过重grant和重传`() = runBlocking {
+        val timeline = mutableListOf<String>()
+        val recovering = record().copy(
+            stage = UploadStage.UPLOADING_AUDIO,
+            audioBinding = binding(UploadMediaKind.AUDIO),
+        )
+        val store = FakeUploadStore(recovering, timeline)
+        val remote = FakeUploadRemote(timeline).apply { recoveryReadyKinds += UploadMediaKind.AUDIO }
+
+        assertEquals(
+            UploadRunResult.Analyzing,
+            UploadOrchestrator(store, remote, FakeUploader(timeline), FakeLeases(timeline), {}, { 1_000 }).run(),
+        )
+
+        assertEquals(0, remote.grantCount.getOrDefault(UploadMediaKind.AUDIO, 0))
+        assertTrue("upload:AUDIO" !in timeline)
+        assertEquals(1, remote.confirmCount[UploadMediaKind.AUDIO])
+        assertTrue(store.history.any { it.stage == UploadStage.WAITING_AUDIO_RECEIPT && it.audioUploaded })
+    }
+
+    @Test
     fun `双媒体链每个副作用前先落盘且最终只交付ANALYZING`() = runBlocking {
         val timeline = mutableListOf<String>()
         val store = FakeUploadStore(record(), timeline)
@@ -46,11 +67,11 @@ class UploadOrchestratorTest {
         assertEquals(
             listOf(
                 "write:REQUESTING_AUDIO_GRANT", "grant:AUDIO:grant:draft-1:audio",
-                "write:UPLOADING_AUDIO", "detail:1", "lease:AUDIO", "upload:AUDIO", "close:AUDIO",
-                "write:WAITING_AUDIO_RECEIPT", "write:CONFIRMING_AUDIO", "confirm:AUDIO", "detail:2",
+                "write:UPLOADING_AUDIO", "detail:1", "write:UPLOADING_AUDIO", "lease:AUDIO", "upload:AUDIO", "close:AUDIO",
+                "write:WAITING_AUDIO_RECEIPT", "write:CONFIRMING_AUDIO", "confirm:AUDIO", "write:CONFIRMING_AUDIO", "detail:2",
                 "write:REQUESTING_VIDEO_GRANT", "grant:VIDEO:grant:draft-1:video",
-                "write:UPLOADING_VIDEO", "detail:3", "lease:VIDEO", "upload:VIDEO", "close:VIDEO",
-                "write:WAITING_VIDEO_RECEIPT", "write:CONFIRMING_VIDEO", "confirm:VIDEO", "detail:4",
+                "write:UPLOADING_VIDEO", "detail:3", "write:UPLOADING_VIDEO", "lease:VIDEO", "upload:VIDEO", "close:VIDEO",
+                "write:WAITING_VIDEO_RECEIPT", "write:CONFIRMING_VIDEO", "confirm:VIDEO", "write:CONFIRMING_VIDEO", "detail:4",
                 "write:SUBMITTING", "submit:submit:draft-1", "write:ANALYZING", "cleanup",
             ),
             timeline,
@@ -181,8 +202,9 @@ class UploadOrchestratorTest {
         assertEquals(UploadRunResult.Analyzing, orchestrator.run())
 
         assertEquals("grant:draft-1:audio", remote.grantKeys.single { it.second == UploadMediaKind.AUDIO }.first)
-        assertEquals("write:UPLOADING_AUDIO", timeline.first())
-        assertEquals("grant:AUDIO:grant:draft-1:audio", timeline[1])
+        assertEquals("detail:1", timeline.first())
+        assertEquals("write:UPLOADING_AUDIO", timeline[1])
+        assertEquals("grant:AUDIO:grant:draft-1:audio", timeline[2])
         assertEquals(expected, store.history.first { it.stage == UploadStage.UPLOADING_AUDIO }.audioBinding)
         assertTrue(store.history.any { it.stage == UploadStage.WAITING_AUDIO_RECEIPT && it.progressPercent == 50 })
     }
@@ -317,15 +339,19 @@ class UploadOrchestratorTest {
         var current = initial
         val history = mutableListOf(initial)
         override suspend fun load(): UploadRecord = current
-        override suspend fun checkpoint(record: UploadRecord) {
-            current = record
-            history += record
-            timeline += "write:${record.stage.name}"
+        override suspend fun checkpoint(expected: UploadRecord, next: UploadRecord): UploadRecord {
+            if (current != expected) throw UploadSupersededException()
+            current = next
+            history += next
+            timeline += "write:${next.stage.name}"
+            return next
         }
-        override suspend fun checkpointProgress(progressPercent: Int) {
-            if (progressPercent <= current.progressPercent) return
-            current = current.copy(progressPercent = progressPercent)
+        override suspend fun checkpointProgress(expected: UploadRecord, progressPercent: Int): UploadRecord {
+            if (current != expected) throw UploadSupersededException()
+            if (progressPercent <= current.progressPercent) return current
+            current = current.copy(progressPercent = progressPercent, operationVersion = current.operationVersion + 1)
             history += current
+            return current
         }
         override suspend fun finishLocalCleanup() { timeline += "cleanup" }
     }
@@ -344,6 +370,7 @@ class UploadOrchestratorTest {
         var retryAudioGrant = false
         var detailCount = 0
         val detailOverrides = mutableMapOf<Int, UploadSessionDetail>()
+        val recoveryReadyKinds = mutableSetOf<UploadMediaKind>()
         private val confirmedKinds = mutableSetOf<UploadMediaKind>()
         var blockAudioConfirm = false
         val confirmEntered = CompletableDeferred<Unit>()
@@ -386,11 +413,11 @@ class UploadOrchestratorTest {
                 listOf(
                     audioGrant.binding.asSessionMedia(
                         UploadMediaKind.AUDIO,
-                        if (UploadMediaKind.AUDIO in confirmedKinds || submitCount > 0) RemoteMediaState.READY else RemoteMediaState.UPLOADING,
+                        if (UploadMediaKind.AUDIO in confirmedKinds || UploadMediaKind.AUDIO in recoveryReadyKinds || submitCount > 0) RemoteMediaState.READY else RemoteMediaState.UPLOADING,
                     ),
                     bindingFor(UploadMediaKind.VIDEO).asSessionMedia(
                         UploadMediaKind.VIDEO,
-                        if (UploadMediaKind.VIDEO in confirmedKinds || submitCount > 0) RemoteMediaState.READY else RemoteMediaState.UPLOADING,
+                        if (UploadMediaKind.VIDEO in confirmedKinds || UploadMediaKind.VIDEO in recoveryReadyKinds || submitCount > 0) RemoteMediaState.READY else RemoteMediaState.UPLOADING,
                     ),
                 ),
             )

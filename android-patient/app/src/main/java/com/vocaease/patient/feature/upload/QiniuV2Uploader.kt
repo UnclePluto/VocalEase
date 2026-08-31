@@ -40,6 +40,7 @@ object QiniuV2Configuration {
             .allowBackupHost(false)
             .zone(FixedZone(arrayOf(host)))
             .recorder(FileRecorder(recorderDirectory.absolutePath))
+            .requestClient(SafeQiniuRequestClient())
             .buildV2()
     }
 

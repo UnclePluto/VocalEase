@@ -102,29 +102,50 @@ class UploadOrchestrator(
         val media = current.media(kind)
         val key = current.grantKey(kind)
         if (current.stage != requesting && current.stage != uploading) throw UploadContractViolation("阶段错误")
-        if (current.stage == uploading) checkpoint(current, current)
+        val durableCurrent = if (current.stage == uploading) {
+            val binding = current.binding(kind) ?: throw UploadContractViolation("缺少媒体绑定")
+            when (mediaStatus(current, kind, binding, remote.sessionDetail(current.sessionId))) {
+                RemoteMediaState.READY -> {
+                    checkpoint(
+                        current,
+                        current.withUploaded(kind).copy(
+                            stage = waitingReceipt,
+                            progressPercent = if (kind == UploadMediaKind.AUDIO) 50 else 100,
+                        ),
+                    )
+                    return
+                }
+                RemoteMediaState.UPLOADING -> checkpoint(current, current)
+                RemoteMediaState.UNKNOWN -> throw UploadContractViolation("会话媒体状态无效")
+            }
+        } else current
         // 进程恢复时不持久化 token；同一幂等键安全重取，再验证必须仍绑定同一 asset/object。
-        val grant = remote.grant(UploadGrantRequest(current.sessionId, kind, media, key))
+        val grant = remote.grant(UploadGrantRequest(durableCurrent.sessionId, kind, media, key))
         validateUploadUrl(grant.uploadUrl)
-        validateGrant(current, kind, grant)
+        validateGrant(durableCurrent, kind, grant)
         if (grant.expiresAtEpochMillis - nowEpochMillis() < GRANT_SAFETY_MARGIN_MILLIS) throw RetryableUploadException()
-        val persistedBinding = current.binding(kind) ?: grant.binding
-        val beforeUpload = current.withBinding(kind, persistedBinding).copy(stage = uploading, safeError = null)
-        checkpoint(current, beforeUpload)
-        validateMediaDetail(beforeUpload, kind, persistedBinding, remote.sessionDetail(current.sessionId), RemoteMediaState.UPLOADING)
-        leases.open(kind, media).use { lease ->
+        val persistedBinding = durableCurrent.binding(kind) ?: grant.binding
+        val beforeUpload = checkpoint(
+            durableCurrent,
+            durableCurrent.withBinding(kind, persistedBinding).copy(stage = uploading, safeError = null),
+        )
+        validateMediaDetail(beforeUpload, kind, persistedBinding, remote.sessionDetail(durableCurrent.sessionId), RemoteMediaState.UPLOADING)
+        // detail 请求期间可能被暂停/删除取代；启动 SDK 前必须再用旧版本 CAS 确认仍属于本次操作。
+        val uploadReady = checkpoint(beforeUpload, beforeUpload)
+        val completion = leases.open(kind, media).use { lease ->
             if (!lease.file.isFile || lease.file.length() != media.sizeBytes) throw UploadContractViolation("明文长度错误")
-            val result = uploadWithDurableProgress(kind, grant, lease.file, media.mimeType)
-            when (result) {
-                is QiniuUploadResult.Completed -> if (result.objectKey != persistedBinding.objectKey) {
+            val completion = uploadWithDurableProgress(uploadReady, kind, grant, lease.file, media.mimeType)
+            when (completion.result) {
+                is QiniuUploadResult.Completed -> if (completion.result.objectKey != persistedBinding.objectKey) {
                     throw UploadContractViolation("对象不匹配")
                 }
                 QiniuUploadResult.Cancelled -> throw CancellationException("上传已取消")
             }
+            completion
         }
         checkpoint(
-            beforeUpload,
-            beforeUpload.withUploaded(kind).copy(
+            completion.durableRecord,
+            completion.durableRecord.withUploaded(kind).copy(
                 stage = waitingReceipt,
                 progressPercent = if (kind == UploadMediaKind.AUDIO) 50 else 100,
             ),
@@ -132,19 +153,21 @@ class UploadOrchestrator(
     }
 
     private suspend fun uploadWithDurableProgress(
+        expected: UploadRecord,
         kind: UploadMediaKind,
         grant: UploadGrant,
         file: java.io.File,
         mimeType: String,
-    ): QiniuUploadResult = coroutineScope {
+    ): DurableUploadCompletion = coroutineScope {
         val updates = Channel<Int>(Channel.CONFLATED)
+        var durable = expected
         val writer = launch {
             for (progress in updates) {
-                store.checkpointProgress(progress)
+                durable = store.checkpointProgress(durable, progress)
                 onProgress(progress)
             }
         }
-        try {
+        val result = try {
             uploader.upload(QiniuUploadRequest(kind, grant, file, mimeType)) progress@{ percent ->
                 if (percent !in 0..100) {
                     updates.close(UploadContractViolation("上传进度错误"))
@@ -157,6 +180,7 @@ class UploadOrchestrator(
             updates.close()
             writer.join()
         }
+        DurableUploadCompletion(result, durable)
     }
 
     private suspend fun confirm(current: UploadRecord, kind: UploadMediaKind) {
@@ -165,9 +189,13 @@ class UploadOrchestrator(
         when (val result = remote.confirm(UploadConfirmRequest(current.sessionId, kind, binding))) {
             is UploadConfirmResult.Confirmed -> {
                 if (result.binding != binding) throw UploadContractViolation("确认响应不匹配")
-                validateMediaDetail(current, kind, binding, remote.sessionDetail(current.sessionId), RemoteMediaState.READY)
+                val confirmedResponse = checkpoint(current, current)
+                validateMediaDetail(confirmedResponse, kind, binding, remote.sessionDetail(current.sessionId), RemoteMediaState.READY)
                 val next = if (kind == UploadMediaKind.AUDIO) UploadStage.REQUESTING_VIDEO_GRANT else UploadStage.SUBMITTING
-                checkpoint(current, current.withConfirmed(kind).copy(stage = next, receiptWaitAttempt = 0, safeError = null))
+                checkpoint(
+                    confirmedResponse,
+                    confirmedResponse.withConfirmed(kind).copy(stage = next, receiptWaitAttempt = 0, safeError = null),
+                )
             }
             UploadConfirmResult.CallbackPending -> {
                 val attempt = current.receiptWaitAttempt
@@ -226,14 +254,18 @@ class UploadOrchestrator(
                 checkpoint(current, current.copy(stage = UploadStage.ANALYZING, safeError = null))
             }
             UploadSubmitResult.Conflict -> {
+                val conflictResponse = checkpoint(current, current)
                 val detail = remote.sessionDetail(current.sessionId)
-                validateSessionDetail(current, detail)
+                validateSessionDetail(conflictResponse, detail)
                 when (detail.state) {
                     RemoteSessionState.PROCESSING, RemoteSessionState.COMPLETED ->
-                        checkpoint(current, current.copy(stage = UploadStage.ANALYZING, safeError = null))
+                        checkpoint(conflictResponse, conflictResponse.copy(stage = UploadStage.ANALYZING, safeError = null))
                     RemoteSessionState.UPLOADED -> Unit // 同一 submit key 在下一循环重试。
                     else -> {
-                        checkpoint(current, current.copy(stage = UploadStage.FAILED, safeError = "演唱记录状态异常，无法继续提交"))
+                        checkpoint(
+                            conflictResponse,
+                            conflictResponse.copy(stage = UploadStage.FAILED, safeError = "演唱记录状态异常，无法继续提交"),
+                        )
                         throw TerminalAlreadyPersisted("演唱记录状态异常，无法继续提交")
                     }
                 }
@@ -241,17 +273,15 @@ class UploadOrchestrator(
         }
     }
 
-    private suspend fun checkpoint(expected: UploadRecord, next: UploadRecord) {
-        val current = store.load()
-        if (current.stage != expected.stage) {
-            if (current.stage == UploadStage.PAUSED) throw CancellationException("上传已暂停")
-            throw UploadContractViolation("任务阶段已变化")
-        }
-        UploadTransitions.requireAllowed(current.stage, next.stage)
-        if (current.draftId != next.draftId || current.sessionId != next.sessionId || current.accountScopeHash != next.accountScopeHash) {
+    private suspend fun checkpoint(expected: UploadRecord, next: UploadRecord): UploadRecord {
+        UploadTransitions.requireAllowed(expected.stage, next.stage)
+        if (expected.draftId != next.draftId || expected.sessionId != next.sessionId || expected.accountScopeHash != next.accountScopeHash) {
             throw UploadContractViolation("任务身份变化")
         }
-        store.checkpoint(next)
+        return store.checkpoint(
+            expected,
+            next.copy(operationVersion = expected.operationVersion + 1),
+        )
     }
 
     private fun validateGrant(record: UploadRecord, kind: UploadMediaKind, grant: UploadGrant) {
@@ -293,6 +323,22 @@ class UploadOrchestrator(
         ) throw UploadContractViolation("会话媒体不匹配")
     }
 
+    private fun mediaStatus(
+        record: UploadRecord,
+        kind: UploadMediaKind,
+        binding: UploadBinding,
+        detail: UploadSessionDetail,
+    ): RemoteMediaState {
+        if (detail.sessionId != record.sessionId) throw UploadContractViolation("会话不匹配")
+        val exact = detail.media.filter { it.kind == kind }
+        if (exact.size != 1) throw UploadContractViolation("会话媒体不匹配")
+        val media = exact.single()
+        if (media.assetId != binding.assetId || media.mimeType != binding.mimeType || media.sizeBytes != binding.sizeBytes) {
+            throw UploadContractViolation("会话媒体不匹配")
+        }
+        return media.status
+    }
+
     private fun validateUploadUrl(value: String) {
         runCatching { QiniuV2Configuration.validatedHost(value) }
             .getOrElse { throw UploadContractViolation("上传地址无效") }
@@ -308,6 +354,10 @@ class UploadOrchestrator(
 
     private class RetryableUploadException : Exception()
     private class TerminalAlreadyPersisted(message: String) : Exception(message)
+    private data class DurableUploadCompletion(
+        val result: QiniuUploadResult,
+        val durableRecord: UploadRecord,
+    )
 
     private companion object {
         const val GRANT_SAFETY_MARGIN_MILLIS = 60_000L

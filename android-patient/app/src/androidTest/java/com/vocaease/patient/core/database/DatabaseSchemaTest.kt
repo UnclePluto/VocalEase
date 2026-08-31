@@ -36,7 +36,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(5, reopened.openHelper.readableDatabase.version)
+            assertEquals(6, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
@@ -84,6 +84,7 @@ class DatabaseSchemaTest {
             assertEquals(UploadPipelineStage.PAUSED, job?.pipelineStage)
             assertEquals(0, job?.progressPercent)
             assertEquals(0, job?.receiptWaitAttempt)
+            assertEquals(0L, job?.operationVersion)
         } finally {
             reopened.close()
         }
@@ -115,7 +116,43 @@ class DatabaseSchemaTest {
             assertEquals(12_345L, job?.nextRetryAt)
             assertEquals("等待重试", job?.lastSafeError)
             assertEquals(null, job?.resumePipelineStage)
-            assertEquals(5, reopened.openHelper.readableDatabase.version)
+            assertEquals(0L, job?.operationVersion)
+            assertEquals(6, reopened.openHelper.readableDatabase.version)
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun versionFiveWaitingNetworkFieldsSurviveVersionSixCasMigration() {
+        migrationHelper.createDatabase(DATABASE_NAME, 5).use { sqlite ->
+            insertDraft(sqlite, "account-a", "waiting-v5")
+            insertPendingUpload(
+                sqlite,
+                "account-a",
+                "waiting-v5",
+                "grant:waiting-v5:audio",
+                "grant:waiting-v5:video",
+                "submit:waiting-v5",
+            )
+            sqlite.execSQL(
+                "UPDATE upload_jobs SET overall_state='WAITING_NETWORK',pipeline_stage='WAITING_NETWORK'," +
+                    "resume_pipeline_stage='CONFIRMING_AUDIO',attempt_count=9,next_retry_at=54321," +
+                    "last_safe_error='网络暂不可用，等待重试' " +
+                    "WHERE account_scope='account-a' AND draft_id='waiting-v5'",
+            )
+        }
+
+        val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
+        try {
+            val job = kotlinx.coroutines.runBlocking { reopened.uploadDao().find("account-a", "waiting-v5") }
+            assertEquals(UploadPipelineStage.WAITING_NETWORK, job?.pipelineStage)
+            assertEquals(UploadPipelineStage.CONFIRMING_AUDIO, job?.resumePipelineStage)
+            assertEquals(9, job?.attemptCount)
+            assertEquals(54_321L, job?.nextRetryAt)
+            assertEquals(0L, job?.operationVersion)
+            assertEquals(6, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -150,11 +187,11 @@ class DatabaseSchemaTest {
             insertPendingUpload(sqlite, "account-a", "draft-1", "grant:draft-1:audio", "grant:draft-1:video", "submit:draft-1")
 
             listOf(
-                "UPDATE upload_jobs SET audio_confirmed_at=-1 WHERE account_scope='account-a' AND draft_id='draft-1'",
-                "UPDATE upload_jobs SET audio_confirmed_at=0 WHERE account_scope='account-a' AND draft_id='draft-1'",
-                "UPDATE upload_jobs SET audio_confirm_state='CONFIRMED' WHERE account_scope='account-a' AND draft_id='draft-1'",
-                "UPDATE upload_jobs SET audio_asset_key='asset-only' WHERE account_scope='account-a' AND draft_id='draft-1'",
-                "UPDATE upload_jobs SET audio_asset_key='asset',audio_object_key='object',audio_receipt='receipt' " +
+                "UPDATE upload_jobs SET operation_version=operation_version+1,audio_confirmed_at=-1 WHERE account_scope='account-a' AND draft_id='draft-1'",
+                "UPDATE upload_jobs SET operation_version=operation_version+1,audio_confirmed_at=0 WHERE account_scope='account-a' AND draft_id='draft-1'",
+                "UPDATE upload_jobs SET operation_version=operation_version+1,audio_confirm_state='CONFIRMED' WHERE account_scope='account-a' AND draft_id='draft-1'",
+                "UPDATE upload_jobs SET operation_version=operation_version+1,audio_asset_key='asset-only' WHERE account_scope='account-a' AND draft_id='draft-1'",
+                "UPDATE upload_jobs SET operation_version=operation_version+1,audio_asset_key='asset',audio_object_key='object',audio_receipt='receipt' " +
                     "WHERE account_scope='account-a' AND draft_id='draft-1'",
             ).forEach { sql ->
                 assertThrows(android.database.sqlite.SQLiteConstraintException::class.java) {

@@ -74,7 +74,7 @@ class DatabaseConverters {
         DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class,
         UploadLocalActionEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -96,6 +96,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_2_3)
                 .addMigrations(MIGRATION_3_4)
                 .addMigrations(MIGRATION_4_5)
+                .addMigrations(MIGRATION_5_6)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -201,6 +202,12 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                     "CREATE INDEX IF NOT EXISTS `index_upload_local_actions_account_scope_draft_id` " +
                         "ON `upload_local_actions` (`account_scope`, `draft_id`)",
                 )
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `upload_jobs` ADD COLUMN `operation_version` INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

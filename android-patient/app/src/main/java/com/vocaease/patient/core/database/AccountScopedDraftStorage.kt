@@ -815,6 +815,9 @@ class AccountScopedDraftStorage internal constructor(
                     audio.encryptedRelativePath, video.encryptedRelativePath,
                 ),
             )
+            check(database.uploadDao().bumpOperationVersion(lease.patientId, draftId, job.operationVersion) == 1) {
+                "上传本地操作未线性化"
+            }
         }
     }
 
@@ -826,9 +829,10 @@ class AccountScopedDraftStorage internal constructor(
         check(database.uploadLocalActionDao().advance(lease.patientId, draftId, from, to) == 1)
     }
 
-    suspend fun checkpointUpload(draftId: String, checkpoint: UploadCheckpoint): Int = checked {
+    suspend fun checkpointUpload(draftId: String, expectedOperationVersion: Long, checkpoint: UploadCheckpoint): Int = checked {
         database.withTransaction {
             val current = database.uploadDao().find(lease.patientId, draftId) ?: error("上传任务不存在")
+            if (current.operationVersion != expectedOperationVersion) return@withTransaction 0
             require(database.uploadLocalActionDao().find(lease.patientId, draftId) == null) { "上传任务正在本地收尾" }
             require(allowedTransition(current.overallState, checkpoint.overallState)) { "非法上传状态转换" }
             require(allowedPipelineTransition(current.pipelineStage, checkpoint.pipelineStage)) { "非法上传管线状态转换" }
@@ -878,7 +882,20 @@ class AccountScopedDraftStorage internal constructor(
                 progressPercent = checkpoint.progressPercent,
                 receiptWaitAttempt = checkpoint.receiptWaitAttempt,
                 resumePipelineStage = checkpoint.resumePipelineStage,
-            ).also { check(it == 1) { "上传检查点未持久化" } }
+                expectedOperationVersion = expectedOperationVersion,
+                expectedOverallState = current.overallState,
+                expectedPipelineStage = current.pipelineStage,
+                expectedAudioGrantState = current.audioGrantState,
+                expectedVideoGrantState = current.videoGrantState,
+                expectedAudioUploadState = current.audioUploadState,
+                expectedVideoUploadState = current.videoUploadState,
+                expectedAudioReceiptState = current.audioReceiptState,
+                expectedVideoReceiptState = current.videoReceiptState,
+                expectedAudioConfirmState = current.audioConfirmState,
+                expectedVideoConfirmState = current.videoConfirmState,
+                expectedSubmitState = current.submitState,
+                expectedResumePipelineStage = current.resumePipelineStage,
+            )
         }
     }
 

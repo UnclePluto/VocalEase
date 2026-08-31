@@ -136,6 +136,7 @@ data class UploadJobEntity(
     @ColumnInfo(name = "progress_percent") val progressPercent: Int = 0,
     @ColumnInfo(name = "receipt_wait_attempt") val receiptWaitAttempt: Int = 0,
     @ColumnInfo(name = "resume_pipeline_stage") val resumePipelineStage: UploadPipelineStage? = null,
+    @ColumnInfo(name = "operation_version") val operationVersion: Long = 0,
 ) {
     init {
         require(accountScope.isNotBlank())
@@ -159,6 +160,7 @@ data class UploadJobEntity(
         require(lastSafeError == null || lastSafeError.length <= 256)
         require(progressPercent in 0..100)
         require(receiptWaitAttempt in 0..4)
+        require(operationVersion >= 0)
         require(audioReceipt == null || audioReceipt.isNotBlank())
         require(videoReceipt == null || videoReceipt.isNotBlank())
         require(audioConfirmedAt == null || audioConfirmedAt >= 0)
@@ -204,6 +206,7 @@ data class UploadJobEntity(
             progressPercent = 0,
             receiptWaitAttempt = 0,
             resumePipelineStage = null,
+            operationVersion = 0,
         )
     }
 }

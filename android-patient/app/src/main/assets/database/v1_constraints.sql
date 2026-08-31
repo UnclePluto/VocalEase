@@ -61,6 +61,7 @@ CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_insert_v1 BEFORE INSERT ON upload
     OR NEW.audio_grant_key != 'grant:' || NEW.draft_id || ':audio'
     OR NEW.video_grant_key != 'grant:' || NEW.draft_id || ':video'
     OR NEW.submit_key != 'submit:' || NEW.draft_id
+    OR NEW.operation_version != 0
     OR NEW.overall_state NOT IN ('PAUSED','WAITING_NETWORK','UPLOADING','WAITING_CALLBACK','CONFIRMING','READY_TO_SUBMIT','SUBMITTING','ANALYZING','FAILED','CANCELLED','COMPLETED')
     OR NEW.pipeline_stage NOT IN ('PAUSED','WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING','ANALYZING','FAILED')
     OR (NEW.resume_pipeline_stage IS NOT NULL AND NEW.resume_pipeline_stage NOT IN ('WAITING_NETWORK','REQUESTING_AUDIO_GRANT','UPLOADING_AUDIO','WAITING_AUDIO_RECEIPT','CONFIRMING_AUDIO','REQUESTING_VIDEO_GRANT','UPLOADING_VIDEO','WAITING_VIDEO_RECEIPT','CONFIRMING_VIDEO','SUBMITTING'))
@@ -130,6 +131,7 @@ END;
 -- VOCAEASE-STATEMENT
 CREATE TRIGGER IF NOT EXISTS upload_jobs_guard_update_v1 BEFORE UPDATE ON upload_jobs BEGIN
   SELECT CASE WHEN NEW.account_scope != OLD.account_scope OR NEW.draft_id != OLD.draft_id
+    OR NEW.operation_version != OLD.operation_version + 1
     OR NEW.audio_grant_key != OLD.audio_grant_key OR NEW.video_grant_key != OLD.video_grant_key OR NEW.submit_key != OLD.submit_key
     OR trim(NEW.account_scope) = '' OR trim(NEW.draft_id) = ''
     OR trim(NEW.audio_grant_key) = '' OR trim(NEW.video_grant_key) = '' OR trim(NEW.submit_key) = ''

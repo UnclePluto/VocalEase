@@ -13,51 +13,73 @@ class RoomUploadStore(
     private val nowEpochMillis: () -> Long,
 ) : UploadStore {
     suspend fun pause() {
-        val job = storage.findUploadJob(draftId) ?: return
-        storage.checkpointUpload(
-            draftId,
-            job.checkpoint(
-                UploadPipelineStage.PAUSED, UploadOverallState.PAUSED, USER_PAUSED_MARKER,
-                resumePipelineStage = job.resumePipelineStage ?: job.pipelineStage,
-            ),
-        )
-    }
-
-    suspend fun resumeFromPause() {
-        val job = storage.findUploadJob(draftId) ?: return
-        require(job.pipelineStage == UploadPipelineStage.PAUSED)
-        val stage = job.resumePipelineStage ?: when {
-            job.submitState == UploadStepState.SUBMITTING -> UploadPipelineStage.SUBMITTING
-            job.videoConfirmState == UploadStepState.CONFIRMING -> UploadPipelineStage.CONFIRMING_VIDEO
-            job.videoReceiptState == UploadStepState.WAITING_RECEIPT -> UploadPipelineStage.WAITING_VIDEO_RECEIPT
-            job.videoUploadState == UploadStepState.UPLOADING -> UploadPipelineStage.UPLOADING_VIDEO
-            job.videoGrantState == UploadStepState.REQUESTING_GRANT -> UploadPipelineStage.REQUESTING_VIDEO_GRANT
-            job.audioConfirmState == UploadStepState.CONFIRMING -> UploadPipelineStage.CONFIRMING_AUDIO
-            job.audioReceiptState == UploadStepState.WAITING_RECEIPT -> UploadPipelineStage.WAITING_AUDIO_RECEIPT
-            job.audioUploadState == UploadStepState.UPLOADING -> UploadPipelineStage.UPLOADING_AUDIO
-            job.audioGrantState == UploadStepState.REQUESTING_GRANT -> UploadPipelineStage.REQUESTING_AUDIO_GRANT
-            else -> UploadPipelineStage.WAITING_NETWORK
+        while (true) {
+            val current = load()
+            if (current.stage == UploadStage.PAUSED) return
+            try {
+                checkpoint(
+                    current,
+                    current.copy(
+                        stage = UploadStage.PAUSED,
+                        safeError = USER_PAUSED_MARKER,
+                        resumeStage = current.resumeStage ?: current.stage,
+                        operationVersion = current.operationVersion + 1,
+                    ),
+                )
+                return
+            } catch (_: UploadSupersededException) {
+                continue
+            }
         }
-        storage.checkpointUpload(
-            draftId,
-            job.checkpoint(stage, stage.overall(), null, resumePipelineStage = null),
-        )
     }
 
-    suspend fun resumeRetryableFailure(): Boolean {
-        val job = storage.findUploadJob(draftId) ?: return false
-        if (job.pipelineStage != UploadPipelineStage.FAILED || job.nextRetryAt == null) return false
-        storage.checkpointUpload(
-            draftId,
-            job.checkpoint(
-                UploadPipelineStage.WAITING_NETWORK,
-                UploadOverallState.WAITING_NETWORK,
-                error = null,
-                resumePipelineStage = UploadPipelineStage.REQUESTING_AUDIO_GRANT,
-                nextRetryAt = null,
-            ),
-        )
-        return true
+    suspend fun resumeFromPause(): Boolean {
+        while (true) {
+            val expected = load()
+            if (expected.stage != UploadStage.PAUSED) return false
+            val stage = expected.resumeStage ?: UploadStage.WAITING_NETWORK
+            try {
+                checkpoint(
+                    expected,
+                    expected.copy(
+                        stage = stage, safeError = null, resumeStage = null,
+                        operationVersion = expected.operationVersion + 1,
+                    ),
+                )
+                return true
+            } catch (_: UploadSupersededException) {
+                // 只有仍处于 PAUSED 的最新版本才能被显式继续。
+            }
+        }
+    }
+
+    suspend fun manualRetry(): Boolean {
+        while (true) {
+            val expected = load()
+            val resume = when (expected.stage) {
+                UploadStage.WAITING_NETWORK -> expected.resumeStage ?: UploadStage.REQUESTING_AUDIO_GRANT
+                UploadStage.FAILED -> {
+                    if (expected.nextRetryAtEpochMillis == null) return false
+                    UploadStage.REQUESTING_AUDIO_GRANT
+                }
+                else -> return false
+            }
+            try {
+                checkpoint(
+                    expected,
+                    expected.copy(
+                        stage = UploadStage.WAITING_NETWORK,
+                        safeError = null,
+                        resumeStage = resume,
+                        nextRetryAtEpochMillis = null,
+                        operationVersion = expected.operationVersion + 1,
+                    ),
+                )
+                return true
+            } catch (_: UploadSupersededException) {
+                // 用户暂停、删除或另一个立即重试先完成时，重新读取后再裁决。
+            }
+        }
     }
 
     override suspend fun load(): UploadRecord {
@@ -88,53 +110,61 @@ class RoomUploadStore(
             attemptCount = job.attemptCount,
             nextRetryAtEpochMillis = job.nextRetryAt,
             resumeStage = job.resumePipelineStage?.toFeature(),
+            operationVersion = job.operationVersion,
         )
     }
 
-    override suspend fun checkpoint(record: UploadRecord) {
-        require(record.draftId == draftId && record.accountScopeHash == storage.accountScopeHash)
+    override suspend fun checkpoint(expected: UploadRecord, next: UploadRecord): UploadRecord {
+        require(expected.draftId == draftId && expected.accountScopeHash == storage.accountScopeHash)
+        require(next.draftId == draftId && next.accountScopeHash == storage.accountScopeHash)
+        require(next.operationVersion == expected.operationVersion + 1)
         val now = nowEpochMillis()
         val checkpoint = UploadCheckpoint(
-            overallState = record.stage.overall(),
-            pipelineStage = record.stage.toDatabase(),
-            audioGrantState = grantState(record, UploadMediaKind.AUDIO),
-            videoGrantState = grantState(record, UploadMediaKind.VIDEO),
-            audioUploadState = uploadState(record, UploadMediaKind.AUDIO),
-            videoUploadState = uploadState(record, UploadMediaKind.VIDEO),
-            audioReceiptState = receiptState(record, UploadMediaKind.AUDIO),
-            videoReceiptState = receiptState(record, UploadMediaKind.VIDEO),
-            audioConfirmState = confirmState(record, UploadMediaKind.AUDIO),
-            videoConfirmState = confirmState(record, UploadMediaKind.VIDEO),
-            submitState = when (record.activeStage()) {
+            overallState = next.stage.overall(),
+            pipelineStage = next.stage.toDatabase(),
+            audioGrantState = grantState(next, UploadMediaKind.AUDIO),
+            videoGrantState = grantState(next, UploadMediaKind.VIDEO),
+            audioUploadState = uploadState(next, UploadMediaKind.AUDIO),
+            videoUploadState = uploadState(next, UploadMediaKind.VIDEO),
+            audioReceiptState = receiptState(next, UploadMediaKind.AUDIO),
+            videoReceiptState = receiptState(next, UploadMediaKind.VIDEO),
+            audioConfirmState = confirmState(next, UploadMediaKind.AUDIO),
+            videoConfirmState = confirmState(next, UploadMediaKind.VIDEO),
+            submitState = when (next.activeStage()) {
                 UploadStage.SUBMITTING -> UploadStepState.SUBMITTING
                 UploadStage.ANALYZING -> UploadStepState.SUBMITTED
                 UploadStage.FAILED -> UploadStepState.TERMINAL_FAILURE
                 else -> UploadStepState.PENDING
             },
-            audioAssetKey = record.audioBinding?.assetId,
-            videoAssetKey = record.videoBinding?.assetId,
-            audioObjectKey = record.audioBinding?.objectKey,
-            videoObjectKey = record.videoBinding?.objectKey,
-            audioReceipt = if (record.audioConfirmed) "trusted-callback" else null,
-            videoReceipt = if (record.videoConfirmed) "trusted-callback" else null,
-            audioConfirmedAt = if (record.audioConfirmed) now else null,
-            videoConfirmedAt = if (record.videoConfirmed) now else null,
-            attemptCount = record.attemptCount,
-            nextRetryAt = record.nextRetryAtEpochMillis,
-            lastSafeError = record.safeError,
-            progressPercent = record.progressPercent,
-            receiptWaitAttempt = record.receiptWaitAttempt,
-            resumePipelineStage = record.resumeStage?.toDatabase(),
+            audioAssetKey = next.audioBinding?.assetId,
+            videoAssetKey = next.videoBinding?.assetId,
+            audioObjectKey = next.audioBinding?.objectKey,
+            videoObjectKey = next.videoBinding?.objectKey,
+            audioReceipt = if (next.audioConfirmed) "trusted-callback" else null,
+            videoReceipt = if (next.videoConfirmed) "trusted-callback" else null,
+            audioConfirmedAt = if (next.audioConfirmed) now else null,
+            videoConfirmedAt = if (next.videoConfirmed) now else null,
+            attemptCount = next.attemptCount,
+            nextRetryAt = next.nextRetryAtEpochMillis,
+            lastSafeError = next.safeError,
+            progressPercent = next.progressPercent,
+            receiptWaitAttempt = next.receiptWaitAttempt,
+            resumePipelineStage = next.resumeStage?.toDatabase(),
         )
-        storage.checkpointUpload(draftId, checkpoint)
+        if (storage.checkpointUpload(draftId, expected.operationVersion, checkpoint) != 1) {
+            throw UploadSupersededException()
+        }
+        return next
     }
 
-    override suspend fun checkpointProgress(progressPercent: Int) {
-        val current = load()
-        if (current.stage !in setOf(UploadStage.UPLOADING_AUDIO, UploadStage.UPLOADING_VIDEO) ||
-            progressPercent <= current.progressPercent
-        ) return
-        checkpoint(current.copy(progressPercent = progressPercent))
+    override suspend fun checkpointProgress(expected: UploadRecord, progressPercent: Int): UploadRecord {
+        if (expected.stage !in setOf(UploadStage.UPLOADING_AUDIO, UploadStage.UPLOADING_VIDEO) ||
+            progressPercent <= expected.progressPercent
+        ) return expected
+        return checkpoint(
+            expected,
+            expected.copy(progressPercent = progressPercent, operationVersion = expected.operationVersion + 1),
+        )
     }
 
     override suspend fun finishLocalCleanup() {

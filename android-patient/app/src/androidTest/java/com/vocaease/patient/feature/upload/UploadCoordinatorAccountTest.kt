@@ -18,6 +18,7 @@ import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import java.io.File
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -33,6 +34,142 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class UploadCoordinatorAccountTest {
+    @Test
+    fun 真实Room旧version在暂停后不能提交迟到检查点() = runBlocking {
+        val storage = prepareQueued(patientA, "cas-pause")
+        advanceJobTo("cas-pause", UploadPipelineStage.REQUESTING_AUDIO_GRANT)
+        val store = RoomUploadStore(storage, "cas-pause") { 1_000L }
+        val stale = store.load()
+
+        store.pause()
+
+        assertThrows(UploadSupersededException::class.java) {
+            runBlocking {
+                store.checkpoint(
+                    stale,
+                    stale.copy(stage = UploadStage.UPLOADING_AUDIO, operationVersion = stale.operationVersion + 1),
+                )
+            }
+        }
+        val durable = storage.findUploadJob("cas-pause")!!
+        assertEquals(UploadPipelineStage.PAUSED, durable.pipelineStage)
+        assertEquals(stale.operationVersion + 1, durable.operationVersion)
+        Unit
+    }
+
+    @Test
+    fun grant后detail迟到不能启动上传() = runBlocking {
+        val storage = prepareQueued(patientA, "cas-detail")
+        val remote = CasGateRemote(blockDetail = true)
+        val uploader = ImmediateUploader()
+        val coordinator = coordinator(uploader, FakeScheduler(), remote)
+        val contract = UploadWorkContract(storage.accountScopeHash, "cas-detail")
+        coordinator.schedule(contract.draftId)
+        val running = async { coordinator.run(contract) {} }
+        remote.detailEntered.await()
+
+        RoomUploadStore(storage, contract.draftId) { 1_000 }.pause()
+        remote.release.complete(Unit)
+
+        assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
+        assertEquals(UploadPipelineStage.PAUSED, storage.findUploadJob(contract.draftId)?.pipelineStage)
+        assertEquals(0, uploader.uploadCalls.get())
+        Unit
+    }
+
+    @Test
+    fun confirm与submit迟到结果不能继续请求detail() = runBlocking {
+        listOf(UploadPipelineStage.CONFIRMING_AUDIO, UploadPipelineStage.SUBMITTING).forEach { stage ->
+            val draftId = "cas-${stage.name.lowercase()}"
+            val storage = prepareQueued(patientA, draftId)
+            advanceJobTo(draftId, stage)
+            val remote = CasGateRemote(
+                blockConfirm = stage == UploadPipelineStage.CONFIRMING_AUDIO,
+                blockSubmit = stage == UploadPipelineStage.SUBMITTING,
+            )
+            val coordinator = coordinator(ImmediateUploader(), FakeScheduler(), remote)
+            val contract = UploadWorkContract(storage.accountScopeHash, draftId)
+            val running = async { coordinator.run(contract) {} }
+            if (stage == UploadPipelineStage.CONFIRMING_AUDIO) remote.confirmEntered.await()
+            else remote.submitEntered.await()
+
+            RoomUploadStore(storage, draftId) { 1_000 }.pause()
+            remote.release.complete(Unit)
+
+            assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
+            assertEquals(UploadPipelineStage.PAUSED, storage.findUploadJob(draftId)?.pipelineStage)
+            assertEquals(0, remote.detailCalls.get())
+        }
+        Unit
+    }
+
+    @Test
+    fun grant回调pending提交成功与网络失败迟到都不能覆盖暂停() = runBlocking {
+        suspend fun pauseAtGate(
+            draftId: String,
+            stage: UploadPipelineStage?,
+            remote: CasGateRemote,
+            entered: CompletableDeferred<Unit>,
+            expectedCancellation: Boolean,
+        ) {
+            val storage = prepareQueued(patientA, draftId)
+            if (stage != null) advanceJobTo(draftId, stage)
+            val uploader = ImmediateUploader()
+            val coordinator = coordinator(uploader, FakeScheduler(), remote)
+            val contract = UploadWorkContract(storage.accountScopeHash, draftId)
+            if (stage == null) coordinator.schedule(draftId)
+            val running = async { coordinator.run(contract) {} }
+            entered.await()
+            RoomUploadStore(storage, draftId) { 1_000 }.pause()
+            val pausedVersion = storage.findUploadJob(draftId)!!.operationVersion
+            remote.release.complete(Unit)
+            if (expectedCancellation) {
+                assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
+            } else {
+                assertEquals(UploadRunResult.Paused, running.await())
+            }
+            val durable = storage.findUploadJob(draftId)!!
+            assertEquals(UploadPipelineStage.PAUSED, durable.pipelineStage)
+            assertEquals(pausedVersion, durable.operationVersion)
+            assertEquals(0, remote.detailCalls.get())
+            assertEquals(0, uploader.uploadCalls.get())
+        }
+
+        val grant = CasGateRemote(blockGrant = true)
+        pauseAtGate("cas-grant", null, grant, grant.grantEntered, expectedCancellation = true)
+        val pending = CasGateRemote(blockConfirm = true, confirmPending = true)
+        pauseAtGate("cas-pending", UploadPipelineStage.CONFIRMING_AUDIO, pending, pending.confirmEntered, expectedCancellation = true)
+        val accepted = CasGateRemote(blockSubmit = true, submitAccepted = true)
+        pauseAtGate("cas-submit-accepted", UploadPipelineStage.SUBMITTING, accepted, accepted.submitEntered, expectedCancellation = true)
+        val network = CasGateRemote(blockGrant = true, grantRetryableFailure = true)
+        pauseAtGate("cas-network", null, network, network.grantEntered, expectedCancellation = false)
+        Unit
+    }
+
+    @Test
+    fun 上传完成与progress迟到都不能越过暂停或发起confirm() = runBlocking {
+        val storage = prepareQueued(patientA, "cas-upload-progress")
+        val uploader = LateCompletingUploader()
+        val remote = FakeRemote()
+        val coordinator = coordinator(uploader, FakeScheduler(), remote)
+        val contract = UploadWorkContract(storage.accountScopeHash, "cas-upload-progress")
+        coordinator.schedule(contract.draftId)
+        val running = async { coordinator.run(contract) {} }
+        uploader.entered.await()
+
+        RoomUploadStore(storage, contract.draftId) { 1_000 }.pause()
+        val paused = storage.findUploadJob(contract.draftId)!!
+        uploader.release.complete(Unit)
+
+        assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
+        val durable = storage.findUploadJob(contract.draftId)!!
+        assertEquals(UploadPipelineStage.PAUSED, durable.pipelineStage)
+        assertEquals(paused.operationVersion, durable.operationVersion)
+        assertEquals(paused.progressPercent, durable.progressPercent)
+        assertEquals(0, remote.confirmCalls.get())
+        Unit
+    }
+
     private val context: Context = ApplicationProvider.getApplicationContext()
     private lateinit var database: VocaEaseDatabase
     private lateinit var session: MutableAuthenticatedAccountSession
@@ -153,6 +290,46 @@ class UploadCoordinatorAccountTest {
         coordinator.retry(UploadWorkContract(terminalStorage.accountScopeHash, "terminal-failed"))
         assertEquals(UploadPipelineStage.FAILED, terminalStorage.findUploadJob("terminal-failed")?.pipelineStage)
         assertEquals(1, scheduler.enqueued.size)
+        Unit
+    }
+
+    @Test
+    fun 立即重试原子清除网络deadline且worker不再等待() = runBlocking {
+        val storage = prepareQueued(patientA, "manual-network")
+        val initial = database.uploadDao().find(patientA, "manual-network")!!
+        checkpointJob(
+            initial.copy(
+                overallState = UploadOverallState.WAITING_NETWORK,
+                pipelineStage = UploadPipelineStage.WAITING_NETWORK,
+                resumePipelineStage = UploadPipelineStage.REQUESTING_AUDIO_GRANT,
+                attemptCount = 3,
+                nextRetryAt = 5_000,
+                lastSafeError = "网络暂不可用，等待重试",
+            ),
+        )
+        val uploader = BlockingUploader()
+        val scheduler = FakeScheduler()
+        val waits = mutableListOf<Long>()
+        val coordinator = coordinator(uploader, scheduler, wait = { waits += it })
+        val contract = UploadWorkContract(storage.accountScopeHash, "manual-network")
+        val before = storage.findUploadJob(contract.draftId)!!
+
+        coordinator.retry(contract)
+
+        val retried = storage.findUploadJob(contract.draftId)!!
+        assertEquals(UploadPipelineStage.WAITING_NETWORK, retried.pipelineStage)
+        assertEquals(UploadPipelineStage.REQUESTING_AUDIO_GRANT, retried.resumePipelineStage)
+        assertEquals(3, retried.attemptCount)
+        assertEquals(null, retried.nextRetryAt)
+        assertEquals(null, retried.lastSafeError)
+        assertEquals(before.operationVersion + 1, retried.operationVersion)
+        assertEquals(contract to true, scheduler.enqueued.single())
+
+        val running = async { coordinator.run(contract) {} }
+        uploader.entered.await()
+        assertTrue(waits.isEmpty())
+        coordinator.pause(contract)
+        assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
         Unit
     }
 
@@ -335,6 +512,7 @@ class UploadCoordinatorAccountTest {
     }
 
     private suspend fun checkpointJob(job: com.vocaease.patient.core.database.UploadJobEntity) {
+        val current = requireNotNull(database.uploadDao().find(job.accountScope, job.draftId))
         check(database.uploadDao().checkpoint(
             accountScope = job.accountScope,
             draftId = job.draftId,
@@ -366,13 +544,27 @@ class UploadCoordinatorAccountTest {
             progressPercent = job.progressPercent,
             receiptWaitAttempt = job.receiptWaitAttempt,
             resumePipelineStage = job.resumePipelineStage,
+            expectedOperationVersion = current.operationVersion,
+            expectedOverallState = current.overallState,
+            expectedPipelineStage = current.pipelineStage,
+            expectedAudioGrantState = current.audioGrantState,
+            expectedVideoGrantState = current.videoGrantState,
+            expectedAudioUploadState = current.audioUploadState,
+            expectedVideoUploadState = current.videoUploadState,
+            expectedAudioReceiptState = current.audioReceiptState,
+            expectedVideoReceiptState = current.videoReceiptState,
+            expectedAudioConfirmState = current.audioConfirmState,
+            expectedVideoConfirmState = current.videoConfirmState,
+            expectedSubmitState = current.submitState,
+            expectedResumePipelineStage = current.resumePipelineStage,
         ) == 1)
     }
 
     private fun coordinator(
-        uploader: BlockingUploader,
+        uploader: QiniuUploader,
         scheduler: FakeScheduler,
         remote: UploadRemote = FakeRemote(),
+        wait: suspend (Long) -> Unit = {},
     ) = UploadCoordinator(
         context = context,
         storageProvider = provider,
@@ -380,7 +572,7 @@ class UploadCoordinatorAccountTest {
         scheduler = scheduler,
         nowEpochMillis = { 1_000 },
         uploaderFactory = { uploader },
-        wait = {},
+        wait = wait,
     )
 
     private class BlockingUploader : QiniuUploader {
@@ -391,6 +583,99 @@ class UploadCoordinatorAccountTest {
             return result.await()
         }
         override fun cancel() { result.complete(QiniuUploadResult.Cancelled) }
+    }
+
+    private class ImmediateUploader : QiniuUploader {
+        val uploadCalls = AtomicInteger()
+        override suspend fun upload(request: QiniuUploadRequest, onProgress: (Int) -> Unit): QiniuUploadResult {
+            uploadCalls.incrementAndGet()
+            return QiniuUploadResult.Completed(request.grant.binding.objectKey)
+        }
+        override fun cancel() = Unit
+    }
+
+    private class LateCompletingUploader : QiniuUploader {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        override suspend fun upload(request: QiniuUploadRequest, onProgress: (Int) -> Unit): QiniuUploadResult {
+            entered.complete(Unit)
+            release.await()
+            onProgress(40)
+            return QiniuUploadResult.Completed(request.grant.binding.objectKey)
+        }
+        override fun cancel() = Unit
+    }
+
+    private class CasGateRemote(
+        private val blockGrant: Boolean = false,
+        private val blockDetail: Boolean = false,
+        private val blockConfirm: Boolean = false,
+        private val blockSubmit: Boolean = false,
+        private val grantRetryableFailure: Boolean = false,
+        private val confirmPending: Boolean = false,
+        private val submitAccepted: Boolean = false,
+    ) : UploadRemote {
+        val grantEntered = CompletableDeferred<Unit>()
+        val detailEntered = CompletableDeferred<Unit>()
+        val confirmEntered = CompletableDeferred<Unit>()
+        val submitEntered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val detailCalls = AtomicInteger()
+
+        override suspend fun grant(request: UploadGrantRequest): UploadGrant {
+            if (blockGrant) {
+                grantEntered.complete(Unit)
+                release.await()
+            }
+            if (grantRetryableFailure) throw UploadRemoteRetryableException()
+            return UploadGrant(
+                binding = UploadBinding(
+                    request.sessionId,
+                    if (request.kind == UploadMediaKind.AUDIO) "asset-a" else "asset-v",
+                    if (request.kind == UploadMediaKind.AUDIO) "object-a" else "object-v",
+                    request.media.mimeType,
+                    request.media.sizeBytes,
+                ),
+                expiresAtEpochMillis = Instant.parse("2099-01-01T00:00:00Z").toEpochMilli(),
+                uploadUrl = "https://upload.qiniup.com",
+                uploadToken = "ephemeral",
+            )
+        }
+
+        override suspend fun confirm(request: UploadConfirmRequest): UploadConfirmResult {
+            if (blockConfirm) {
+                confirmEntered.complete(Unit)
+                release.await()
+            }
+            return if (confirmPending) UploadConfirmResult.CallbackPending else UploadConfirmResult.Confirmed(request.binding)
+        }
+
+        override suspend fun submit(sessionId: String, idempotencyKey: String): UploadSubmitResult {
+            if (blockSubmit) {
+                submitEntered.complete(Unit)
+                release.await()
+            }
+            return if (submitAccepted) UploadSubmitResult.Accepted(sessionId) else UploadSubmitResult.Conflict
+        }
+
+        override suspend fun sessionDetail(sessionId: String): UploadSessionDetail {
+            detailCalls.incrementAndGet()
+            if (blockDetail) {
+                detailEntered.complete(Unit)
+                release.await()
+            }
+            return UploadSessionDetail(
+                sessionId,
+                RemoteSessionState.PROCESSING,
+                listOf(
+                    UploadSessionMedia(
+                        "asset-a", UploadMediaKind.AUDIO, "audio/mp4", 16,
+                        if (blockDetail) RemoteMediaState.UPLOADING else RemoteMediaState.READY,
+                    ),
+                    UploadSessionMedia("asset-v", UploadMediaKind.VIDEO, "video/mp4", 32, RemoteMediaState.READY),
+                ),
+            )
+        }
     }
 
     private class FakeScheduler : UploadWorkScheduling {
@@ -404,6 +689,7 @@ class UploadCoordinatorAccountTest {
     private class FakeRemote(private val failConfirm: Boolean = false) : UploadRemote {
         private val bindings = mutableMapOf<UploadMediaKind, UploadBinding>()
         private val confirmed = mutableSetOf<UploadMediaKind>()
+        val confirmCalls = AtomicInteger()
 
         override suspend fun grant(request: UploadGrantRequest) = UploadGrant(
             binding = UploadBinding(
@@ -418,6 +704,7 @@ class UploadCoordinatorAccountTest {
             uploadToken = "ephemeral",
         )
         override suspend fun confirm(request: UploadConfirmRequest): UploadConfirmResult {
+            confirmCalls.incrementAndGet()
             if (failConfirm) throw UploadRemoteRetryableException()
             confirmed += request.kind
             return UploadConfirmResult.Confirmed(request.binding)

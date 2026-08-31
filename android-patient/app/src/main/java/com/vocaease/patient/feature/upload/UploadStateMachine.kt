@@ -79,6 +79,7 @@ data class UploadRecord(
     val attemptCount: Int = 0,
     val nextRetryAtEpochMillis: Long? = null,
     val resumeStage: UploadStage? = null,
+    val operationVersion: Long = 0,
 ) {
     init {
         require(accountScopeHash.matches(Regex("[0-9a-f]{64}")) || accountScopeHash == "scope-hash")
@@ -91,15 +92,18 @@ data class UploadRecord(
         require(safeError == null || safeError.length <= 256)
         require(attemptCount >= 0)
         require(nextRetryAtEpochMillis == null || nextRetryAtEpochMillis >= 0)
+        require(operationVersion >= 0)
     }
 }
 
 interface UploadStore {
     suspend fun load(): UploadRecord
-    suspend fun checkpoint(record: UploadRecord)
-    suspend fun checkpointProgress(progressPercent: Int)
+    suspend fun checkpoint(expected: UploadRecord, next: UploadRecord): UploadRecord
+    suspend fun checkpointProgress(expected: UploadRecord, progressPercent: Int): UploadRecord
     suspend fun finishLocalCleanup()
 }
+
+class UploadSupersededException internal constructor() : kotlinx.coroutines.CancellationException("上传操作已被新的用户操作取代")
 
 data class UploadGrantRequest(
     val sessionId: String,
