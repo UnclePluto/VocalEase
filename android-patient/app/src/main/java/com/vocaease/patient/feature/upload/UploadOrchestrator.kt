@@ -31,7 +31,7 @@ class UploadOrchestrator(
                 when (current.stage) {
                     UploadStage.PAUSED -> return UploadRunResult.Paused
                     UploadStage.WAITING_NETWORK -> {
-                        waitForPersistedDeadline(current.nextRetryAtEpochMillis)
+                        withExpectedOperation(current) { waitForPersistedDeadline(current.nextRetryAtEpochMillis) }
                         checkpoint(
                             current,
                             current.copy(
@@ -45,14 +45,14 @@ class UploadOrchestrator(
                     UploadStage.REQUESTING_AUDIO_GRANT -> grantAndUpload(current, UploadMediaKind.AUDIO)
                     UploadStage.UPLOADING_AUDIO -> grantAndUpload(current, UploadMediaKind.AUDIO)
                     UploadStage.WAITING_AUDIO_RECEIPT -> {
-                        waitForPersistedDeadline(current.nextRetryAtEpochMillis)
+                        withExpectedOperation(current) { waitForPersistedDeadline(current.nextRetryAtEpochMillis) }
                         checkpoint(current, current.copy(stage = UploadStage.CONFIRMING_AUDIO, nextRetryAtEpochMillis = null))
                     }
                     UploadStage.CONFIRMING_AUDIO -> confirm(current, UploadMediaKind.AUDIO)
                     UploadStage.REQUESTING_VIDEO_GRANT -> grantAndUpload(current, UploadMediaKind.VIDEO)
                     UploadStage.UPLOADING_VIDEO -> grantAndUpload(current, UploadMediaKind.VIDEO)
                     UploadStage.WAITING_VIDEO_RECEIPT -> {
-                        waitForPersistedDeadline(current.nextRetryAtEpochMillis)
+                        withExpectedOperation(current) { waitForPersistedDeadline(current.nextRetryAtEpochMillis) }
                         checkpoint(current, current.copy(stage = UploadStage.CONFIRMING_VIDEO, nextRetryAtEpochMillis = null))
                     }
                     UploadStage.CONFIRMING_VIDEO -> confirm(current, UploadMediaKind.VIDEO)
@@ -67,18 +67,19 @@ class UploadOrchestrator(
         } catch (cancelled: CancellationException) {
             uploader.cancel()
             throw cancelled
-        } catch (_: UploadContractViolation) {
-            val current = store.load()
-            checkpoint(current, current.copy(stage = UploadStage.FAILED, safeError = "上传凭证与本地录制不一致"))
-            return UploadRunResult.TerminalFailure("上传凭证与本地录制不一致")
-        } catch (_: RetryableUploadException) {
-            return persistRetry()
-        } catch (_: java.io.IOException) {
-            return persistRetry()
-        } catch (_: UploadRemoteTerminalException) {
-            val current = store.load()
-            checkpoint(current, current.copy(stage = UploadStage.FAILED, safeError = "上传服务拒绝了当前任务"))
-            return UploadRunResult.TerminalFailure("上传服务拒绝了当前任务")
+        } catch (failure: ExpectedOperationFailure) {
+            return when (failure.error) {
+                is UploadContractViolation -> persistTerminal(
+                    failure.expected,
+                    "上传凭证与本地录制不一致",
+                )
+                is RetryableUploadException, is java.io.IOException -> persistRetry(failure.expected)
+                is UploadRemoteTerminalException -> persistTerminal(
+                    failure.expected,
+                    "上传服务拒绝了当前任务",
+                )
+                else -> throw failure.error
+            }
         } catch (terminal: TerminalAlreadyPersisted) {
             return UploadRunResult.TerminalFailure(terminal.message ?: "演唱记录状态异常，无法继续提交")
         } finally {
@@ -101,10 +102,17 @@ class UploadOrchestrator(
         }
         val media = current.media(kind)
         val key = current.grantKey(kind)
-        if (current.stage != requesting && current.stage != uploading) throw UploadContractViolation("阶段错误")
+        if (current.stage != requesting && current.stage != uploading) {
+            throw ExpectedOperationFailure(current, UploadContractViolation("阶段错误"))
+        }
         val durableCurrent = if (current.stage == uploading) {
-            val binding = current.binding(kind) ?: throw UploadContractViolation("缺少媒体绑定")
-            when (mediaStatus(current, kind, binding, remote.sessionDetail(current.sessionId))) {
+            val recovered = withExpectedOperation(current) {
+                val binding = current.binding(kind) ?: throw UploadContractViolation("缺少媒体绑定")
+                mediaStatus(current, kind, binding, remote.sessionDetail(current.sessionId)).also {
+                    if (it == RemoteMediaState.UNKNOWN) throw UploadContractViolation("会话媒体状态无效")
+                }
+            }
+            when (recovered) {
                 RemoteMediaState.READY -> {
                     checkpoint(
                         current,
@@ -116,32 +124,49 @@ class UploadOrchestrator(
                     return
                 }
                 RemoteMediaState.UPLOADING -> checkpoint(current, current)
-                RemoteMediaState.UNKNOWN -> throw UploadContractViolation("会话媒体状态无效")
+                RemoteMediaState.UNKNOWN -> error("已在操作代际边界内拒绝未知媒体状态")
             }
         } else current
         // 进程恢复时不持久化 token；同一幂等键安全重取，再验证必须仍绑定同一 asset/object。
-        val grant = remote.grant(UploadGrantRequest(durableCurrent.sessionId, kind, media, key))
-        validateUploadUrl(grant.uploadUrl)
-        validateGrant(durableCurrent, kind, grant)
-        if (grant.expiresAtEpochMillis - nowEpochMillis() < GRANT_SAFETY_MARGIN_MILLIS) throw RetryableUploadException()
+        val grant = withExpectedOperation(durableCurrent) {
+            remote.grant(UploadGrantRequest(durableCurrent.sessionId, kind, media, key)).also {
+                validateUploadUrl(it.uploadUrl)
+                validateGrant(durableCurrent, kind, it)
+                if (it.expiresAtEpochMillis - nowEpochMillis() < GRANT_SAFETY_MARGIN_MILLIS) {
+                    throw RetryableUploadException()
+                }
+            }
+        }
         val persistedBinding = durableCurrent.binding(kind) ?: grant.binding
         val beforeUpload = checkpoint(
             durableCurrent,
             durableCurrent.withBinding(kind, persistedBinding).copy(stage = uploading, safeError = null),
         )
-        validateMediaDetail(beforeUpload, kind, persistedBinding, remote.sessionDetail(durableCurrent.sessionId), RemoteMediaState.UPLOADING)
+        withExpectedOperation(beforeUpload) {
+            validateMediaDetail(
+                beforeUpload,
+                kind,
+                persistedBinding,
+                remote.sessionDetail(durableCurrent.sessionId),
+                RemoteMediaState.UPLOADING,
+            )
+        }
         // detail 请求期间可能被暂停/删除取代；启动 SDK 前必须再用旧版本 CAS 确认仍属于本次操作。
         val uploadReady = checkpoint(beforeUpload, beforeUpload)
-        val completion = leases.open(kind, media).use { lease ->
-            if (!lease.file.isFile || lease.file.length() != media.sizeBytes) throw UploadContractViolation("明文长度错误")
-            val completion = uploadWithDurableProgress(uploadReady, kind, grant, lease.file, media.mimeType)
-            when (completion.result) {
-                is QiniuUploadResult.Completed -> if (completion.result.objectKey != persistedBinding.objectKey) {
-                    throw UploadContractViolation("对象不匹配")
+        val completion = withExpectedOperation(uploadReady) {
+            leases.open(kind, media).use { lease ->
+                if (!lease.file.isFile || lease.file.length() != media.sizeBytes) throw UploadContractViolation("明文长度错误")
+                val completion = uploadWithDurableProgress(uploadReady, kind, grant, lease.file, media.mimeType)
+                withExpectedOperation(completion.durableRecord) {
+                    when (completion.result) {
+                        is QiniuUploadResult.Completed -> if (completion.result.objectKey != persistedBinding.objectKey) {
+                            throw UploadContractViolation("对象不匹配")
+                        }
+                        QiniuUploadResult.Cancelled -> throw CancellationException("上传已取消")
+                    }
                 }
-                QiniuUploadResult.Cancelled -> throw CancellationException("上传已取消")
+                completion
             }
-            completion
         }
         checkpoint(
             completion.durableRecord,
@@ -160,37 +185,63 @@ class UploadOrchestrator(
         mimeType: String,
     ): DurableUploadCompletion = coroutineScope {
         val updates = Channel<Int>(Channel.CONFLATED)
-        var durable = expected
+        val durable = java.util.concurrent.atomic.AtomicReference(expected)
         val writer = launch {
             for (progress in updates) {
-                durable = store.checkpointProgress(durable, progress)
+                durable.set(store.checkpointProgress(durable.get(), progress))
                 onProgress(progress)
             }
         }
+        val invalidProgress = java.util.concurrent.atomic.AtomicReference<UploadContractViolation?>(null)
+        var uploadFailure: Throwable? = null
         val result = try {
             uploader.upload(QiniuUploadRequest(kind, grant, file, mimeType)) progress@{ percent ->
                 if (percent !in 0..100) {
-                    updates.close(UploadContractViolation("上传进度错误"))
+                    invalidProgress.compareAndSet(null, UploadContractViolation("上传进度错误"))
+                    updates.close()
                     uploader.cancel()
                     return@progress
                 }
                 updates.trySend(if (kind == UploadMediaKind.AUDIO) percent / 2 else 50 + percent / 2)
             }
+        } catch (error: Throwable) {
+            uploadFailure = error
+            null
         } finally {
             updates.close()
             writer.join()
         }
-        DurableUploadCompletion(result, durable)
+        val durableRecord = durable.get()
+        invalidProgress.get()?.let { throw ExpectedOperationFailure(durableRecord, it) }
+        uploadFailure?.let {
+            if (it is CancellationException || it is ExpectedOperationFailure) throw it
+            throw ExpectedOperationFailure(durableRecord, it)
+        }
+        DurableUploadCompletion(requireNotNull(result), durableRecord)
     }
 
     private suspend fun confirm(current: UploadRecord, kind: UploadMediaKind) {
-        val binding = current.binding(kind) ?: throw UploadContractViolation("缺少媒体绑定")
-        if (!current.uploaded(kind)) throw UploadContractViolation("媒体尚未上传")
-        when (val result = remote.confirm(UploadConfirmRequest(current.sessionId, kind, binding))) {
+        val bindingAndResult = withExpectedOperation(current) {
+            val binding = current.binding(kind) ?: throw UploadContractViolation("缺少媒体绑定")
+            if (!current.uploaded(kind)) throw UploadContractViolation("媒体尚未上传")
+            binding to remote.confirm(UploadConfirmRequest(current.sessionId, kind, binding))
+        }
+        val binding = bindingAndResult.first
+        when (val result = bindingAndResult.second) {
             is UploadConfirmResult.Confirmed -> {
-                if (result.binding != binding) throw UploadContractViolation("确认响应不匹配")
+                withExpectedOperation(current) {
+                    if (result.binding != binding) throw UploadContractViolation("确认响应不匹配")
+                }
                 val confirmedResponse = checkpoint(current, current)
-                validateMediaDetail(confirmedResponse, kind, binding, remote.sessionDetail(current.sessionId), RemoteMediaState.READY)
+                withExpectedOperation(confirmedResponse) {
+                    validateMediaDetail(
+                        confirmedResponse,
+                        kind,
+                        binding,
+                        remote.sessionDetail(current.sessionId),
+                        RemoteMediaState.READY,
+                    )
+                }
                 val next = if (kind == UploadMediaKind.AUDIO) UploadStage.REQUESTING_VIDEO_GRANT else UploadStage.SUBMITTING
                 checkpoint(
                     confirmedResponse,
@@ -198,8 +249,11 @@ class UploadOrchestrator(
                 )
             }
             UploadConfirmResult.CallbackPending -> {
-                val attempt = current.receiptWaitAttempt
-                if (attempt >= CALLBACK_DELAYS_MILLIS.size) throw RetryableUploadException()
+                val attempt = withExpectedOperation(current) {
+                    current.receiptWaitAttempt.also {
+                        if (it >= CALLBACK_DELAYS_MILLIS.size) throw RetryableUploadException()
+                    }
+                }
                 val waitingStage = if (kind == UploadMediaKind.AUDIO) UploadStage.WAITING_AUDIO_RECEIPT else UploadStage.WAITING_VIDEO_RECEIPT
                 checkpoint(
                     current,
@@ -219,24 +273,23 @@ class UploadOrchestrator(
         if (remaining > 0) wait(remaining)
     }
 
-    private suspend fun persistRetry(): UploadRunResult {
-        val current = store.load()
-        return when (current.stage) {
+    private suspend fun persistRetry(expected: UploadRecord): UploadRunResult {
+        return when (expected.stage) {
             UploadStage.PAUSED -> UploadRunResult.Paused
             UploadStage.ANALYZING -> UploadRunResult.Analyzing
-            UploadStage.FAILED -> UploadRunResult.TerminalFailure(current.safeError ?: "上传失败，请稍后重试")
+            UploadStage.FAILED -> UploadRunResult.TerminalFailure(expected.safeError ?: "上传失败，请稍后重试")
             else -> {
-                val resume = if (current.stage == UploadStage.WAITING_NETWORK) {
-                    current.resumeStage ?: UploadStage.REQUESTING_AUDIO_GRANT
+                val resume = if (expected.stage == UploadStage.WAITING_NETWORK) {
+                    expected.resumeStage ?: UploadStage.REQUESTING_AUDIO_GRANT
                 } else {
-                    current.stage
+                    expected.stage
                 }
                 checkpoint(
-                    current,
-                    current.copy(
+                    expected,
+                    expected.copy(
                         stage = UploadStage.WAITING_NETWORK,
                         resumeStage = resume,
-                        attemptCount = current.attemptCount + 1,
+                        attemptCount = expected.attemptCount + 1,
                         nextRetryAtEpochMillis = nowEpochMillis() + NETWORK_RETRY_MILLIS,
                         safeError = "网络暂不可用，等待重试",
                     ),
@@ -247,16 +300,22 @@ class UploadOrchestrator(
     }
 
     private suspend fun submit(current: UploadRecord) {
-        if (!current.audioConfirmed || !current.videoConfirmed) throw UploadContractViolation("媒体尚未确认")
-        when (val result = remote.submit(current.sessionId, current.submitKey)) {
+        val result = withExpectedOperation(current) {
+            if (!current.audioConfirmed || !current.videoConfirmed) throw UploadContractViolation("媒体尚未确认")
+            remote.submit(current.sessionId, current.submitKey)
+        }
+        when (result) {
             is UploadSubmitResult.Accepted -> {
-                if (result.sessionId != current.sessionId) throw UploadContractViolation("提交响应不匹配")
+                withExpectedOperation(current) {
+                    if (result.sessionId != current.sessionId) throw UploadContractViolation("提交响应不匹配")
+                }
                 checkpoint(current, current.copy(stage = UploadStage.ANALYZING, safeError = null))
             }
             UploadSubmitResult.Conflict -> {
                 val conflictResponse = checkpoint(current, current)
-                val detail = remote.sessionDetail(current.sessionId)
-                validateSessionDetail(conflictResponse, detail)
+                val detail = withExpectedOperation(conflictResponse) {
+                    remote.sessionDetail(current.sessionId).also { validateSessionDetail(conflictResponse, it) }
+                }
                 when (detail.state) {
                     RemoteSessionState.PROCESSING, RemoteSessionState.COMPLETED ->
                         checkpoint(conflictResponse, conflictResponse.copy(stage = UploadStage.ANALYZING, safeError = null))
@@ -274,14 +333,43 @@ class UploadOrchestrator(
     }
 
     private suspend fun checkpoint(expected: UploadRecord, next: UploadRecord): UploadRecord {
-        UploadTransitions.requireAllowed(expected.stage, next.stage)
-        if (expected.draftId != next.draftId || expected.sessionId != next.sessionId || expected.accountScopeHash != next.accountScopeHash) {
-            throw UploadContractViolation("任务身份变化")
+        return withExpectedOperation(expected) {
+            UploadTransitions.requireAllowed(expected.stage, next.stage)
+            if (expected.draftId != next.draftId || expected.sessionId != next.sessionId || expected.accountScopeHash != next.accountScopeHash) {
+                throw UploadContractViolation("任务身份变化")
+            }
+            store.checkpoint(
+                expected,
+                next.copy(operationVersion = expected.operationVersion + 1),
+            )
         }
-        return store.checkpoint(
-            expected,
-            next.copy(operationVersion = expected.operationVersion + 1),
-        )
+    }
+
+    private suspend fun persistTerminal(expected: UploadRecord, safeReason: String): UploadRunResult {
+        checkpoint(expected, expected.copy(stage = UploadStage.FAILED, safeError = safeReason))
+        return UploadRunResult.TerminalFailure(safeReason)
+    }
+
+    private suspend fun <T> withExpectedOperation(
+        expected: UploadRecord,
+        block: suspend () -> T,
+    ): T = try {
+        block()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: ExpectedOperationFailure) {
+        throw failure
+    } catch (terminal: TerminalAlreadyPersisted) {
+        throw terminal
+    } catch (error: Throwable) {
+        when (error) {
+            is UploadContractViolation,
+            is RetryableUploadException,
+            is java.io.IOException,
+            is UploadRemoteTerminalException,
+            -> throw ExpectedOperationFailure(expected, error)
+            else -> throw error
+        }
     }
 
     private fun validateGrant(record: UploadRecord, kind: UploadMediaKind, grant: UploadGrant) {
@@ -354,6 +442,10 @@ class UploadOrchestrator(
 
     private class RetryableUploadException : Exception()
     private class TerminalAlreadyPersisted(message: String) : Exception(message)
+    private class ExpectedOperationFailure(
+        val expected: UploadRecord,
+        val error: Throwable,
+    ) : Exception(error)
     private data class DurableUploadCompletion(
         val result: QiniuUploadResult,
         val durableRecord: UploadRecord,

@@ -142,8 +142,58 @@ class UploadCoordinatorAccountTest {
         val accepted = CasGateRemote(blockSubmit = true, submitAccepted = true)
         pauseAtGate("cas-submit-accepted", UploadPipelineStage.SUBMITTING, accepted, accepted.submitEntered, expectedCancellation = true)
         val network = CasGateRemote(blockGrant = true, grantRetryableFailure = true)
-        pauseAtGate("cas-network", null, network, network.grantEntered, expectedCancellation = false)
+        pauseAtGate("cas-network", null, network, network.grantEntered, expectedCancellation = true)
         Unit
+    }
+
+    @Test
+    fun 旧grant契约失败不能在暂停继续后污染新代际() = runBlocking {
+        assertStaleGrantFailureDoesNotMutateResumed("aba-contract", GrantFailure.CONTRACT)
+    }
+
+    @Test
+    fun 旧grant网络失败不能在暂停继续后污染新代际() = runBlocking {
+        assertStaleGrantFailureDoesNotMutateResumed("aba-network", GrantFailure.RETRYABLE)
+    }
+
+    @Test
+    fun 旧grant四百失败不能在暂停继续后污染新代际() = runBlocking {
+        assertStaleGrantFailureDoesNotMutateResumed("aba-terminal", GrantFailure.TERMINAL)
+    }
+
+    @Test
+    fun 旧失败在detail上传确认与提交各阶段都不能污染恢复后的同阶段() = runBlocking {
+        val grantDetail = CasGateRemote(blockDetail = true, detailFailure = GrantFailure.RETRYABLE)
+        assertStaleExternalFailureDoesNotMutateResumed(
+            "aba-grant-detail", null, grantDetail, ImmediateUploader(), grantDetail.detailEntered,
+        ) { grantDetail.release.complete(Unit) }
+
+        val upload = GateFailingUploader()
+        assertStaleExternalFailureDoesNotMutateResumed(
+            "aba-qiniu", null, FakeRemote(), upload, upload.entered,
+        ) { upload.release.complete(Unit) }
+
+        val confirm = CasGateRemote(blockConfirm = true, confirmFailure = GrantFailure.RETRYABLE)
+        assertStaleExternalFailureDoesNotMutateResumed(
+            "aba-confirm", UploadPipelineStage.CONFIRMING_AUDIO, confirm, ImmediateUploader(), confirm.confirmEntered,
+        ) { confirm.release.complete(Unit) }
+
+        val confirmDetail = CasGateRemote(blockDetail = true, detailFailure = GrantFailure.RETRYABLE)
+        assertStaleExternalFailureDoesNotMutateResumed(
+            "aba-confirm-detail", UploadPipelineStage.CONFIRMING_AUDIO,
+            confirmDetail, ImmediateUploader(), confirmDetail.detailEntered,
+        ) { confirmDetail.release.complete(Unit) }
+
+        val submit = CasGateRemote(blockSubmit = true, submitFailure = GrantFailure.RETRYABLE)
+        assertStaleExternalFailureDoesNotMutateResumed(
+            "aba-submit", UploadPipelineStage.SUBMITTING, submit, ImmediateUploader(), submit.submitEntered,
+        ) { submit.release.complete(Unit) }
+
+        val conflictDetail = CasGateRemote(blockDetail = true, detailFailure = GrantFailure.RETRYABLE)
+        assertStaleExternalFailureDoesNotMutateResumed(
+            "aba-conflict-detail", UploadPipelineStage.SUBMITTING,
+            conflictDetail, ImmediateUploader(), conflictDetail.detailEntered,
+        ) { conflictDetail.release.complete(Unit) }
     }
 
     @Test
@@ -428,6 +478,63 @@ class UploadCoordinatorAccountTest {
         return storage
     }
 
+    private suspend fun assertStaleGrantFailureDoesNotMutateResumed(draftId: String, failure: GrantFailure) {
+        val storage = prepareQueued(patientA, draftId)
+        val scheduler = FakeScheduler()
+        val remote = CasGateRemote(blockGrant = true, grantFailure = failure)
+        val uploader = ImmediateUploader()
+        val coordinator = coordinator(uploader, scheduler, remote)
+        val contract = UploadWorkContract(storage.accountScopeHash, draftId)
+        coordinator.schedule(draftId)
+        val running = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.currentCoroutineContext()).async {
+            coordinator.run(contract) {}
+        }
+        remote.grantEntered.await()
+
+        RoomUploadStore(storage, draftId) { 1_000 }.pause()
+        coordinator.retry(contract)
+        val resumed = requireNotNull(storage.findUploadJob(draftId))
+        val scheduled = scheduler.enqueued.toList()
+
+        remote.release.complete(Unit)
+        assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
+
+        assertEquals(resumed, storage.findUploadJob(draftId))
+        assertEquals(scheduled, scheduler.enqueued)
+        assertEquals(0, remote.detailCalls.get())
+        assertEquals(0, uploader.uploadCalls.get())
+    }
+
+    private suspend fun assertStaleExternalFailureDoesNotMutateResumed(
+        draftId: String,
+        stage: UploadPipelineStage?,
+        remote: UploadRemote,
+        uploader: QiniuUploader,
+        entered: CompletableDeferred<Unit>,
+        release: () -> Unit,
+    ) {
+        val storage = prepareQueued(patientA, draftId)
+        if (stage != null) advanceJobTo(draftId, stage)
+        val scheduler = FakeScheduler()
+        val coordinator = coordinator(uploader, scheduler, remote)
+        val contract = UploadWorkContract(storage.accountScopeHash, draftId)
+        if (stage == null) coordinator.schedule(draftId)
+        val running = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.currentCoroutineContext()).async {
+            coordinator.run(contract) {}
+        }
+        entered.await()
+
+        RoomUploadStore(storage, draftId) { 1_000 }.pause()
+        coordinator.retry(contract)
+        val resumed = requireNotNull(storage.findUploadJob(draftId))
+        val scheduled = scheduler.enqueued.toList()
+
+        release()
+        assertThrows(CancellationException::class.java) { runBlocking { running.await() } }
+        assertEquals(resumed, storage.findUploadJob(draftId))
+        assertEquals(scheduled, scheduler.enqueued)
+    }
+
     private suspend fun advanceJobTo(draftId: String, target: UploadPipelineStage) {
         val initial = database.uploadDao().find(patientA, draftId)!!
         val waitingNetwork = initial.copy(
@@ -606,6 +713,17 @@ class UploadCoordinatorAccountTest {
         override fun cancel() = Unit
     }
 
+    private class GateFailingUploader : QiniuUploader {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        override suspend fun upload(request: QiniuUploadRequest, onProgress: (Int) -> Unit): QiniuUploadResult {
+            entered.complete(Unit)
+            release.await()
+            throw java.io.IOException("模拟七牛网络失败")
+        }
+        override fun cancel() = Unit
+    }
+
     private class CasGateRemote(
         private val blockGrant: Boolean = false,
         private val blockDetail: Boolean = false,
@@ -614,6 +732,10 @@ class UploadCoordinatorAccountTest {
         private val grantRetryableFailure: Boolean = false,
         private val confirmPending: Boolean = false,
         private val submitAccepted: Boolean = false,
+        private val grantFailure: GrantFailure? = null,
+        private val detailFailure: GrantFailure? = null,
+        private val confirmFailure: GrantFailure? = null,
+        private val submitFailure: GrantFailure? = null,
     ) : UploadRemote {
         val grantEntered = CompletableDeferred<Unit>()
         val detailEntered = CompletableDeferred<Unit>()
@@ -626,6 +748,12 @@ class UploadCoordinatorAccountTest {
             if (blockGrant) {
                 grantEntered.complete(Unit)
                 release.await()
+            }
+            when (grantFailure) {
+                GrantFailure.CONTRACT -> throw UploadContractViolation("模拟凭证不匹配")
+                GrantFailure.RETRYABLE -> throw UploadRemoteRetryableException()
+                GrantFailure.TERMINAL -> throw UploadRemoteTerminalException()
+                null -> Unit
             }
             if (grantRetryableFailure) throw UploadRemoteRetryableException()
             return UploadGrant(
@@ -647,6 +775,7 @@ class UploadCoordinatorAccountTest {
                 confirmEntered.complete(Unit)
                 release.await()
             }
+            throwFailure(confirmFailure)
             return if (confirmPending) UploadConfirmResult.CallbackPending else UploadConfirmResult.Confirmed(request.binding)
         }
 
@@ -655,6 +784,7 @@ class UploadCoordinatorAccountTest {
                 submitEntered.complete(Unit)
                 release.await()
             }
+            throwFailure(submitFailure)
             return if (submitAccepted) UploadSubmitResult.Accepted(sessionId) else UploadSubmitResult.Conflict
         }
 
@@ -664,6 +794,7 @@ class UploadCoordinatorAccountTest {
                 detailEntered.complete(Unit)
                 release.await()
             }
+            throwFailure(detailFailure)
             return UploadSessionDetail(
                 sessionId,
                 RemoteSessionState.PROCESSING,
@@ -676,7 +807,18 @@ class UploadCoordinatorAccountTest {
                 ),
             )
         }
+
+        private fun throwFailure(failure: GrantFailure?) {
+            when (failure) {
+                GrantFailure.CONTRACT -> throw UploadContractViolation("模拟凭证不匹配")
+                GrantFailure.RETRYABLE -> throw UploadRemoteRetryableException()
+                GrantFailure.TERMINAL -> throw UploadRemoteTerminalException()
+                null -> Unit
+            }
+        }
     }
+
+    private enum class GrantFailure { CONTRACT, RETRYABLE, TERMINAL }
 
     private class FakeScheduler : UploadWorkScheduling {
         val enqueued = mutableListOf<Pair<UploadWorkContract, Boolean>>()
