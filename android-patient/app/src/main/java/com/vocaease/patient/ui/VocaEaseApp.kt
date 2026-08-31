@@ -112,10 +112,12 @@ import com.vocaease.patient.feature.upload.UploadNotificationPermission
 import com.vocaease.patient.feature.history.AccountScopedHistoryLocalSource
 import com.vocaease.patient.feature.history.AnalysisRetryCoordinator
 import com.vocaease.patient.feature.history.AnalysisRetryOutcome
+import com.vocaease.patient.feature.history.AnalysisSyncCoordinator
 import com.vocaease.patient.feature.history.HistoryRepository
 import com.vocaease.patient.feature.history.HistoryScreen
 import com.vocaease.patient.feature.history.HistoryViewModel
 import com.vocaease.patient.feature.history.PrivateSessionVideoPlayer
+import com.vocaease.patient.feature.history.ProductionAnalysisSessionSynchronizer
 import com.vocaease.patient.feature.history.PrivateVideoRouteLifecycle
 import com.vocaease.patient.feature.history.PrivateVideoState
 import com.vocaease.patient.feature.history.ResultContentState
@@ -124,7 +126,6 @@ import com.vocaease.patient.feature.history.ResultViewModel
 import com.vocaease.patient.feature.history.VocaEaseAnalysisRetryRemote
 import com.vocaease.patient.feature.history.VocaEaseHistoryRemoteSource
 import com.vocaease.patient.feature.history.VocaEasePrivateVideoRemote
-import com.vocaease.patient.feature.history.VocaEaseResultSessionRemote
 import com.vocaease.patient.ui.theme.AppBackground
 import com.vocaease.patient.ui.theme.AppWhite
 import com.vocaease.patient.ui.theme.BrandGreen
@@ -505,14 +506,26 @@ private fun ResultRoute(sessionId: String, onBack: () -> Unit) {
         VocaEaseAnalysisRetryRemote(container.patientApi, storage.accountScopeHash)
     }
     val retryCoordinator = remember(retryRemote) { AnalysisRetryCoordinator(retryRemote, maxAttempts = 3) }
+    val analysisCoordinator = remember(container) {
+        container.repositoryFactory.create("analysis-worker") as AnalysisSyncCoordinator
+    }
+    val analysisSessionSynchronizer = remember(container) {
+        container.repositoryFactory.create("analysis-session-sync") as ProductionAnalysisSessionSynchronizer
+    }
     val resultViewModel: ResultViewModel = viewModel(
         key = "result:${storage.accountScopeHash}:${storage.cleanupScopeToken}:$sessionId",
         factory = ResultViewModel.factory(
             sessionId = sessionId,
-            remote = VocaEaseResultSessionRemote(container.patientApi, storage.accountScopeHash),
+            remote = analysisSessionSynchronizer.resultRemote(storage.accountScopeHash, storage.cleanupScopeToken),
             retryAction = {
                 val detail = retryRemote.detail(sessionId)
-                retryCoordinator.retry(detail)
+                when (val outcome = retryCoordinator.retry(detail)) {
+                    is AnalysisRetryOutcome.Accepted -> {
+                        if (analysisCoordinator.restart(sessionId, outcome.generation)) outcome
+                        else AnalysisRetryOutcome.Rejected
+                    }
+                    else -> outcome
+                }
             },
             dispatcher = container.dispatchers.io,
         ),

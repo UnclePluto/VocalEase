@@ -51,7 +51,7 @@ class ResultViewModel(
             AnalysisRetryOutcome.Rejected
         }
         when (outcome) {
-            AnalysisRetryOutcome.Accepted -> {
+            is AnalysisRetryOutcome.Accepted -> {
                 mutableState.value = mutableState.value.copy(retrying = false, errorMessage = null)
                 stop()
                 start()

@@ -77,7 +77,7 @@ sealed interface AnalysisSyncDecision {
     data class NotDue(val remainingDelayMillis: Long) : AnalysisSyncDecision
     data class Continue(val delayMillis: Long) : AnalysisSyncDecision
     data object Terminal : AnalysisSyncDecision
-    data object Retry : AnalysisSyncDecision
+    data class Retry(val minimumDelayMillis: Long? = null) : AnalysisSyncDecision
     data object Rejected : AnalysisSyncDecision
 }
 
@@ -117,8 +117,8 @@ class AnalysisSyncEngine(
             remote.fetch(contract.sessionId)
         } catch (cancellation: CancellationException) {
             throw cancellation
-        } catch (_: IOException) {
-            return AnalysisSyncDecision.Retry
+        } catch (error: IOException) {
+            return AnalysisSyncDecision.Retry((error as? AnalysisRemoteRetryException)?.retryAfterMillis)
         } catch (_: Exception) {
             return AnalysisSyncDecision.Rejected
         }
@@ -187,6 +187,63 @@ class AnalysisDetailSynchronizer(
         ) return@synchronized null
         latest[detail.sessionId] = detail
         detail
+    }
+}
+
+data class VersionedSessionIdentity(
+    val sessionId: String,
+    val generation: Int,
+    val terminal: Boolean,
+)
+
+/** 生产前后台共享的账户/登录世代隔离 single-flight。 */
+class AccountScopedSessionSynchronizer<T : Any>(
+    private val source: suspend (accountScopeHash: String, sessionId: String) -> T,
+    private val identity: (T) -> VersionedSessionIdentity,
+) {
+    private data class Key(val accountScopeHash: String, val incarnationProof: String, val sessionId: String)
+
+    private val lock = Any()
+    private val inFlight = mutableMapOf<Key, CompletableDeferred<T>>()
+    private val latest = mutableMapOf<Key, T>()
+
+    suspend fun fetch(
+        accountScopeHash: String,
+        incarnationProof: String,
+        sessionId: String,
+        minimumGeneration: Int,
+    ): T {
+        require(accountScopeHash.matches(Regex("[0-9a-f]{64}")))
+        require(incarnationProof.matches(Regex("[0-9a-f]{64}")))
+        require(sessionId.isNotBlank() && sessionId.length <= 128 && minimumGeneration >= 0)
+        val key = Key(accountScopeHash, incarnationProof, sessionId)
+        val (deferred, leader) = synchronized(lock) {
+            inFlight[key]?.let { it to false } ?: CompletableDeferred<T>().also { inFlight[key] = it } to true
+        }
+        if (leader) {
+            try {
+                val fetched = source(accountScopeHash, sessionId)
+                val fetchedIdentity = identity(fetched)
+                check(fetchedIdentity.sessionId == sessionId && fetchedIdentity.generation >= 0)
+                val accepted = synchronized(lock) {
+                    val current = latest[key]
+                    val currentIdentity = current?.let(identity)
+                    if (currentIdentity != null && (
+                            fetchedIdentity.generation < currentIdentity.generation ||
+                                (fetchedIdentity.generation == currentIdentity.generation && currentIdentity.terminal && !fetchedIdentity.terminal)
+                            )
+                    ) current else fetched.also { latest[key] = it }
+                }
+                deferred.complete(accepted)
+            } catch (error: Throwable) {
+                deferred.completeExceptionally(error)
+            } finally {
+                synchronized(lock) { if (inFlight[key] === deferred) inFlight.remove(key) }
+            }
+        }
+        return deferred.await().also {
+            check(identity(it).generation >= minimumGeneration) { "分析响应generation已过期" }
+        }
     }
 }
 

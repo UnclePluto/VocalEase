@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -123,31 +124,51 @@ class PrivateSessionVideoPlayer(
             failUnavailable()
             return
         }
-        val generation = synchronized(stateLock) {
+        val (generation, clearPrevious) = synchronized(stateLock) {
             if (released || !leaseActive()) return
+            val hadPrevious = currentSessionId != null || currentSourceId != null
             operationGeneration += 1
             currentSessionId = sessionId
             currentAssetId = null
             currentSourceId = null
             authenticationRefreshUsed = false
             mutableState.value = PrivateVideoState.Loading
-            operationGeneration
+            operationGeneration to hadPrevious
         }
-        val detail = runCatching { remote.session(sessionId) }.getOrNull()
-        val asset = detail?.validatedVideoFor(sessionId)
-        if (asset == null) {
-            failIfCurrent(generation, "视频暂不可用")
-            return
+        try {
+            if (clearPrevious) engineLock.withLock { engine.stopAndClear() }
+            val detail = try {
+                remote.session(sessionId)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                null
+            }
+            val asset = detail?.validatedVideoFor(sessionId)
+            if (asset == null) {
+                failIfCurrent(generation, "视频暂不可用")
+                return
+            }
+            val grant = cachedGrant(asset.assetId) ?: try {
+                remote.privateUrl(asset.assetId)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                null
+            }
+            if (grant == null || !grant.isUsable(nowEpochMillis())) {
+                failIfCurrent(generation, "视频暂不可用")
+                return
+            }
+            synchronized(stateLock) {
+                if (isCurrent(generation, sessionId)) grants[asset.assetId] = grant
+            }
+            loadIfCurrent(generation, sessionId, asset.assetId, grant, 0L, refreshIndex = 0)
+        } catch (cancellation: CancellationException) {
+            cancelIfCurrent(generation)
+            engineLock.withLock { engine.stopAndClear() }
+            throw cancellation
         }
-        val grant = cachedGrant(asset.assetId) ?: runCatching { remote.privateUrl(asset.assetId) }.getOrNull()
-        if (grant == null || !grant.isUsable(nowEpochMillis())) {
-            failIfCurrent(generation, "视频暂不可用")
-            return
-        }
-        synchronized(stateLock) {
-            if (isCurrent(generation, sessionId)) grants[asset.assetId] = grant
-        }
-        loadIfCurrent(generation, sessionId, asset.assetId, grant, 0L, refreshIndex = 0)
     }
 
     suspend fun onPlaybackHttpError(sourceId: String, statusCode: Int) {
@@ -246,6 +267,15 @@ class PrivateSessionVideoPlayer(
 
     private fun failIfCurrent(generation: Long, message: String) = synchronized(stateLock) {
         if (generation == operationGeneration && !released) mutableState.value = PrivateVideoState.Failed(message)
+    }
+
+    private fun cancelIfCurrent(generation: Long) = synchronized(stateLock) {
+        if (generation == operationGeneration && !released) {
+            currentSessionId = null
+            currentAssetId = null
+            currentSourceId = null
+            mutableState.value = PrivateVideoState.Unavailable
+        }
     }
 
     private fun isCurrent(generation: Long, sessionId: String): Boolean =

@@ -675,7 +675,7 @@ class AccountScopedDraftStorage internal constructor(
                     UploadPipelineStage.CONFIRMING_VIDEO -> HistoryStatus.CONFIRMING
                     UploadPipelineStage.SUBMITTING -> HistoryStatus.SUBMITTING
                     UploadPipelineStage.ANALYZING -> HistoryStatus.ANALYZING
-                    UploadPipelineStage.FAILED -> HistoryStatus.FAILED
+                    UploadPipelineStage.FAILED -> HistoryStatus.UPLOAD_FAILED
                 },
                 updatedAtEpochMillis = maxOf(
                     draft.createdAt,
@@ -689,30 +689,42 @@ class AccountScopedDraftStorage internal constructor(
 
     suspend fun loadAnalysisCheckpoint(sessionId: String): AnalysisCheckpoint? = checked {
         require(sessionId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
-        database.analysisCheckpointDao().find(lease.patientId, sessionId)?.let { entity ->
-            if (entity.accountScopeHash != accountScopeHash || entity.incarnationProof != cleanupScopeToken) {
-                throw StaleAccountScopeException()
-            }
-            AnalysisCheckpoint(
-                accountScopeHash = entity.accountScopeHash,
-                sessionId = entity.sessionId,
-                incarnationProof = entity.incarnationProof,
-                status = AnalysisStatus.valueOf(entity.status),
-                analysisGeneration = entity.analysisGeneration,
-                pollStep = entity.pollStep,
-                nextDeadlineEpochMillis = entity.nextDeadlineAt,
-                version = entity.operationVersion,
+        var entity = database.analysisCheckpointDao().find(accountScopeHash, sessionId) ?: return@checked null
+        if (entity.incarnationProof != cleanupScopeToken) {
+            val adopted = database.analysisCheckpointDao().takeover(
+                accountScopeHash = accountScopeHash,
+                sessionId = sessionId,
+                expectedIncarnationProof = entity.incarnationProof,
+                newIncarnationProof = cleanupScopeToken,
+                expectedVersion = entity.operationVersion,
+                nextVersion = entity.operationVersion + 1,
             )
+            entity = if (adopted == 1) {
+                entity.copy(incarnationProof = cleanupScopeToken, operationVersion = entity.operationVersion + 1)
+            } else {
+                database.analysisCheckpointDao().find(accountScopeHash, sessionId)
+                    ?.takeIf { it.incarnationProof == cleanupScopeToken }
+                    ?: throw StaleAccountScopeException()
+            }
         }
+        AnalysisCheckpoint(
+            accountScopeHash = entity.accountScopeHash,
+            sessionId = entity.sessionId,
+            incarnationProof = entity.incarnationProof,
+            status = AnalysisStatus.valueOf(entity.status),
+            analysisGeneration = entity.analysisGeneration,
+            pollStep = entity.pollStep,
+            nextDeadlineEpochMillis = entity.nextDeadlineAt,
+            version = entity.operationVersion,
+        )
     }
 
     suspend fun persistAnalysisCheckpoint(expectedVersion: Long?, checkpoint: AnalysisCheckpoint): Boolean = checked {
         require(checkpoint.accountScopeHash == accountScopeHash && checkpoint.incarnationProof == cleanupScopeToken)
         require(checkpoint.status != AnalysisStatus.UNKNOWN)
         val entity = AnalysisCheckpointEntity(
-            accountScope = lease.patientId,
-            sessionId = checkpoint.sessionId,
             accountScopeHash = checkpoint.accountScopeHash,
+            sessionId = checkpoint.sessionId,
             incarnationProof = checkpoint.incarnationProof,
             status = checkpoint.status.name,
             analysisGeneration = checkpoint.analysisGeneration,
@@ -724,9 +736,8 @@ class AccountScopedDraftStorage internal constructor(
             database.analysisCheckpointDao().insert(entity) != -1L
         } else {
             checkpoint.version == expectedVersion + 1 && database.analysisCheckpointDao().checkpoint(
-                accountScope = lease.patientId,
-                sessionId = entity.sessionId,
                 accountScopeHash = entity.accountScopeHash,
+                sessionId = entity.sessionId,
                 incarnationProof = entity.incarnationProof,
                 status = entity.status,
                 analysisGeneration = entity.analysisGeneration,

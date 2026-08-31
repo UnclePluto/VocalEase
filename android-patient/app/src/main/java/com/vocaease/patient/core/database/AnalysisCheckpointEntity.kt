@@ -10,13 +10,12 @@ import androidx.room.Query
 
 @Entity(
     tableName = "analysis_checkpoints",
-    primaryKeys = ["account_scope", "session_id"],
-    indices = [Index(value = ["account_scope", "next_deadline_at"])],
+    primaryKeys = ["account_scope_hash", "session_id"],
+    indices = [Index(value = ["account_scope_hash", "next_deadline_at"])],
 )
 data class AnalysisCheckpointEntity(
-    @ColumnInfo(name = "account_scope") val accountScope: String,
-    @ColumnInfo(name = "session_id") val sessionId: String,
     @ColumnInfo(name = "account_scope_hash") val accountScopeHash: String,
+    @ColumnInfo(name = "session_id") val sessionId: String,
     @ColumnInfo(name = "incarnation_proof") val incarnationProof: String,
     val status: String,
     @ColumnInfo(name = "analysis_generation") val analysisGeneration: Int,
@@ -25,7 +24,7 @@ data class AnalysisCheckpointEntity(
     @ColumnInfo(name = "operation_version") val operationVersion: Long,
 ) {
     init {
-        require(accountScope.isNotBlank() && sessionId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+        require(sessionId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
         require(accountScopeHash.matches(Regex("[0-9a-f]{64}")))
         require(incarnationProof.matches(Regex("[0-9a-f]{64}")))
         require(status in setOf("UPLOADED", "PROCESSING", "RETRYING", "COMPLETED", "FAILED", "CANCELLED"))
@@ -35,8 +34,8 @@ data class AnalysisCheckpointEntity(
 
 @Dao
 internal interface AnalysisCheckpointDao {
-    @Query("SELECT * FROM analysis_checkpoints WHERE account_scope=:accountScope AND session_id=:sessionId")
-    suspend fun find(accountScope: String, sessionId: String): AnalysisCheckpointEntity?
+    @Query("SELECT * FROM analysis_checkpoints WHERE account_scope_hash=:accountScopeHash AND session_id=:sessionId")
+    suspend fun find(accountScopeHash: String, sessionId: String): AnalysisCheckpointEntity?
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: AnalysisCheckpointEntity): Long
@@ -44,13 +43,12 @@ internal interface AnalysisCheckpointDao {
     @Query(
         "UPDATE analysis_checkpoints SET status=:status,analysis_generation=:analysisGeneration," +
             "poll_step=:pollStep,next_deadline_at=:nextDeadlineAt,operation_version=:nextVersion " +
-            "WHERE account_scope=:accountScope AND session_id=:sessionId AND account_scope_hash=:accountScopeHash " +
+            "WHERE account_scope_hash=:accountScopeHash AND session_id=:sessionId " +
             "AND incarnation_proof=:incarnationProof AND operation_version=:expectedVersion",
     )
     suspend fun checkpoint(
-        accountScope: String,
-        sessionId: String,
         accountScopeHash: String,
+        sessionId: String,
         incarnationProof: String,
         status: String,
         analysisGeneration: Int,
@@ -58,5 +56,19 @@ internal interface AnalysisCheckpointDao {
         nextDeadlineAt: Long,
         nextVersion: Long,
         expectedVersion: Long,
+    ): Int
+
+    @Query(
+        "UPDATE analysis_checkpoints SET incarnation_proof=:newIncarnationProof," +
+            "operation_version=:nextVersion WHERE account_scope_hash=:accountScopeHash AND session_id=:sessionId " +
+            "AND incarnation_proof=:expectedIncarnationProof AND operation_version=:expectedVersion",
+    )
+    suspend fun takeover(
+        accountScopeHash: String,
+        sessionId: String,
+        expectedIncarnationProof: String,
+        newIncarnationProof: String,
+        expectedVersion: Long,
+        nextVersion: Long,
     ): Int
 }

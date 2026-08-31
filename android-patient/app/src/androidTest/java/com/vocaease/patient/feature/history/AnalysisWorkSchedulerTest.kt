@@ -58,6 +58,20 @@ class AnalysisWorkSchedulerTest {
         scheduler.cancelAccount(other.accountScopeHash)
     }
 
+    @Test
+    fun replace取消旧链并只保留一个可执行的新generation工作() {
+        val value = contract("scheduler-replace")
+        val scheduler = AndroidAnalysisWorkScheduler(context)
+        scheduler.start(value, 300_000)
+        scheduler.append(value, 300_000)
+
+        scheduler.replace(value, 10_000)
+
+        val work = workManager.getWorkInfosForUniqueWork(value.uniqueWorkName).get(10, TimeUnit.SECONDS)
+        assertEquals(1, work.count { !it.state.isFinished })
+        scheduler.cancelAccount(value.accountScopeHash)
+    }
+
     private fun contract(sessionId: String) = AnalysisAndroidWorkContract(
         "a".repeat(64), sessionId, "d".repeat(64),
     )

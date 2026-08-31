@@ -32,7 +32,7 @@ import com.vocaease.patient.feature.upload.VocaEaseUploadRemote
 import com.vocaease.patient.feature.history.AccountScopedAnalysisAccount
 import com.vocaease.patient.feature.history.AnalysisSyncCoordinator
 import com.vocaease.patient.feature.history.AndroidAnalysisWorkScheduler
-import com.vocaease.patient.feature.history.VocaEaseAnalysisDetailRemote
+import com.vocaease.patient.feature.history.ProductionAnalysisSessionSynchronizer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -121,9 +121,12 @@ class AndroidAppContainer(context: Context) : AppContainer {
         override val io: CoroutineDispatcher = Dispatchers.IO
         override val default: CoroutineDispatcher = Dispatchers.Default
     }
+    private val analysisSessionSynchronizer = ProductionAnalysisSessionSynchronizer(patientApi)
     private val analysisCoordinator = AnalysisSyncCoordinator(
         scopeProvider = { AccountScopedAnalysisAccount(draftStorage.current()) },
-        remoteFactory = { scope -> VocaEaseAnalysisDetailRemote(patientApi, scope.accountScopeHash) },
+        remoteFactory = { scope ->
+            analysisSessionSynchronizer.analysisRemote(scope.accountScopeHash, scope.incarnationProof)
+        },
         scheduler = AndroidAnalysisWorkScheduler(context),
         nowEpochMillis = clock::nowEpochMilliseconds,
     )
@@ -134,6 +137,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
             "patient" -> patientRepository
             "songs" -> songRepository
             "analysis-worker" -> analysisCoordinator
+            "analysis-session-sync" -> analysisSessionSynchronizer
             else -> error("仓库尚未提供：$name")
         }
     }

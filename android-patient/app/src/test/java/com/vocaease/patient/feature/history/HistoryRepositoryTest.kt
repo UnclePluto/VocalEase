@@ -1,8 +1,11 @@
 package com.vocaease.patient.feature.history
 
 import java.util.concurrent.atomic.AtomicBoolean
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -25,6 +28,27 @@ class HistoryRepositoryTest {
         assertEquals(1, repository.state.value.items.size)
         assertEquals("d-new", repository.state.value.items.single().draftId)
         assertEquals(HistoryStatus.UPLOADING, repository.state.value.items.single().status)
+    }
+
+    @Test
+    fun `本地上传失败与服务端分析失败使用不同状态文案`() {
+        assertEquals("上传失败", statusLabel(HistoryStatus.UPLOAD_FAILED))
+        assertEquals("分析失败", statusLabel(HistoryStatus.FAILED))
+    }
+
+    @Test
+    fun `历史元信息按设计稿显示今天时间或月日而非歌手`() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        val now = ZonedDateTime.of(2026, 8, 31, 10, 0, 0, 0, zone).toInstant().toEpochMilli()
+        val today = remote("today", HistoryStatus.COMPLETED).toHistoryItemForTest(
+            ZonedDateTime.of(2026, 8, 31, 9, 42, 0, 0, zone).toInstant().toEpochMilli(),
+        )
+        val old = remote("old", HistoryStatus.COMPLETED).toHistoryItemForTest(
+            ZonedDateTime.of(2026, 8, 24, 9, 42, 0, 0, zone).toInstant().toEpochMilli(),
+        )
+
+        assertEquals("今天 09:42 · 0:30", historyMeta(today, now, zone))
+        assertEquals("8 月 24 日 · 0:30", historyMeta(old, now, zone))
     }
 
     @Test
@@ -142,6 +166,26 @@ class HistoryRepositoryTest {
     }
 
     @Test
+    fun `并发分页按请求顺序原子合并且不会跳过中间页`() = runBlocking {
+        val pageTwo = CompletableDeferred<HistoryPage>()
+        val pageTwoEntered = CompletableDeferred<Unit>()
+        val pageThreeEntered = CompletableDeferred<Unit>()
+        val source = OutOfOrderPagingRemote(pageTwo, pageTwoEntered, pageThreeEntered)
+        val repository = HistoryRepository(EmptyHistoryLocal, source) { true }
+        repository.start()
+        repository.refresh(page = 1, pageSize = 1)
+
+        val second = async { repository.refresh(page = 2, pageSize = 1) }
+        pageTwoEntered.await()
+        val third = async(start = CoroutineStart.UNDISPATCHED) { repository.refresh(page = 3, pageSize = 1) }
+        pageTwo.complete(HistoryPage(3, 2, 1, listOf(remote("s2", HistoryStatus.COMPLETED))))
+        second.await()
+        third.await()
+
+        assertEquals(listOf("s1", "s2", "s3"), repository.state.value.items.map { it.sessionId }.sorted())
+    }
+
+    @Test
     fun `本地启动与远端刷新的取消都必须原样传播`() = runBlocking {
         val startCancellation = CancellationException("离开历史页")
         val startRepository = HistoryRepository(
@@ -194,6 +238,10 @@ class HistoryRepositoryTest {
         analysisGeneration = 1,
         updatedAtEpochMillis = if (status == HistoryStatus.COMPLETED) 30 else 10,
     )
+
+    private fun HistoryRemoteRecord.toHistoryItemForTest(updatedAt: Long) = HistoryItem(
+        sessionId, null, songTitle, artist, durationSeconds, status, "88", analysisGeneration, updatedAt,
+    )
 }
 
 private object EmptyHistoryLocal : HistoryLocalSource {
@@ -225,3 +273,26 @@ private class SequencedSuspendingRemote(
     override suspend fun load(page: Int, pageSize: Int, status: HistoryStatus?): HistoryPage =
         if (calls++ == 0) first.await() else second.await()
 }
+
+private class OutOfOrderPagingRemote(
+    private val pageTwo: CompletableDeferred<HistoryPage>,
+    private val pageTwoEntered: CompletableDeferred<Unit>,
+    private val pageThreeEntered: CompletableDeferred<Unit>,
+) : HistoryRemoteSource {
+    override suspend fun load(page: Int, pageSize: Int, status: HistoryStatus?): HistoryPage = when (page) {
+        1 -> HistoryPage(3, 1, 1, listOf(historyRemote("s1")))
+        2 -> {
+            pageTwoEntered.complete(Unit)
+            pageTwo.await()
+        }
+        3 -> {
+            pageThreeEntered.complete(Unit)
+            HistoryPage(3, 3, 1, listOf(historyRemote("s3")))
+        }
+        else -> error("unexpected page")
+    }
+}
+
+private fun historyRemote(sessionId: String) = HistoryRemoteRecord(
+    sessionId, "远端歌曲", "歌手", 30, HistoryStatus.COMPLETED, 88.0, 1, 30,
+)

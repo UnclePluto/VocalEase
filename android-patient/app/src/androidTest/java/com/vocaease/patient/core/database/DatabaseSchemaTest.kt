@@ -37,7 +37,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(7, reopened.openHelper.readableDatabase.version)
+            assertEquals(8, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
@@ -118,7 +118,7 @@ class DatabaseSchemaTest {
             assertEquals("等待重试", job?.lastSafeError)
             assertEquals(null, job?.resumePipelineStage)
             assertEquals(0L, job?.operationVersion)
-            assertEquals(7, reopened.openHelper.readableDatabase.version)
+            assertEquals(8, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -153,7 +153,7 @@ class DatabaseSchemaTest {
             assertEquals(9, job?.attemptCount)
             assertEquals(54_321L, job?.nextRetryAt)
             assertEquals(0L, job?.operationVersion)
-            assertEquals(7, reopened.openHelper.readableDatabase.version)
+            assertEquals(8, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -166,15 +166,47 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(7, reopened.openHelper.readableDatabase.version)
+            assertEquals(8, reopened.openHelper.readableDatabase.version)
             val columns = reopened.openHelper.readableDatabase.query("PRAGMA table_info(analysis_checkpoints)").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(1)) }
             }
             assertEquals(
-                listOf("account_scope", "session_id", "account_scope_hash", "incarnation_proof", "status", "analysis_generation", "poll_step", "next_deadline_at", "operation_version"),
+                listOf("account_scope_hash", "session_id", "incarnation_proof", "status", "analysis_generation", "poll_step", "next_deadline_at", "operation_version"),
                 columns,
             )
             assertFalse(columns.any { it.contains("url") || it.contains("payload") || it.contains("result") })
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun versionSevenCheckpointMigratesWithoutRawPatientUuidAndKeepsPollingState() {
+        migrationHelper.createDatabase(DATABASE_NAME, 7).use { sqlite ->
+            sqlite.execSQL(
+                "INSERT INTO analysis_checkpoints(account_scope,session_id,account_scope_hash,incarnation_proof,status,analysis_generation,poll_step,next_deadline_at,operation_version) " +
+                    "VALUES('patient-raw-uuid','session-v7','${"a".repeat(64)}','${"b".repeat(64)}','PROCESSING',3,2,61000,4)",
+            )
+        }
+
+        val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
+        try {
+            val sqlite = reopened.openHelper.readableDatabase
+            assertEquals(8, sqlite.version)
+            val row = sqlite.query(
+                "SELECT account_scope_hash,session_id,incarnation_proof,status,analysis_generation,poll_step,next_deadline_at,operation_version FROM analysis_checkpoints",
+            ).use { cursor ->
+                assertEquals(true, cursor.moveToFirst())
+                List(8) { index -> cursor.getString(index) }
+            }
+            assertEquals(listOf("a".repeat(64), "session-v7", "b".repeat(64), "PROCESSING", "3", "2", "61000", "4"), row)
+            val sql = sqlite.query("SELECT sql FROM sqlite_master WHERE name='analysis_checkpoints'").use { cursor ->
+                assertEquals(true, cursor.moveToFirst())
+                cursor.getString(0)
+            }
+            assertFalse(sql.contains("account_scope`"))
+            assertFalse(sql.contains("patient-raw-uuid"))
         } finally {
             reopened.close()
         }

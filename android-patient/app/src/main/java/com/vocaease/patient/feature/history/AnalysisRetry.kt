@@ -28,7 +28,7 @@ interface AnalysisRetryRemote {
 }
 
 sealed interface AnalysisRetryOutcome {
-    data object Accepted : AnalysisRetryOutcome
+    data class Accepted(val generation: Int) : AnalysisRetryOutcome
     data object Rejected : AnalysisRetryOutcome
     data object MaxAttempts : AnalysisRetryOutcome {
         const val message: String = "暂时无法重新分析，请联系医生"
@@ -96,7 +96,7 @@ class AnalysisRetryCoordinator(
         if (detail.sessionId != failed.sessionId || detail.generation < failed.generation) return AnalysisRetryOutcome.Rejected
         if (detail.status in ACCEPTED_STATUSES && detail.generation >= targetGeneration) {
             rememberAccepted(detail.sessionId, detail.generation)
-            return AnalysisRetryOutcome.Accepted
+            return AnalysisRetryOutcome.Accepted(detail.generation)
         }
         if (detail.status != AnalysisStatus.FAILED || detail.generation != failed.generation) {
             return AnalysisRetryOutcome.Rejected
@@ -112,12 +112,12 @@ class AnalysisRetryCoordinator(
         sessionId: String,
         targetGeneration: Int,
     ): AnalysisRetryOutcome {
-        if (mutation.sessionId != sessionId || mutation.generation < targetGeneration ||
+        if (mutation.sessionId != sessionId || mutation.generation != targetGeneration ||
             mutation.status !in ACCEPTED_STATUSES || mutation.taskIds.isEmpty() ||
-            mutation.taskIds.any { it.isBlank() || it.length > 128 } || mutation.taskIds.distinct().size != mutation.taskIds.size
+            mutation.taskIds.any { !it.matches(OPAQUE_TASK_ID) } || mutation.taskIds.distinct().size != mutation.taskIds.size
         ) return AnalysisRetryOutcome.Rejected
         rememberAccepted(sessionId, mutation.generation)
-        return AnalysisRetryOutcome.Accepted
+        return AnalysisRetryOutcome.Accepted(mutation.generation)
     }
 
     private fun rememberAccepted(sessionId: String, generation: Int) = synchronized(lock) {
@@ -126,5 +126,6 @@ class AnalysisRetryCoordinator(
 
     private companion object {
         val ACCEPTED_STATUSES = setOf(AnalysisStatus.RETRYING, AnalysisStatus.PROCESSING, AnalysisStatus.COMPLETED)
+        val OPAQUE_TASK_ID = Regex("[A-Za-z0-9_-]{1,128}")
     }
 }

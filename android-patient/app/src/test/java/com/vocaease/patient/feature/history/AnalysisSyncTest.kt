@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -70,12 +71,32 @@ class AnalysisSyncTest {
     fun `网络故障安全重试而归属或generation倒退拒绝且不持久`() = runBlocking {
         val store = MemoryAnalysisCheckpointStore().apply { value = checkpoint(deadline = 1_000) }
         val retry = AnalysisSyncEngine(store, QueueAnalysisRemote().apply { failure = IOException("timeout") })
-        assertEquals(AnalysisSyncDecision.Retry, retry.runOnce(contract(), 1_000))
+        assertEquals(AnalysisSyncDecision.Retry(), retry.runOnce(contract(), 1_000))
 
         val oldVersion = store.value
         val mismatch = AnalysisSyncEngine(store, QueueAnalysisRemote(detail(AnalysisStatus.PROCESSING, 0, sessionId = "other")))
         assertEquals(AnalysisSyncDecision.Rejected, mismatch.runOnce(contract(), 1_000))
         assertEquals(oldVersion, store.value)
+    }
+
+    @Test
+    fun `429与5xx保留Retry After安全退避而普通4xx拒绝`() = runBlocking {
+        val store = MemoryAnalysisCheckpointStore().apply { value = checkpoint(deadline = 1_000) }
+        val throttled = AnalysisSyncEngine(
+            store,
+            QueueAnalysisRemote().apply { failure = AnalysisRemoteRetryException(45_000L) },
+        )
+        assertEquals(AnalysisSyncDecision.Retry(45_000L), throttled.runOnce(contract(), 1_000))
+
+        val serverFailure = AnalysisSyncEngine(
+            store,
+            QueueAnalysisRemote().apply { failure = AnalysisRemoteRetryException(null) },
+        )
+        assertEquals(AnalysisSyncDecision.Retry(), serverFailure.runOnce(contract(), 1_000))
+
+        assertEquals(120_000L, classifyAnalysisRetry(429, "120", nowEpochMillis = 1_000L)?.retryAfterMillis)
+        assertEquals(null, classifyAnalysisRetry(404, "120", nowEpochMillis = 1_000L))
+        assertEquals(null, classifyAnalysisRetry(429, "not-a-date", nowEpochMillis = 1_000L)?.retryAfterMillis)
     }
 
     @Test
@@ -106,6 +127,34 @@ class AnalysisSyncTest {
         assertEquals(2, second.await().generation)
         assertEquals(1, remote.calls.get())
         assertEquals(null, synchronizer.accept(detail(AnalysisStatus.PROCESSING, 1)))
+    }
+
+    @Test
+    fun `生产账户作用域同步器让前后台共享请求并隔离incarnation`() = runBlocking {
+        val gate = CompletableDeferred<AnalysisDetail>()
+        val entered = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val synchronizer = AccountScopedSessionSynchronizer(
+            source = { _, sessionId ->
+                calls.incrementAndGet()
+                entered.complete(Unit)
+                gate.await().copy(sessionId = sessionId)
+            },
+            identity = { VersionedSessionIdentity(it.sessionId, it.generation, it.isTerminal()) },
+        )
+        val first = async { synchronizer.fetch("a".repeat(64), "b".repeat(64), "s1", 1) }
+        entered.await()
+        val second = async { synchronizer.fetch("a".repeat(64), "b".repeat(64), "s1", 1) }
+        yield()
+        gate.complete(detail(AnalysisStatus.PROCESSING, 2))
+
+        assertEquals(2, first.await().generation)
+        assertEquals(2, second.await().generation)
+        assertEquals(1, calls.get())
+
+        val otherProof = synchronizer.fetch("a".repeat(64), "c".repeat(64), "s1", 1)
+        assertEquals(2, otherProof.generation)
+        assertEquals(2, calls.get())
     }
 
     @Test

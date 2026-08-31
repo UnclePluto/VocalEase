@@ -1,6 +1,7 @@
 package com.vocaease.patient.feature.history
 
 import android.os.Build
+import android.util.DisplayMetrics
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -128,10 +129,10 @@ class HistoryAndResultTest {
             }
         }
         composeRule.waitForIdle()
-        val image = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        val displayMetrics = DisplayMetrics().also(composeRule.activity.windowManager.defaultDisplay::getRealMetrics)
         if (Build.VERSION.SDK_INT >= 34) {
-            assertEquals(390, image.width)
-            assertEquals(844, image.height)
+            assertEquals(390, displayMetrics.widthPixels)
+            assertEquals(844, displayMetrics.heightPixels)
         }
         InstrumentationRegistry.getInstrumentation().uiAutomation
             .executeShellCommand("screencap -p /sdcard/task11-result-390x844.png").close()

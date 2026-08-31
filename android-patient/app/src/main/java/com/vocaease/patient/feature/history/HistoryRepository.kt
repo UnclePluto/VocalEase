@@ -5,6 +5,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class HistoryStatus {
     WAITING_NETWORK,
@@ -17,6 +19,7 @@ enum class HistoryStatus {
     UPLOADED,
     PROCESSING,
     COMPLETED,
+    UPLOAD_FAILED,
     FAILED,
     CANCELLED,
     UNKNOWN,
@@ -92,6 +95,7 @@ class HistoryRepository(
     val state: StateFlow<HistoryState> = _state.asStateFlow()
     private var localRecords: List<HistoryLocalRecord> = emptyList()
     private val remoteBySession = LinkedHashMap<String, HistoryRemoteRecord>()
+    private val paginationMutex = Mutex()
 
     suspend fun start() {
         if (!leaseActive()) return invalidateLease()
@@ -113,6 +117,14 @@ class HistoryRepository(
         status: HistoryStatus? = null,
     ) {
         require(page > 0 && pageSize in 1..MAX_PAGE_SIZE)
+        if (page > 1) {
+            paginationMutex.withLock { refreshInternal(page, pageSize, status) }
+        } else {
+            refreshInternal(page, pageSize, status)
+        }
+    }
+
+    private suspend fun refreshInternal(page: Int, pageSize: Int, status: HistoryStatus?) {
         val requestGeneration = generation.incrementAndGet()
         if (!leaseActive()) return invalidateLease()
         _state.value = _state.value.copy(loading = true, errorMessage = null, canRetry = false)

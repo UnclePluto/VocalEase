@@ -8,7 +8,33 @@ import com.vocaease.patient.core.network.dto.SessionStatus
 import com.vocaease.patient.core.network.dto.SingingSession
 import com.vocaease.patient.core.network.dto.toDomain
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import java.io.IOException
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import retrofit2.HttpException
+
+class AnalysisRemoteRetryException(
+    val retryAfterMillis: Long?,
+) : IOException("分析服务暂时不可用")
+
+internal fun classifyAnalysisRetry(
+    statusCode: Int,
+    retryAfter: String?,
+    nowEpochMillis: Long,
+): AnalysisRemoteRetryException? {
+    if (statusCode != 408 && statusCode != 429 && statusCode < 500) return null
+    val delay = retryAfter?.trim()?.takeIf { it.isNotEmpty() }?.let { value ->
+        value.toLongOrNull()?.takeIf { it >= 0 }?.let { seconds ->
+            seconds.coerceAtMost(MAX_ANALYSIS_RETRY_AFTER_SECONDS) * 1_000L
+        } ?: runCatching {
+            (ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli() - nowEpochMillis)
+                .coerceIn(0L, MAX_ANALYSIS_RETRY_AFTER_SECONDS * 1_000L)
+        }.getOrNull()
+    }
+    return AnalysisRemoteRetryException(delay)
+}
+
+private const val MAX_ANALYSIS_RETRY_AFTER_SECONDS = 18_000L
 
 class AccountScopedAnalysisAccount(
     private val storage: AccountScopedDraftStorage,
@@ -58,8 +84,16 @@ class VocaEaseAnalysisDetailRemote(
     private val accountScopeHash: String,
 ) : AnalysisDetailRemote {
     override suspend fun fetch(sessionId: String): AnalysisDetail {
-        val detail = api.session(sessionId).data.toDomain().verified(accountScopeHash, sessionId)
-        return AnalysisDetail(detail.id.toString(), detail.status.toAnalysisStatus(), detail.analysisGeneration)
+        return try {
+            val detail = api.session(sessionId).data.toDomain().verified(accountScopeHash, sessionId)
+            AnalysisDetail(detail.id.toString(), detail.status.toAnalysisStatus(), detail.analysisGeneration)
+        } catch (error: HttpException) {
+            throw classifyAnalysisRetry(
+                error.code(),
+                error.response()?.headers()?.get("Retry-After"),
+                System.currentTimeMillis(),
+            ) ?: error
+        }
     }
 }
 
@@ -71,8 +105,41 @@ class VocaEaseResultSessionRemote(
     private val api: PatientApi,
     private val accountScopeHash: String,
 ) : ResultSessionRemote {
-    override suspend fun fetch(sessionId: String): SingingSession =
+    override suspend fun fetch(sessionId: String): SingingSession = try {
         api.session(sessionId).data.toDomain().verified(accountScopeHash, sessionId)
+    } catch (error: HttpException) {
+        throw classifyAnalysisRetry(
+            error.code(),
+            error.response()?.headers()?.get("Retry-After"),
+            System.currentTimeMillis(),
+        ) ?: error
+    }
+}
+
+class ProductionAnalysisSessionSynchronizer(
+    private val api: PatientApi,
+) {
+    private val shared = AccountScopedSessionSynchronizer(
+        source = { accountScopeHash, sessionId ->
+            VocaEaseResultSessionRemote(api, accountScopeHash).fetch(sessionId)
+        },
+        identity = { session: SingingSession ->
+            VersionedSessionIdentity(
+                session.id.toString(),
+                session.analysisGeneration,
+                session.status in setOf(SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED),
+            )
+        },
+    )
+
+    fun analysisRemote(accountScopeHash: String, incarnationProof: String): AnalysisDetailRemote = AnalysisDetailRemote { sessionId ->
+        val session = shared.fetch(accountScopeHash, incarnationProof, sessionId, 0)
+        AnalysisDetail(session.id.toString(), session.status.toAnalysisStatus(), session.analysisGeneration)
+    }
+
+    fun resultRemote(accountScopeHash: String, incarnationProof: String): ResultSessionRemote = ResultSessionRemote { sessionId ->
+        shared.fetch(accountScopeHash, incarnationProof, sessionId, 0)
+    }
 }
 
 class VocaEasePrivateVideoRemote(
@@ -109,6 +176,9 @@ class VocaEaseAnalysisRetryRemote(
         val mutation = api.retrySession(sessionId, idempotencyKey).data.toDomain()
         if (mutation.sessionId.toString() != sessionId) throw NetworkContractException("重试响应会话不匹配")
         val detail = api.session(sessionId).data.toDomain().verified(accountScopeHash, sessionId)
+        if (mutation.status.toAnalysisStatus() != detail.status.toAnalysisStatus() ||
+            mutation.analysisTaskIds.toSet() != detail.analysisTaskIds.toSet()
+        ) throw NetworkContractException("重试响应与会话详情不一致")
         AnalysisRetryResponse.Accepted(
             AnalysisRetryMutation(
                 sessionId = mutation.sessionId.toString(),
@@ -146,6 +216,7 @@ private fun HistoryStatus.toServerStatus(): SessionStatus? = when (this) {
     HistoryStatus.UPLOADED -> SessionStatus.UPLOADED
     HistoryStatus.PROCESSING, HistoryStatus.ANALYZING -> SessionStatus.PROCESSING
     HistoryStatus.COMPLETED -> SessionStatus.COMPLETED
+    HistoryStatus.UPLOAD_FAILED -> null
     HistoryStatus.FAILED -> SessionStatus.FAILED
     HistoryStatus.CANCELLED -> SessionStatus.CANCELLED
     else -> null

@@ -18,7 +18,7 @@ class AnalysisRetryTest {
         }
         val coordinator = AnalysisRetryCoordinator(remote, maxAttempts = 3)
 
-        assertEquals(AnalysisRetryOutcome.Accepted, coordinator.retry(failed(generation = 2, attempt = 1)))
+        assertEquals(AnalysisRetryOutcome.Accepted(3), coordinator.retry(failed(generation = 2, attempt = 1)))
         assertEquals(listOf("retry:s1:3"), remote.keys)
 
         remote.retryResults += AnalysisRetryResponse.Accepted(mutation("other", AnalysisStatus.PROCESSING, 4))
@@ -35,8 +35,8 @@ class AnalysisRetryTest {
         val second = async { coordinator.retry(failed(1, 1)) }
         gate.complete(AnalysisRetryResponse.Accepted(mutation("s1", AnalysisStatus.RETRYING, 2)))
 
-        assertEquals(AnalysisRetryOutcome.Accepted, first.await())
-        assertEquals(AnalysisRetryOutcome.Accepted, second.await())
+        assertEquals(AnalysisRetryOutcome.Accepted(2), first.await())
+        assertEquals(AnalysisRetryOutcome.Accepted(2), second.await())
         assertEquals(1, remote.calls)
     }
 
@@ -47,7 +47,7 @@ class AnalysisRetryTest {
                 retryResults += AnalysisRetryResponse.Conflict
                 details += AnalysisRetryDetail("s1", status, generation = 2, attempt = 2)
             }
-            assertEquals(AnalysisRetryOutcome.Accepted, AnalysisRetryCoordinator(remote, 3).retry(failed(1, 1)))
+            assertEquals(AnalysisRetryOutcome.Accepted(2), AnalysisRetryCoordinator(remote, 3).retry(failed(1, 1)))
             assertEquals(1, remote.keys.size)
         }
     }
@@ -60,7 +60,7 @@ class AnalysisRetryTest {
             details += AnalysisRetryDetail("s1", AnalysisStatus.FAILED, generation = 1, attempt = 1)
         }
 
-        assertEquals(AnalysisRetryOutcome.Accepted, AnalysisRetryCoordinator(remote, 3).retry(failed(1, 1)))
+        assertEquals(AnalysisRetryOutcome.Accepted(2), AnalysisRetryCoordinator(remote, 3).retry(failed(1, 1)))
         assertEquals(listOf("retry:s1:2", "retry:s1:2"), remote.keys)
     }
 
@@ -108,6 +108,21 @@ class AnalysisRetryTest {
         } catch (actual: CancellationException) {
             assertTrue(actual === cancellation)
         }
+    }
+
+    @Test
+    fun `mutation必须精确匹配目标generation且task ids合法`() = runBlocking {
+        val future = FakeRetryRemote().apply {
+            retryResults += AnalysisRetryResponse.Accepted(mutation("s1", AnalysisStatus.PROCESSING, 3))
+        }
+        assertEquals(AnalysisRetryOutcome.Rejected, AnalysisRetryCoordinator(future, 3).retry(failed(1, 1)))
+
+        val invalidTask = FakeRetryRemote().apply {
+            retryResults += AnalysisRetryResponse.Accepted(
+                AnalysisRetryMutation("s1", AnalysisStatus.PROCESSING, 2, listOf("bad task id")),
+            )
+        }
+        assertEquals(AnalysisRetryOutcome.Rejected, AnalysisRetryCoordinator(invalidTask, 3).retry(failed(1, 1)))
     }
 
     private fun failed(generation: Int, attempt: Int) = AnalysisRetryDetail("s1", AnalysisStatus.FAILED, generation, attempt)

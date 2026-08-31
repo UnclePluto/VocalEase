@@ -13,6 +13,7 @@ import com.vocaease.patient.core.network.dto.TreatmentPlanSnapshot
 import com.vocaease.patient.core.network.dto.UnavailableAnalysisPayload
 import java.time.Instant
 import java.time.LocalDate
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +31,7 @@ class ResultViewModelTest {
         val gate = CompletableDeferred<Unit>()
         val delays = mutableListOf<Long>()
         val viewModel = ResultViewModel(
-            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted }, Dispatchers.Unconfined,
+            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(1) }, Dispatchers.Unconfined,
             delayMillis = { delays += it; gate.await() },
         )
 
@@ -49,7 +50,7 @@ class ResultViewModelTest {
         val remote = QueueResultRemote(session(SessionStatus.PROCESSING, 2), session(SessionStatus.PROCESSING, 1))
         val gate = CompletableDeferred<Unit>()
         val viewModel = ResultViewModel(
-            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted }, Dispatchers.Unconfined,
+            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(1) }, Dispatchers.Unconfined,
             delayMillis = { gate.await() },
         )
         viewModel.start()
@@ -74,17 +75,37 @@ class ResultViewModelTest {
         viewModel.start()
         viewModel.retryAnalysis()
 
-        assertEquals(1, retryCalls)
-        assertEquals("暂时无法重新分析，请联系医生", viewModel.state.value.errorMessage)
-        assertTrue(viewModel.state.value.content?.canRetry == true)
+        assertEquals(0, retryCalls)
+        assertEquals("暂时无法重新分析，请联系医生", viewModel.state.value.content?.safeFailureSummary)
+        assertFalse(viewModel.state.value.content?.canRetry == true)
+    }
+
+    @Test
+    fun `已有处理中内容遇瞬时网络失败时保留内容并显示可重试错误`() = runBlocking {
+        val remote = QueueResultRemote(session(SessionStatus.PROCESSING, 1))
+        val gate = CompletableDeferred<Unit>()
+        val viewModel = ResultViewModel(
+            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(1) }, Dispatchers.Unconfined,
+            delayMillis = { gate.await() },
+        )
+        viewModel.start()
+        remote.failure = IOException("temporary")
+        gate.complete(Unit)
+        yield()
+
+        assertEquals(ResultContentState.PROCESSING, viewModel.state.value.content?.contentState)
+        assertEquals("暂时无法加载演唱结果，请重试", viewModel.state.value.errorMessage)
+        assertFalse(viewModel.isPolling)
     }
 }
 
 private class QueueResultRemote(vararg values: SingingSession) : ResultSessionRemote {
     private val queue = ArrayDeque(values.toList())
     var calls = 0
+    var failure: Exception? = null
     override suspend fun fetch(sessionId: String): SingingSession {
         calls += 1
+        failure?.let { throw it }
         return queue.removeFirst()
     }
 }

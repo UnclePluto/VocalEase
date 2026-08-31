@@ -75,7 +75,7 @@ class DatabaseConverters {
         UploadLocalActionEntity::class,
         AnalysisCheckpointEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -100,6 +100,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_4_5)
                 .addMigrations(MIGRATION_5_6)
                 .addMigrations(MIGRATION_6_7)
+                .addMigrations(MIGRATION_7_8)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -235,6 +236,38 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_analysis_checkpoints_account_scope_next_deadline_at` " +
                         "ON `analysis_checkpoints` (`account_scope`, `next_deadline_at`)",
+                )
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE `analysis_checkpoints_v8` (
+                      `account_scope_hash` TEXT NOT NULL,
+                      `session_id` TEXT NOT NULL,
+                      `incarnation_proof` TEXT NOT NULL,
+                      `status` TEXT NOT NULL,
+                      `analysis_generation` INTEGER NOT NULL,
+                      `poll_step` INTEGER NOT NULL,
+                      `next_deadline_at` INTEGER NOT NULL,
+                      `operation_version` INTEGER NOT NULL,
+                      PRIMARY KEY(`account_scope_hash`, `session_id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "INSERT INTO `analysis_checkpoints_v8`(" +
+                        "account_scope_hash,session_id,incarnation_proof,status,analysis_generation,poll_step,next_deadline_at,operation_version" +
+                        ") SELECT account_scope_hash,session_id,incarnation_proof,status,analysis_generation,poll_step,next_deadline_at,operation_version " +
+                        "FROM `analysis_checkpoints`",
+                )
+                db.execSQL("DROP TABLE `analysis_checkpoints`")
+                db.execSQL("ALTER TABLE `analysis_checkpoints_v8` RENAME TO `analysis_checkpoints`")
+                db.execSQL(
+                    "CREATE INDEX `index_analysis_checkpoints_account_scope_hash_next_deadline_at` " +
+                        "ON `analysis_checkpoints` (`account_scope_hash`, `next_deadline_at`)",
                 )
             }
         }

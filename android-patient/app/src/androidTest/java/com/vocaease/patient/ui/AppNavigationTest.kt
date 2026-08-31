@@ -26,6 +26,7 @@ import com.vocaease.patient.feature.history.HistoryItem
 import com.vocaease.patient.feature.history.HistoryStatus
 import androidx.test.platform.app.InstrumentationRegistry
 import android.os.Build
+import android.util.DisplayMetrics
 import org.junit.Assert.assertEquals
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
@@ -151,10 +152,10 @@ class AppNavigationTest {
         }
         composeRule.onNodeWithText("小幸运").assertIsDisplayed()
         composeRule.onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab)).assertCountEquals(2)
-        val image = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        val displayMetrics = DisplayMetrics().also(composeRule.activity.windowManager.defaultDisplay::getRealMetrics)
         if (Build.VERSION.SDK_INT >= 34) {
-            assertEquals(390, image.width)
-            assertEquals(844, image.height)
+            assertEquals(390, displayMetrics.widthPixels)
+            assertEquals(844, displayMetrics.heightPixels)
         }
         InstrumentationRegistry.getInstrumentation().uiAutomation
             .executeShellCommand("screencap -p /sdcard/task11-profile-390x844.png").close()

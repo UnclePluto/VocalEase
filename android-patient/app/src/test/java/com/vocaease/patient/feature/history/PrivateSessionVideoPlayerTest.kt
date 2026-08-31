@@ -3,6 +3,8 @@ package com.vocaease.patient.feature.history
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -128,7 +130,7 @@ class PrivateSessionVideoPlayerTest {
         leaseActive = false
         player.invalidateLease()
         assertEquals(PrivateVideoState.Unavailable, player.state)
-        assertEquals(1, engine.stopCalls)
+        assertEquals(2, engine.stopCalls)
     }
 
     @Test
@@ -152,6 +154,37 @@ class PrivateSessionVideoPlayerTest {
         assertEquals(1, remote.grantCalls)
         assertEquals(PrivateVideoState.Unavailable, player.state)
     }
+
+    @Test
+    fun `切换会话在请求新地址前清除旧画面`() = runBlocking {
+        val remote = FakePrivateVideoRemote(videoSession()).apply {
+            grants += privateGrant("https://private.example/one", 100_000)
+            grants += privateGrant("https://private.example/two", 100_000)
+        }
+        val engine = FakePrivateVideoEngine()
+        val player = PrivateSessionVideoPlayer(remote, engine, { 0L }, { true })
+        player.open("s1")
+        remote.detail = videoSession("s2", listOf(videoAsset(assetId = "asset-2")))
+
+        player.open("s2")
+
+        assertEquals(1, engine.stopCalls)
+        assertTrue(engine.loads.last().sourceId.startsWith("asset-2#"))
+    }
+
+    @Test
+    fun `取消当前open会清除旧画面且不得发布失败状态`() = runBlocking {
+        val remote = SuspendingPrivateVideoRemote()
+        val engine = FakePrivateVideoEngine()
+        val player = PrivateSessionVideoPlayer(remote, engine, { 0L }, { true })
+        val opening = launch { player.open("s1") }
+        remote.firstGrantEntered.await()
+
+        opening.cancelAndJoin()
+
+        assertEquals(PrivateVideoState.Unavailable, player.state)
+        assertEquals(1, engine.stopCalls)
+    }
 }
 
 private fun videoAsset(
@@ -169,7 +202,7 @@ private fun videoSession(
 
 private fun privateGrant(url: String, expiresAt: Long) = PrivateVideoGrant(url, expiresAt)
 
-private class FakePrivateVideoRemote(private var detail: PrivateVideoSession) : PrivateVideoRemote {
+private class FakePrivateVideoRemote(var detail: PrivateVideoSession) : PrivateVideoRemote {
     val grants = ArrayDeque<PrivateVideoGrant>()
     var grantCalls = 0
     override suspend fun session(sessionId: String): PrivateVideoSession = detail

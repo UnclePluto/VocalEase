@@ -8,7 +8,7 @@ import androidx.work.WorkerParameters
 import com.vocaease.patient.VocaEaseApplication
 
 fun interface AnalysisWorkerGateway {
-    suspend fun run(contract: AnalysisAndroidWorkContract): AnalysisSyncDecision
+    suspend fun runAndSchedule(contract: AnalysisAndroidWorkContract): AnalysisSyncDecision
 }
 
 class AnalysisSyncWorker(
@@ -20,17 +20,11 @@ class AnalysisSyncWorker(
         val gateway = runCatching {
             ((applicationContext as? VocaEaseApplication)?.container?.repositoryFactory?.create("analysis-worker")) as? AnalysisWorkerGateway
         }.getOrNull() ?: return Result.failure()
-        return when (val decision = gateway.run(contract)) {
-            is AnalysisSyncDecision.NotDue -> {
-                AndroidAnalysisWorkScheduler(applicationContext).append(contract, decision.remainingDelayMillis)
-                Result.success()
-            }
-            is AnalysisSyncDecision.Continue -> {
-                AndroidAnalysisWorkScheduler(applicationContext).append(contract, decision.delayMillis)
-                Result.success()
-            }
+        return when (val decision = gateway.runAndSchedule(contract)) {
+            is AnalysisSyncDecision.NotDue,
+            is AnalysisSyncDecision.Continue -> Result.success()
             AnalysisSyncDecision.Terminal -> Result.success()
-            AnalysisSyncDecision.Retry -> Result.retry()
+            is AnalysisSyncDecision.Retry -> if (decision.minimumDelayMillis != null) Result.success() else Result.retry()
             AnalysisSyncDecision.Rejected -> Result.failure()
         }
     }
@@ -47,6 +41,7 @@ class AnalysisSyncWorker(
 interface AnalysisWorkScheduling {
     fun start(contract: AnalysisAndroidWorkContract, delayMillis: Long)
     fun append(contract: AnalysisAndroidWorkContract, delayMillis: Long)
+    fun replace(contract: AnalysisAndroidWorkContract, delayMillis: Long)
     fun cancelAccount(accountScopeHash: String)
 }
 
@@ -65,6 +60,14 @@ class AndroidAnalysisWorkScheduler(context: Context) : AnalysisWorkScheduling {
         workManager.enqueueUniqueWork(
             contract.uniqueWorkName,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
+            contract.request(delayMillis),
+        )
+    }
+
+    override fun replace(contract: AnalysisAndroidWorkContract, delayMillis: Long) {
+        workManager.enqueueUniqueWork(
+            contract.uniqueWorkName,
+            ExistingWorkPolicy.REPLACE,
             contract.request(delayMillis),
         )
     }

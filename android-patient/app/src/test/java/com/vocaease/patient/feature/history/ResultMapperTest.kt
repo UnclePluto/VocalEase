@@ -122,6 +122,31 @@ class ResultMapperTest {
         assertFalse(model.canRetry)
     }
 
+    @Test
+    fun `只接受与session当前generation精确匹配的metric结果`() {
+        val old = result(generation = 1)
+        val future = result(generation = 3)
+        val model = ResultMapper.map(
+            session(status = SessionStatus.COMPLETED, score = 99, result = old).copy(
+                analysisGeneration = 2,
+                analysisResults = listOf(old, future),
+            ),
+        )
+
+        assertEquals(ResultContentState.RESULT_SYNCING, model.contentState)
+        assertNull(model.overallScore)
+        assertTrue(model.pitchPoints.isEmpty())
+    }
+
+    @Test
+    fun `失败达到最大attempt时直接显示联系医生且不提供重试`() {
+        val failed = result(status = AnalysisTaskStatus.FAILED, errorSummary = "内部错误", generation = 3).copy(attempt = 3)
+        val model = ResultMapper.map(session(status = SessionStatus.FAILED, result = failed))
+
+        assertFalse(model.canRetry)
+        assertEquals("暂时无法重新分析，请联系医生", model.safeFailureSummary)
+    }
+
     private fun session(
         status: SessionStatus,
         score: Int? = null,
@@ -152,11 +177,12 @@ class ResultMapperTest {
         series: Map<String, AnalysisTimeSeries> = emptyMap(),
         errorSummary: String = "",
         isMock: Boolean? = true,
+        generation: Int = 1,
     ) = SingingAnalysisResult(
         id = RESULT_ID,
         taskType = AnalysisTaskType.SINGING_AUDIO_METRICS,
         status = status,
-        generation = 1,
+        generation = generation,
         protocolVersion = "mock-v1",
         isMock = isMock,
         payload = UnavailableAnalysisPayload,

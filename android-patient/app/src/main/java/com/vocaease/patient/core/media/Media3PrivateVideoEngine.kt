@@ -5,9 +5,11 @@ import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.ExoPlaybackException
 import androidx.media3.ui.PlayerView
 import com.vocaease.patient.feature.history.PrivateVideoEngine
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,11 +26,11 @@ class Media3PrivateVideoEngine private constructor(
 ) : PrivateVideoEngine {
     private val operationLock = Mutex()
     private val released = AtomicBoolean()
-    @Volatile private var activeSourceId: String? = null
     @Volatile private var httpErrorListener: ((String, Int) -> Unit)? = null
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
-            val sourceId = activeSourceId ?: return
+            val mediaPeriodId = (error as? ExoPlaybackException)?.mediaPeriodId ?: return
+            val sourceId = immutableSourceIdFor(player.currentTimeline, mediaPeriodId.periodUid) ?: return
             val responseCode = error.findHttpResponseCode() ?: return
             httpErrorListener?.invoke(sourceId, responseCode)
         }
@@ -51,7 +53,6 @@ class Media3PrivateVideoEngine private constructor(
         require(sourceId.isNotBlank() && sourceId.length <= 256) { "视频来源标识无效" }
         val uri = Uri.parse(privateUrl)
         require(uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank()) { "私有视频地址无效" }
-        activeSourceId = sourceId
         val item = MediaItem.Builder()
             .setMediaId(sourceId)
             .setUri(uri)
@@ -68,7 +69,6 @@ class Media3PrivateVideoEngine private constructor(
 
     override suspend fun stopAndClear() = onMain {
         if (!released.get()) {
-            activeSourceId = null
             player.stop()
             player.clearMediaItems()
         }
@@ -78,7 +78,6 @@ class Media3PrivateVideoEngine private constructor(
         if (!released.compareAndSet(false, true)) return
         withContext(Dispatchers.Main.immediate) {
             operationLock.withLock {
-                activeSourceId = null
                 httpErrorListener = null
                 player.removeListener(playerListener)
                 player.release()
@@ -99,6 +98,14 @@ class Media3PrivateVideoEngine private constructor(
                 Media3PrivateVideoEngine(ExoPlayer.Builder(context.applicationContext).build(), playerView)
             }
     }
+}
+
+internal fun immutableSourceIdFor(timeline: Timeline, periodUid: Any): String? {
+    val periodIndex = timeline.getIndexOfPeriod(periodUid)
+    if (periodIndex == androidx.media3.common.C.INDEX_UNSET) return null
+    val period = timeline.getPeriod(periodIndex, Timeline.Period())
+    val window = timeline.getWindow(period.windowIndex, Timeline.Window())
+    return window.mediaItem.mediaId.takeIf { it.isNotBlank() }
 }
 
 private fun Throwable.findHttpResponseCode(): Int? {
