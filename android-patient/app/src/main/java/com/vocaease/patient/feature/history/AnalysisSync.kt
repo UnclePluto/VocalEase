@@ -71,6 +71,8 @@ interface AnalysisCheckpointStore {
 
 fun interface AnalysisDetailRemote {
     suspend fun fetch(sessionId: String): AnalysisDetail
+
+    suspend fun fetch(sessionId: String, minimumGeneration: Int): AnalysisDetail = fetch(sessionId)
 }
 
 sealed interface AnalysisSyncDecision {
@@ -114,7 +116,7 @@ class AnalysisSyncEngine(
             return AnalysisSyncDecision.NotDue(checkpoint.nextDeadlineEpochMillis - nowEpochMillis)
         }
         val detail = try {
-            remote.fetch(contract.sessionId)
+            remote.fetch(contract.sessionId, checkpoint.analysisGeneration)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (error: IOException) {
@@ -201,11 +203,12 @@ class AccountScopedSessionSynchronizer<T : Any>(
     private val source: suspend (accountScopeHash: String, sessionId: String) -> T,
     private val identity: (T) -> VersionedSessionIdentity,
 ) {
-    private data class Key(val accountScopeHash: String, val incarnationProof: String, val sessionId: String)
+    private data class ScopeKey(val accountScopeHash: String, val incarnationProof: String, val sessionId: String)
+    private data class FlightKey(val scope: ScopeKey, val minimumGeneration: Int)
 
     private val lock = Any()
-    private val inFlight = mutableMapOf<Key, CompletableDeferred<T>>()
-    private val latest = mutableMapOf<Key, T>()
+    private val inFlight = mutableMapOf<FlightKey, CompletableDeferred<T>>()
+    private val latest = mutableMapOf<ScopeKey, T>()
 
     suspend fun fetch(
         accountScopeHash: String,
@@ -216,36 +219,48 @@ class AccountScopedSessionSynchronizer<T : Any>(
         require(accountScopeHash.matches(Regex("[0-9a-f]{64}")))
         require(incarnationProof.matches(Regex("[0-9a-f]{64}")))
         require(sessionId.isNotBlank() && sessionId.length <= 128 && minimumGeneration >= 0)
-        val key = Key(accountScopeHash, incarnationProof, sessionId)
+        val scopeKey = ScopeKey(accountScopeHash, incarnationProof, sessionId)
+        val flightKey = FlightKey(scopeKey, minimumGeneration)
         val (deferred, leader) = synchronized(lock) {
-            inFlight[key]?.let { it to false } ?: CompletableDeferred<T>().also { inFlight[key] = it } to true
+            inFlight[flightKey]?.let { it to false }
+                ?: CompletableDeferred<T>().also { inFlight[flightKey] = it } to true
         }
         if (leader) {
             try {
                 val fetched = source(accountScopeHash, sessionId)
                 val fetchedIdentity = identity(fetched)
                 check(fetchedIdentity.sessionId == sessionId && fetchedIdentity.generation >= 0)
+                if (fetchedIdentity.generation < minimumGeneration) {
+                    throw AnalysisGenerationNotReadyException(minimumGeneration, fetchedIdentity.generation)
+                }
                 val accepted = synchronized(lock) {
-                    val current = latest[key]
+                    val current = latest[scopeKey]
                     val currentIdentity = current?.let(identity)
                     if (currentIdentity != null && (
                             fetchedIdentity.generation < currentIdentity.generation ||
                                 (fetchedIdentity.generation == currentIdentity.generation && currentIdentity.terminal && !fetchedIdentity.terminal)
                             )
-                    ) current else fetched.also { latest[key] = it }
+                    ) current else fetched.also { latest[scopeKey] = it }
                 }
                 deferred.complete(accepted)
             } catch (error: Throwable) {
                 deferred.completeExceptionally(error)
             } finally {
-                synchronized(lock) { if (inFlight[key] === deferred) inFlight.remove(key) }
+                synchronized(lock) { if (inFlight[flightKey] === deferred) inFlight.remove(flightKey) }
             }
         }
-        return deferred.await().also {
-            check(identity(it).generation >= minimumGeneration) { "分析响应generation已过期" }
+        return deferred.await().also { accepted ->
+            if (identity(accepted).generation < minimumGeneration) {
+                throw AnalysisGenerationNotReadyException(minimumGeneration, identity(accepted).generation)
+            }
         }
     }
 }
+
+class AnalysisGenerationNotReadyException(
+    val minimumGeneration: Int,
+    val actualGeneration: Int,
+) : IOException("分析响应generation尚未达到本地重试代际")
 
 class ResultForegroundPoller(
     private val sessionId: String,

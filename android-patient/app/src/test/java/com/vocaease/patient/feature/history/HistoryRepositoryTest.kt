@@ -8,6 +8,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -157,10 +158,10 @@ class HistoryRepositoryTest {
         val old = async { repository.refresh() }
         val latest = async { repository.refresh() }
 
-        second.complete(HistoryPage(1, 1, 20, listOf(remote("new", HistoryStatus.COMPLETED))))
-        latest.await()
         first.complete(HistoryPage(1, 1, 20, listOf(remote("old", HistoryStatus.COMPLETED))))
         old.await()
+        second.complete(HistoryPage(1, 1, 20, listOf(remote("new", HistoryStatus.COMPLETED))))
+        latest.await()
 
         assertEquals(listOf("new"), repository.state.value.items.map { it.sessionId })
     }
@@ -183,6 +184,26 @@ class HistoryRepositoryTest {
         third.await()
 
         assertEquals(listOf("s1", "s2", "s3"), repository.state.value.items.map { it.sessionId }.sorted())
+    }
+
+    @Test
+    fun `加载下一页期间page1刷新必须等待同一分页边界`() = runBlocking {
+        val pageTwo = CompletableDeferred<HistoryPage>()
+        val pageTwoEntered = CompletableDeferred<Unit>()
+        val refreshEntered = CompletableDeferred<Unit>()
+        val source = RefreshBoundaryRemote(pageTwo, pageTwoEntered, refreshEntered)
+        val repository = HistoryRepository(EmptyHistoryLocal, source) { true }
+        repository.start()
+        repository.refresh(page = 1, pageSize = 1)
+
+        val next = async { repository.refresh(page = 2, pageSize = 1) }
+        pageTwoEntered.await()
+        val refresh = async { repository.refresh(page = 1, pageSize = 1) }
+
+        assertEquals(null, withTimeoutOrNull(300L) { refreshEntered.await() })
+        pageTwo.complete(HistoryPage(3, 2, 1, listOf(remote("s2", HistoryStatus.COMPLETED))))
+        next.await()
+        refresh.await()
     }
 
     @Test
@@ -288,6 +309,26 @@ private class OutOfOrderPagingRemote(
         3 -> {
             pageThreeEntered.complete(Unit)
             HistoryPage(3, 3, 1, listOf(historyRemote("s3")))
+        }
+        else -> error("unexpected page")
+    }
+}
+
+private class RefreshBoundaryRemote(
+    private val pageTwo: CompletableDeferred<HistoryPage>,
+    private val pageTwoEntered: CompletableDeferred<Unit>,
+    private val refreshEntered: CompletableDeferred<Unit>,
+) : HistoryRemoteSource {
+    private var pageOneCalls = 0
+    override suspend fun load(page: Int, pageSize: Int, status: HistoryStatus?): HistoryPage = when (page) {
+        1 -> {
+            pageOneCalls += 1
+            if (pageOneCalls > 1) refreshEntered.complete(Unit)
+            HistoryPage(3, 1, 1, listOf(historyRemote("s1")))
+        }
+        2 -> {
+            pageTwoEntered.complete(Unit)
+            pageTwo.await()
         }
         else -> error("unexpected page")
     }

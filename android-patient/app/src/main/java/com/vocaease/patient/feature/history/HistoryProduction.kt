@@ -99,6 +99,8 @@ class VocaEaseAnalysisDetailRemote(
 
 fun interface ResultSessionRemote {
     suspend fun fetch(sessionId: String): SingingSession
+
+    suspend fun fetch(sessionId: String, minimumGeneration: Int): SingingSession = fetch(sessionId)
 }
 
 class VocaEaseResultSessionRemote(
@@ -132,13 +134,20 @@ class ProductionAnalysisSessionSynchronizer(
         },
     )
 
-    fun analysisRemote(accountScopeHash: String, incarnationProof: String): AnalysisDetailRemote = AnalysisDetailRemote { sessionId ->
-        val session = shared.fetch(accountScopeHash, incarnationProof, sessionId, 0)
-        AnalysisDetail(session.id.toString(), session.status.toAnalysisStatus(), session.analysisGeneration)
+    fun analysisRemote(accountScopeHash: String, incarnationProof: String): AnalysisDetailRemote = object : AnalysisDetailRemote {
+        override suspend fun fetch(sessionId: String): AnalysisDetail = fetch(sessionId, 0)
+
+        override suspend fun fetch(sessionId: String, minimumGeneration: Int): AnalysisDetail {
+            val session = shared.fetch(accountScopeHash, incarnationProof, sessionId, minimumGeneration)
+            return AnalysisDetail(session.id.toString(), session.status.toAnalysisStatus(), session.analysisGeneration)
+        }
     }
 
-    fun resultRemote(accountScopeHash: String, incarnationProof: String): ResultSessionRemote = ResultSessionRemote { sessionId ->
-        shared.fetch(accountScopeHash, incarnationProof, sessionId, 0)
+    fun resultRemote(accountScopeHash: String, incarnationProof: String): ResultSessionRemote = object : ResultSessionRemote {
+        override suspend fun fetch(sessionId: String): SingingSession = fetch(sessionId, 0)
+
+        override suspend fun fetch(sessionId: String, minimumGeneration: Int): SingingSession =
+            shared.fetch(accountScopeHash, incarnationProof, sessionId, minimumGeneration)
     }
 }
 
@@ -193,9 +202,7 @@ class VocaEaseAnalysisRetryRemote(
 
     override suspend fun detail(sessionId: String): AnalysisRetryDetail {
         val detail = api.session(sessionId).data.toDomain().verified(accountScopeHash, sessionId)
-        val attempt = detail.analysisResults
-            .filter { it.taskType == AnalysisTaskType.SINGING_AUDIO_METRICS && it.generation == detail.analysisGeneration }
-            .maxOfOrNull { it.attempt } ?: 0
+        val attempt = currentGenerationFailure(detail.analysisResults, detail.analysisGeneration).maxAttempt
         return AnalysisRetryDetail(detail.id.toString(), detail.status.toAnalysisStatus(), detail.analysisGeneration, attempt)
     }
 }

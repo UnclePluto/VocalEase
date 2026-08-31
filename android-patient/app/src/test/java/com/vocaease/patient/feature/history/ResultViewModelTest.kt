@@ -81,21 +81,83 @@ class ResultViewModelTest {
     }
 
     @Test
-    fun `已有处理中内容遇瞬时网络失败时保留内容并显示可重试错误`() = runBlocking {
+    fun `已有处理中内容遇429时保留内容显示错误并按Retry After继续轮询`() = runBlocking {
         val remote = QueueResultRemote(session(SessionStatus.PROCESSING, 1))
-        val gate = CompletableDeferred<Unit>()
+        val firstPollGate = CompletableDeferred<Unit>()
+        val retryGate = CompletableDeferred<Unit>()
+        val delays = mutableListOf<Long>()
         val viewModel = ResultViewModel(
             SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(1) }, Dispatchers.Unconfined,
-            delayMillis = { gate.await() },
+            delayMillis = { delay ->
+                delays += delay
+                if (delays.size == 1) firstPollGate.await() else retryGate.await()
+            },
         )
         viewModel.start()
-        remote.failure = IOException("temporary")
-        gate.complete(Unit)
+        remote.failure = AnalysisRemoteRetryException(9_000L)
+        firstPollGate.complete(Unit)
         yield()
 
         assertEquals(ResultContentState.PROCESSING, viewModel.state.value.content?.contentState)
         assertEquals("暂时无法加载演唱结果，请重试", viewModel.state.value.errorMessage)
+        assertTrue(viewModel.isPolling)
+        assertEquals(listOf(3_000L, 9_000L), delays)
+
+        remote.failure = null
+        remote.enqueue(session(SessionStatus.COMPLETED, 1))
+        retryGate.complete(Unit)
+        yield()
+        assertEquals(ResultContentState.COMPLETED, viewModel.state.value.content?.contentState)
         assertFalse(viewModel.isPolling)
+        Unit
+    }
+
+    @Test
+    fun `已有处理中内容遇5xx或timeout使用安全3秒继续轮询`() = runBlocking {
+        listOf(AnalysisRemoteRetryException(null), IOException("timeout")).forEach { failure ->
+            val remote = QueueResultRemote(session(SessionStatus.PROCESSING, 1))
+            val firstPollGate = CompletableDeferred<Unit>()
+            val retryGate = CompletableDeferred<Unit>()
+            val delays = mutableListOf<Long>()
+            val viewModel = ResultViewModel(
+                SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(1) }, Dispatchers.Unconfined,
+                delayMillis = { delay ->
+                    delays += delay
+                    if (delays.size == 1) firstPollGate.await() else retryGate.await()
+                },
+            )
+            viewModel.start()
+            remote.failure = failure
+            firstPollGate.complete(Unit)
+            yield()
+
+            assertEquals(listOf(3_000L, 3_000L), delays)
+            assertTrue(viewModel.isPolling)
+            viewModel.stop()
+            retryGate.complete(Unit)
+        }
+    }
+
+    @Test
+    fun `服务端接受新代际后前台请求携带minimumGeneration下限`() = runBlocking {
+        val remote = QueueResultRemote(
+            session(SessionStatus.FAILED, 1),
+            session(SessionStatus.PROCESSING, 2),
+        )
+        val gate = CompletableDeferred<Unit>()
+        val viewModel = ResultViewModel(
+            SESSION_ID.toString(), remote, { AnalysisRetryOutcome.Accepted(2) }, Dispatchers.Unconfined,
+            delayMillis = { gate.await() },
+        )
+
+        viewModel.start()
+        viewModel.retryAnalysis()
+
+        assertEquals(listOf(0, 2), remote.minimumGenerations)
+        assertEquals(2, viewModel.state.value.content?.analysisGeneration)
+        viewModel.stop()
+        gate.complete(Unit)
+        Unit
     }
 }
 
@@ -103,8 +165,12 @@ private class QueueResultRemote(vararg values: SingingSession) : ResultSessionRe
     private val queue = ArrayDeque(values.toList())
     var calls = 0
     var failure: Exception? = null
-    override suspend fun fetch(sessionId: String): SingingSession {
+    val minimumGenerations = mutableListOf<Int>()
+    fun enqueue(value: SingingSession) { queue += value }
+    override suspend fun fetch(sessionId: String): SingingSession = fetch(sessionId, 0)
+    override suspend fun fetch(sessionId: String, minimumGeneration: Int): SingingSession {
         calls += 1
+        minimumGenerations += minimumGeneration
         failure?.let { throw it }
         return queue.removeFirst()
     }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -77,6 +78,20 @@ class AnalysisSyncTest {
         val mismatch = AnalysisSyncEngine(store, QueueAnalysisRemote(detail(AnalysisStatus.PROCESSING, 0, sessionId = "other")))
         assertEquals(AnalysisSyncDecision.Rejected, mismatch.runOnce(contract(), 1_000))
         assertEquals(oldVersion, store.value)
+    }
+
+    @Test
+    fun `后台轮询把checkpoint generation作为远端single flight下限`() = runBlocking {
+        val store = MemoryAnalysisCheckpointStore().apply {
+            value = checkpoint(deadline = 1_000).copy(analysisGeneration = 2)
+        }
+        val remote = MinimumGenerationRecordingRemote(detail(AnalysisStatus.PROCESSING, 2))
+
+        assertEquals(
+            AnalysisSyncDecision.Continue(30_000L),
+            AnalysisSyncEngine(store, remote).runOnce(contract(), 1_000),
+        )
+        assertEquals(listOf(2), remote.minimumGenerations)
     }
 
     @Test
@@ -158,6 +173,40 @@ class AnalysisSyncTest {
     }
 
     @Test
+    fun `更高minimumGeneration不得加入旧代际single flight`() = runBlocking {
+        val generationOne = CompletableDeferred<AnalysisDetail>()
+        val generationTwo = CompletableDeferred<AnalysisDetail>()
+        val secondEntered = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val synchronizer = AccountScopedSessionSynchronizer(
+            source = { _, sessionId ->
+                when (calls.incrementAndGet()) {
+                    1 -> generationOne.await().copy(sessionId = sessionId)
+                    else -> {
+                        secondEntered.complete(Unit)
+                        generationTwo.await().copy(sessionId = sessionId)
+                    }
+                }
+            },
+            identity = { VersionedSessionIdentity(it.sessionId, it.generation, it.isTerminal()) },
+        )
+
+        val oldRequest = async { synchronizer.fetch("a".repeat(64), "b".repeat(64), "s1", 1) }
+        yield()
+        val postRetryRequest = async { synchronizer.fetch("a".repeat(64), "b".repeat(64), "s1", 2) }
+        assertTrue(
+            "更高代际请求应启动独立远端调用",
+            withTimeoutOrNull(1_000L) { secondEntered.await(); true } == true,
+        )
+
+        generationOne.complete(detail(AnalysisStatus.PROCESSING, 1))
+        generationTwo.complete(detail(AnalysisStatus.PROCESSING, 2))
+        assertEquals(1, oldRequest.await().generation)
+        assertEquals(2, postRetryRequest.await().generation)
+        assertEquals(2, calls.get())
+    }
+
+    @Test
     fun `前台每3秒查询且离页真实取消并在terminal停止`() = runBlocking {
         val delays = mutableListOf<Long>()
         val remote = QueueAnalysisRemote(
@@ -230,6 +279,17 @@ private class QueueAnalysisRemote(
         timeline += "remote"
         failure?.let { throw it }
         return queue.removeFirst()
+    }
+}
+
+private class MinimumGenerationRecordingRemote(
+    private val value: AnalysisDetail,
+) : AnalysisDetailRemote {
+    val minimumGenerations = mutableListOf<Int>()
+    override suspend fun fetch(sessionId: String): AnalysisDetail = fetch(sessionId, 0)
+    override suspend fun fetch(sessionId: String, minimumGeneration: Int): AnalysisDetail {
+        minimumGenerations += minimumGeneration
+        return value.copy(sessionId = sessionId)
     }
 }
 

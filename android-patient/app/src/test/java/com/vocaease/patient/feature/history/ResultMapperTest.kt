@@ -147,6 +147,52 @@ class ResultMapperTest {
         assertEquals("暂时无法重新分析，请联系医生", model.safeFailureSummary)
     }
 
+    @Test
+    fun `当前generation任一失败分析达到最大attempt时禁止重试`() {
+        val audio = result(status = AnalysisTaskStatus.SUCCEEDED, generation = 2).copy(attempt = 1)
+        val face = result(
+            status = AnalysisTaskStatus.FAILED,
+            errorSummary = "面部分析失败",
+            generation = 2,
+            taskType = AnalysisTaskType.FACE_LANDMARKS,
+        ).copy(id = FACE_RESULT_ID, attempt = 3)
+        val old = face.copy(id = OLD_RESULT_ID, generation = 1, attempt = 99)
+        val model = ResultMapper.map(
+            session(status = SessionStatus.FAILED, result = audio).copy(
+                analysisGeneration = 2,
+                analysisResults = listOf(audio, face, old),
+            ),
+        )
+
+        assertFalse(model.canRetry)
+        assertEquals("暂时无法重新分析，请联系医生", model.safeFailureSummary)
+    }
+
+    @Test
+    fun `失败摘要取当前generation失败任务中最高attempt且pitch仍只取音频`() {
+        val audio = result(
+            status = AnalysisTaskStatus.FAILED,
+            errorSummary = "音频失败",
+            generation = 2,
+            taskType = AnalysisTaskType.SINGING_AUDIO_METRICS,
+        ).copy(attempt = 1)
+        val face = result(
+            status = AnalysisTaskStatus.FAILED,
+            errorSummary = "面部分析失败",
+            generation = 2,
+            taskType = AnalysisTaskType.FACE_LANDMARKS,
+        ).copy(id = FACE_RESULT_ID, attempt = 2)
+        val model = ResultMapper.map(
+            session(status = SessionStatus.FAILED, result = audio).copy(
+                analysisGeneration = 2,
+                analysisResults = listOf(audio, face),
+            ),
+        )
+
+        assertTrue(model.canRetry)
+        assertEquals("面部分析失败", model.safeFailureSummary)
+    }
+
     private fun session(
         status: SessionStatus,
         score: Int? = null,
@@ -178,9 +224,10 @@ class ResultMapperTest {
         errorSummary: String = "",
         isMock: Boolean? = true,
         generation: Int = 1,
+        taskType: AnalysisTaskType = AnalysisTaskType.SINGING_AUDIO_METRICS,
     ) = SingingAnalysisResult(
         id = RESULT_ID,
-        taskType = AnalysisTaskType.SINGING_AUDIO_METRICS,
+        taskType = taskType,
         status = status,
         generation = generation,
         protocolVersion = "mock-v1",
@@ -199,5 +246,7 @@ class ResultMapperTest {
         val PLAN_ID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000014")
         val VIDEO_ID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000015")
         val RESULT_ID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000016")
+        val FACE_RESULT_ID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000017")
+        val OLD_RESULT_ID: UUID = UUID.fromString("00000000-0000-0000-0000-000000000018")
     }
 }

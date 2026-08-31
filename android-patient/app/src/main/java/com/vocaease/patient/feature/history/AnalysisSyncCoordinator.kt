@@ -78,7 +78,7 @@ class AnalysisSyncCoordinator(
             )
         } else {
             if (checkpoint.accountScopeHash != scope.accountScopeHash || checkpoint.incarnationProof != scope.incarnationProof ||
-                checkpoint.status != AnalysisStatus.FAILED || targetGeneration <= checkpoint.analysisGeneration
+                checkpoint.status !in RESTARTABLE_STATUSES || targetGeneration <= checkpoint.analysisGeneration
             ) return false
             checkpoint.copy(
                 status = AnalysisStatus.RETRYING,
@@ -109,5 +109,11 @@ class AnalysisSyncCoordinator(
 
     private companion object {
         val TERMINAL_STATUSES = setOf(AnalysisStatus.COMPLETED, AnalysisStatus.FAILED, AnalysisStatus.CANCELLED)
+        val RESTARTABLE_STATUSES = setOf(
+            AnalysisStatus.UPLOADED,
+            AnalysisStatus.PROCESSING,
+            AnalysisStatus.RETRYING,
+            AnalysisStatus.FAILED,
+        )
     }
 }

@@ -25,6 +25,7 @@ class ResultViewModel(
     val state: StateFlow<ResultScreenState> = mutableState.asStateFlow()
     private var pollingJob: Job? = null
     private var operationGeneration = 0L
+    private var minimumGenerationFloor = 0
     val isPolling: Boolean get() = pollingJob?.isActive == true
 
     fun start() {
@@ -52,6 +53,7 @@ class ResultViewModel(
         }
         when (outcome) {
             is AnalysisRetryOutcome.Accepted -> {
+                minimumGenerationFloor = maxOf(minimumGenerationFloor, outcome.generation)
                 mutableState.value = mutableState.value.copy(retrying = false, errorMessage = null)
                 stop()
                 start()
@@ -72,15 +74,20 @@ class ResultViewModel(
             val current = mutableState.value.content
             if (current == null) mutableState.value = mutableState.value.copy(loading = true, errorMessage = null)
             val fetched = try {
-                remote.fetch(sessionId)
+                remote.fetch(sessionId, minimumGenerationFloor)
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: IOException) {
+            } catch (error: IOException) {
                 if (operation == operationGeneration) mutableState.value = mutableState.value.copy(
                     loading = false,
                     errorMessage = "暂时无法加载演唱结果，请重试",
                 )
-                return
+                if (current == null) return
+                val retryDelay = (error as? AnalysisRemoteRetryException)?.retryAfterMillis
+                    ?.coerceIn(MINIMUM_RETRY_MILLIS, MAXIMUM_RETRY_MILLIS)
+                    ?: ResultForegroundPoller.FOREGROUND_POLL_MILLIS
+                delayMillis(retryDelay)
+                continue
             } catch (_: Exception) {
                 if (operation == operationGeneration) mutableState.value = ResultScreenState(
                     errorMessage = "演唱结果归属或数据校验失败",
@@ -105,6 +112,8 @@ class ResultViewModel(
 
     companion object {
         private val TERMINAL_STATES = setOf(ResultContentState.COMPLETED, ResultContentState.FAILED, ResultContentState.CANCELLED)
+        private const val MINIMUM_RETRY_MILLIS = 3_000L
+        private const val MAXIMUM_RETRY_MILLIS = 300_000L
 
         fun factory(
             sessionId: String,

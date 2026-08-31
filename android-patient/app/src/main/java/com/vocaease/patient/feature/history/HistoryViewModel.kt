@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
@@ -14,23 +15,27 @@ class HistoryViewModel(
 ) : ViewModel() {
     val state: StateFlow<HistoryState> = repository.state
     private var page = 1
+    private var loadMoreJob: Job? = null
 
     fun start() {
         viewModelScope.launch(dispatcher) {
             repository.start()
-            repository.refresh()
+            if (repository.refreshWithOutcome()) page = 1
         }
     }
 
     fun retry() {
-        page = 1
-        viewModelScope.launch(dispatcher) { repository.refresh() }
+        viewModelScope.launch(dispatcher) {
+            if (repository.refreshWithOutcome()) page = 1
+        }
     }
 
     fun loadMore() {
-        if (!state.value.hasMore || state.value.loading) return
-        page += 1
-        viewModelScope.launch(dispatcher) { repository.refresh(page) }
+        if (!state.value.hasMore || state.value.loading || loadMoreJob?.isActive == true) return
+        val requestedPage = page + 1
+        loadMoreJob = viewModelScope.launch(dispatcher) {
+            if (repository.refreshWithOutcome(requestedPage)) page = requestedPage
+        }
     }
 
     override fun onCleared() {

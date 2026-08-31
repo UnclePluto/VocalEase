@@ -134,6 +134,35 @@ class AnalysisCheckpointStorageTest {
     }
 
     @Test
+    fun processing在服务端接受更高generation后可原子重建retrying检查点() = runBlocking {
+        val storage = provider.current()
+        val processing = checkpoint(storage, version = 0).copy(pollStep = 2)
+        assertEquals(true, storage.persistAnalysisCheckpoint(null, processing))
+        assertThrows(android.database.sqlite.SQLiteConstraintException::class.java) {
+            runBlocking {
+                storage.persistAnalysisCheckpoint(
+                    0,
+                    processing.copy(status = AnalysisStatus.RETRYING, pollStep = 0, version = 1),
+                )
+            }
+        }
+        assertEquals(
+            true,
+            storage.persistAnalysisCheckpoint(
+                0,
+                processing.copy(
+                    status = AnalysisStatus.RETRYING,
+                    analysisGeneration = 2,
+                    pollStep = 0,
+                    nextDeadlineEpochMillis = 21_000,
+                    version = 1,
+                ),
+            ),
+        )
+        Unit
+    }
+
+    @Test
     fun 历史会话可直接创建retrying检查点且不需要raw账户UUID() = runBlocking {
         val storage = provider.current()
         val restarted = checkpoint(storage, version = 0).copy(

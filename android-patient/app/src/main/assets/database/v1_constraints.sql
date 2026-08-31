@@ -33,7 +33,10 @@ CREATE TRIGGER IF NOT EXISTS analysis_checkpoints_guard_update_v1 BEFORE UPDATE 
       OR NEW.poll_step != OLD.poll_step OR NEW.next_deadline_at != OLD.next_deadline_at))
     OR NEW.analysis_generation < OLD.analysis_generation
     OR (NEW.poll_step < OLD.poll_step AND NOT (
-      OLD.status = 'FAILED' AND NEW.status = 'RETRYING'
+      OLD.status IN ('UPLOADED','PROCESSING','RETRYING','FAILED') AND NEW.status = 'RETRYING'
+      AND NEW.analysis_generation > OLD.analysis_generation AND NEW.poll_step = 0))
+    OR (NEW.status = 'RETRYING' AND OLD.status != 'RETRYING' AND NOT (
+      OLD.status IN ('UPLOADED','PROCESSING','FAILED')
       AND NEW.analysis_generation > OLD.analysis_generation AND NEW.poll_step = 0))
     OR NEW.poll_step > 3
     OR NEW.status NOT IN ('UPLOADED','PROCESSING','RETRYING','COMPLETED','FAILED','CANCELLED')

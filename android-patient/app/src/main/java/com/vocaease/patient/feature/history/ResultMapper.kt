@@ -37,6 +37,21 @@ data class ResultUiModel(
     val analysisGeneration: Int,
 )
 
+internal data class CurrentGenerationFailure(
+    val maxAttempt: Int,
+    val errorSummary: String?,
+)
+
+internal fun currentGenerationFailure(
+    results: List<SingingAnalysisResult>,
+    generation: Int,
+): CurrentGenerationFailure {
+    val selected = results.asSequence()
+        .filter { it.generation == generation && it.status == AnalysisTaskStatus.FAILED }
+        .maxWithOrNull(compareBy<SingingAnalysisResult> { it.attempt }.thenBy { it.id })
+    return CurrentGenerationFailure(selected?.attempt?.coerceAtLeast(0) ?: 0, selected?.errorSummary)
+}
+
 object ResultMapper {
     const val MAX_PITCH_SAMPLES: Int = 10_000
     const val MAX_ANALYSIS_ATTEMPTS: Int = 3
@@ -51,6 +66,7 @@ object ResultMapper {
         ?.toString()
 
     fun map(session: SingingSession): ResultUiModel {
+        val failure = currentGenerationFailure(session.analysisResults, session.analysisGeneration)
         val metricResult = session.analysisResults
             .asSequence()
             .filter {
@@ -80,11 +96,11 @@ object ResultMapper {
             pitchPoints = pitch,
             pitchMessage = if (state == ResultContentState.COMPLETED && pitch.isEmpty()) NO_PITCH else null,
             safeFailureSummary = if (state == ResultContentState.FAILED) {
-                if ((metricResult?.attempt ?: 0) >= MAX_ANALYSIS_ATTEMPTS) {
+                if (failure.maxAttempt >= MAX_ANALYSIS_ATTEMPTS) {
                     AnalysisRetryOutcome.MaxAttempts.message
-                } else safeSummary(metricResult?.errorSummary)
+                } else safeSummary(failure.errorSummary)
             } else null,
-            canRetry = state == ResultContentState.FAILED && (metricResult?.attempt ?: 0) < MAX_ANALYSIS_ATTEMPTS,
+            canRetry = state == ResultContentState.FAILED && failure.maxAttempt < MAX_ANALYSIS_ATTEMPTS,
             analysisGeneration = session.analysisGeneration.coerceAtLeast(0),
         )
     }

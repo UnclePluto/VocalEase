@@ -103,6 +103,26 @@ class HistoryAndResultTest {
     }
 
     @Test
+    fun processing已有内容遇网络错误时错误可见且可立即重试() {
+        var retries = 0
+        composeRule.setContent {
+            VocaEaseTheme {
+                ResultScreen(
+                    state = ResultScreenState(
+                        content = result(state = ResultContentState.PROCESSING, score = null, pitch = emptyList()),
+                        errorMessage = "暂时无法加载演唱结果，请重试",
+                    ),
+                    videoContent = {}, onBack = {}, onRetryLoad = { retries += 1 }, onRetryAnalysis = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("暂时无法加载演唱结果，请重试").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("立即重试").performScrollTo().assertHeightIsAtLeast(48.dp).performClick()
+        composeRule.runOnIdle { assertEquals(1, retries) }
+    }
+
+    @Test
     fun 缺pitch显示空态且API29真实viewport可滚动到底部() {
         composeRule.setContent {
             VocaEaseTheme {

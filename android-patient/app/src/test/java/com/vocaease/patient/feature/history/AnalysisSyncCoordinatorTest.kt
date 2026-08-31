@@ -134,6 +134,24 @@ class AnalysisSyncCoordinatorTest {
     }
 
     @Test
+    fun `服务端已接受更高generation时processing检查点原子推进并替换后台链`() = runBlocking {
+        val scope = FakeAnalysisScope().apply {
+            checkpoint = checkpoint(status = AnalysisStatus.PROCESSING, pollStep = 2, deadline = 80_000L, version = 6)
+        }
+        val scheduler = FakeAnalysisScheduler()
+        val coordinator = AnalysisSyncCoordinator({ scope }, { FakeAnalysisRemote() }, scheduler, { 90_000L })
+
+        assertTrue(coordinator.restart("session-1", targetGeneration = 2))
+
+        assertEquals(AnalysisStatus.RETRYING, scope.checkpoint?.status)
+        assertEquals(2, scope.checkpoint?.analysisGeneration)
+        assertEquals(0, scope.checkpoint?.pollStep)
+        assertEquals(100_000L, scope.checkpoint?.nextDeadlineEpochMillis)
+        assertEquals(7L, scope.checkpoint?.version)
+        assertEquals(listOf("analysis:${scope.accountScopeHash}:session-1"), scheduler.replaced.map { it.first.uniqueWorkName })
+    }
+
+    @Test
     fun `服务端Retry After由同一屏障追加延迟工作`() = runBlocking {
         val scope = FakeAnalysisScope().apply { checkpoint = checkpoint(deadline = 1_000L) }
         val scheduler = FakeAnalysisScheduler()

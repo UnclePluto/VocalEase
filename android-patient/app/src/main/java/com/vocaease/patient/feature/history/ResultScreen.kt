@@ -91,6 +91,16 @@ fun ResultScreen(
                 ResultContentState.UNKNOWN -> item { StatusCard("状态同步中") }
             }
         }
+        if (state.content != null && state.errorMessage != null) item {
+            Column(
+                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(state.errorMessage, color = TextSecondary, fontSize = 14.sp)
+                Button(onClick = onRetryLoad, modifier = Modifier.height(48.dp)) { Text("立即重试") }
+            }
+        }
     }
 }
 

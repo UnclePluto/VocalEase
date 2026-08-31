@@ -96,6 +96,7 @@ class HistoryRepository(
     private var localRecords: List<HistoryLocalRecord> = emptyList()
     private val remoteBySession = LinkedHashMap<String, HistoryRemoteRecord>()
     private val paginationMutex = Mutex()
+    private var committedPage = 0
 
     suspend fun start() {
         if (!leaseActive()) return invalidateLease()
@@ -116,21 +117,33 @@ class HistoryRepository(
         pageSize: Int = DEFAULT_PAGE_SIZE,
         status: HistoryStatus? = null,
     ) {
+        refreshWithOutcome(page, pageSize, status)
+    }
+
+    internal suspend fun refreshWithOutcome(
+        page: Int = 1,
+        pageSize: Int = DEFAULT_PAGE_SIZE,
+        status: HistoryStatus? = null,
+    ): Boolean {
         require(page > 0 && pageSize in 1..MAX_PAGE_SIZE)
-        if (page > 1) {
-            paginationMutex.withLock { refreshInternal(page, pageSize, status) }
-        } else {
-            refreshInternal(page, pageSize, status)
+        return paginationMutex.withLock {
+            if (page > 1 && page != committedPage + 1) return@withLock false
+            refreshInternal(page, pageSize, status).also { succeeded ->
+                if (succeeded) committedPage = page
+            }
         }
     }
 
-    private suspend fun refreshInternal(page: Int, pageSize: Int, status: HistoryStatus?) {
+    private suspend fun refreshInternal(page: Int, pageSize: Int, status: HistoryStatus?): Boolean {
         val requestGeneration = generation.incrementAndGet()
-        if (!leaseActive()) return invalidateLease()
+        if (!leaseActive()) {
+            invalidateLease()
+            return false
+        }
         _state.value = _state.value.copy(loading = true, errorMessage = null, canRetry = false)
         try {
             val result = remote.load(page, pageSize, status)
-            if (!leaseActive() || requestGeneration != generation.get()) return
+            if (!leaseActive() || requestGeneration != generation.get()) return false
             if (result.page != page || result.pageSize != pageSize) throw IllegalStateException("分页响应不匹配")
             if (page == 1) remoteBySession.clear()
             result.results.forEach { candidate ->
@@ -150,11 +163,13 @@ class HistoryRepository(
                 canRetry = false,
                 hasMore = remoteBySession.size < result.count && result.results.isNotEmpty(),
             )
+            return true
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Exception) {
-            if (!leaseActive() || requestGeneration != generation.get()) return
+            if (!leaseActive() || requestGeneration != generation.get()) return false
             publish(error = "暂时无法刷新演唱记录，请重试", canRetry = true)
+            return false
         }
     }
 
@@ -162,6 +177,7 @@ class HistoryRepository(
         generation.incrementAndGet()
         localRecords = emptyList()
         remoteBySession.clear()
+        committedPage = 0
         _state.value = HistoryState()
     }
 
