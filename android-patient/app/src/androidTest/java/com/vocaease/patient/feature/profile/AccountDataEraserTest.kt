@@ -17,8 +17,11 @@ import com.vocaease.patient.core.database.UploadLocalActionStage
 import com.vocaease.patient.core.database.UploadLocalActionType
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import com.vocaease.patient.core.media.PrivateRecordingTempFiles
+import com.vocaease.patient.core.media.RecordingStagingIdentity
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -34,12 +37,14 @@ class AccountDataEraserTest {
     private lateinit var context: Context
     private lateinit var database: VocaEaseDatabase
     private lateinit var fileStore: ChunkedAesGcmFileStore
+    private lateinit var mediaRoot: File
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
         database = VocaEaseDatabase.inMemory(context, allowMainThreadQueries = true)
-        fileStore = ChunkedAesGcmFileStore(context, File(context.cacheDir, "eraser-media-${System.nanoTime()}"))
+        mediaRoot = File(context.cacheDir, "eraser-media-${System.nanoTime()}")
+        fileStore = ChunkedAesGcmFileStore(context, mediaRoot)
     }
 
     @After
@@ -81,6 +86,23 @@ class AccountDataEraserTest {
         val opaque = ChunkedAesGcmFileStore.sha256("$hash\u0000$DRAFT")
         val uploadLease = File(context.cacheDir, "upload-lease/$opaque").apply { mkdirs(); File(this, "part").writeText("plain") }
         val recorder = File(context.filesDir, "qiniu-upload-recorder/$opaque").apply { mkdirs(); File(this, "state").writeText("credential") }
+        val orphanLease = File(context.cacheDir, "upload-lease/$hash/orphan-job").apply {
+            mkdirs(); File(this, "part").writeText("plain")
+        }
+        val orphanRecorder = File(context.filesDir, "qiniu-upload-recorder/$hash/orphan-job").apply {
+            mkdirs(); File(this, "state").writeText("credential")
+        }
+        val otherHash = ChunkedAesGcmFileStore.sha256(OTHER_ACCOUNT)
+        val otherLease = File(context.cacheDir, "upload-lease/$otherHash/other-job").apply {
+            mkdirs(); File(this, "part").writeText("other")
+        }
+        val recordings = PrivateRecordingTempFiles(context)
+        val targetRecording = recordings.createVideo(
+            RecordingStagingIdentity(hash, "orphan-draft", "orphan-session", "orphan-create"),
+        ).apply { writeText("video") }
+        val otherRecording = recordings.createVideo(
+            RecordingStagingIdentity(otherHash, "other-draft", "other-session", "other-create"),
+        ).apply { writeText("other-video") }
 
         val eraser = AccountDataEraser(context, database, fileStore)
         eraser.delete(ACCOUNT, hash)
@@ -95,7 +117,42 @@ class AccountDataEraserTest {
         assertFalse(fileStore.encryptedMediaExists(ACCOUNT, encrypted.relativePath))
         assertFalse(uploadLease.exists())
         assertFalse(recorder.exists())
+        assertFalse(orphanLease.exists())
+        assertFalse(orphanRecorder.exists())
+        assertFalse(targetRecording.exists())
+        assertTrue(otherLease.exists())
+        assertTrue(otherRecording.exists())
         assertEquals("song", database.draftDao().find(OTHER_ACCOUNT, "other-draft")?.songId)
+    }
+
+    @Test
+    fun 删除目标账户尾损坏sidecar且嵌套符号链接不进入其他账户() = runBlocking {
+        val hash = ChunkedAesGcmFileStore.sha256(ACCOUNT)
+        val otherHash = ChunkedAesGcmFileStore.sha256(OTHER_ACCOUNT)
+        val recordings = PrivateRecordingTempFiles(context)
+        val targetVideo = recordings.createVideo(
+            RecordingStagingIdentity(hash, "damaged", "session", "create"),
+        ).apply { writeText("target-plaintext") }
+        val targetSidecar = File(targetVideo.parentFile, targetVideo.name.removeSuffix(".recording") + ".recovery")
+        targetSidecar.appendBytes(byteArrayOf(0x01))
+
+        val otherDirectory = File(context.cacheDir, "upload-lease/$otherHash").apply { mkdirs() }
+        val otherPlaintext = File(otherDirectory, "must-survive").apply { writeText("other") }
+        val targetDirectory = File(context.cacheDir, "upload-lease/$hash").apply { mkdirs() }
+        val link = File(targetDirectory, "nested-link")
+        Files.createSymbolicLink(link.toPath(), otherDirectory.toPath())
+        val otherEncryptedDirectory = File(context.cacheDir, "other-encrypted-${System.nanoTime()}").apply { mkdirs() }
+        val otherEncrypted = File(otherEncryptedDirectory, "must-survive").apply { writeText("other-encrypted") }
+        val targetMediaDirectory = File(mediaRoot, hash).apply { mkdirs() }
+        Files.createSymbolicLink(File(targetMediaDirectory, "nested-link").toPath(), otherEncryptedDirectory.toPath())
+
+        AccountDataEraser(context, database, fileStore).delete(ACCOUNT, hash)
+
+        assertFalse(targetVideo.exists())
+        assertFalse(targetSidecar.exists())
+        assertFalse(link.exists())
+        assertEquals("other", otherPlaintext.readText())
+        assertEquals("other-encrypted", otherEncrypted.readText())
     }
 
     private fun draft(scope: String, id: String) = DraftEntity(

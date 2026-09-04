@@ -18,6 +18,10 @@ import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
+import com.vocaease.patient.core.security.DurableLogoutTokenVault
+import com.vocaease.patient.core.security.BoundLogoutCredential
+import com.vocaease.patient.core.security.PendingRevocationTransfer
+import com.vocaease.patient.core.security.RevocationTransferSink
 import java.io.IOException
 import java.time.Instant
 import java.util.concurrent.CancellationException
@@ -32,6 +36,70 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class AuthLogoutTransferTest {
+    @Test
+    fun `离线prepared退出原子变为pending后才提交认证终态并移交固定句柄`() = runBlocking {
+        val vault = TransferTokenVault("old-access", "old-refresh")
+        val sink = RecordingRevocationSink()
+        val repository = repository(vault, sink, RecordingRevocationScheduler()) { _, _ ->
+            RevocationRemoteResult.Retryable
+        }
+        val checkpoints = mutableListOf<PreparedLogoutCheckpoint>()
+        repository.restoreSession()
+        assertNotNull(repository.currentAuthenticatedLease())
+
+        assertEquals(
+            true,
+            repository.finishPreparedLogout(1, "logout-operation", PreparedLogoutCheckpoint.READY_TO_CLEAR) {
+                checkpoints += it
+                if (it == PreparedLogoutCheckpoint.AUTH_CLEARED) {
+                    assertNull(vault.sessionSnapshot().accessToken)
+                    assertNotNull(vault.pendingRevocationTransfer())
+                }
+            },
+        )
+
+        assertEquals(
+            listOf(PreparedLogoutCheckpoint.AUTH_BOUND, PreparedLogoutCheckpoint.AUTH_CLEARED),
+            checkpoints,
+        )
+        assertNull(vault.pendingRevocationTransfer())
+        assertEquals("old-access" to "old-refresh", sink.stored)
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertNull(repository.currentAuthenticatedLease())
+    }
+
+    @Test
+    fun `离线移动后进程死亡由新仓库先幂等移交且不重发远端`() = runBlocking {
+        val vault = TransferTokenVault("old-access", "old-refresh")
+        val sink = RecordingRevocationSink()
+        var remoteCalls = 0
+        val first = repository(vault, sink, RecordingRevocationScheduler()) { _, _ ->
+            remoteCalls += 1
+            RevocationRemoteResult.Retryable
+        }
+        assertThrows(SimulatedTransferCrash::class.java) {
+            runBlocking {
+                first.finishPreparedLogout(1, "logout-operation", PreparedLogoutCheckpoint.READY_TO_CLEAR) {
+                    if (it == PreparedLogoutCheckpoint.AUTH_CLEARED) throw SimulatedTransferCrash()
+                }
+            }
+        }
+        assertNotNull(vault.pendingRevocationTransfer())
+
+        val recovered = repository(vault, sink, RecordingRevocationScheduler()) { _, _ ->
+            remoteCalls += 1
+            RevocationRemoteResult.Success
+        }
+        val resumed = mutableListOf<PreparedLogoutCheckpoint>()
+        assertEquals(
+            true,
+            recovered.finishPreparedLogout(0, "logout-operation", PreparedLogoutCheckpoint.AUTH_BOUND, resumed::add),
+        )
+
+        assertEquals(listOf(PreparedLogoutCheckpoint.AUTH_CLEARED), resumed)
+        assertEquals(1, remoteCalls)
+        assertNull(vault.pendingRevocationTransfer())
+    }
     @Test
     fun `退出读取到vault失效在会话锁外发布且不会死锁`() = runBlocking {
         val vault = InvalidatedLogoutVault()
@@ -61,14 +129,14 @@ class AuthLogoutTransferTest {
         repository.logout()
 
         assertEquals("old-access" to "old-refresh", revocationVault.stored)
-        assertEquals(revocationVault.handle, scheduler.scheduled)
+        assertEquals(revocationVault.transferredHandle, scheduler.scheduled)
         assertNull(vault.sessionSnapshot().accessToken)
         assertNull(vault.refresh)
         assertEquals(AuthState.LoggedOut, repository.state.value)
     }
 
     @Test
-    fun `离线移交落盘失败保持原认证且不调度`() = runBlocking {
+    fun `revocationVault落盘失败保持加密pending且认证已安全清除`() = runBlocking {
         val vault = TransferTokenVault("old-access", "old-refresh")
         val revocationVault = RecordingRevocationSink(IOException("disk full"))
         val scheduler = RecordingRevocationScheduler()
@@ -79,11 +147,12 @@ class AuthLogoutTransferTest {
 
         repository.logout()
 
-        assertEquals("old-access", vault.sessionSnapshot().accessToken)
-        assertEquals("old-refresh", vault.refresh)
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertNull(vault.refresh)
+        assertNotNull(vault.pendingRevocationTransfer())
         assertNull(scheduler.scheduled)
-        assertEquals(AuthState.Authenticated, repository.state.value)
-        assertEquals(AuthOperationState.Error("安全退出未完成，请重试"), repository.operation.value)
+        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertEquals(AuthOperationState.Idle, repository.operation.value)
     }
 
     @Test
@@ -174,14 +243,21 @@ private class InvalidatedLogoutVault : TokenVault {
 
 private class RecordingRevocationSink(
     private val failure: Throwable? = null,
-) : RevocationTokenSink {
+) : RevocationTransferSink {
     val handle = RevocationHandle("c".repeat(64))
     var stored: Pair<String, String>? = null
+    var transferredHandle: RevocationHandle? = null
 
     override suspend fun store(accessToken: String, refreshToken: String): RevocationHandle {
         failure?.let { throw it }
         stored = accessToken to refreshToken
         return handle
+    }
+
+    override suspend fun store(handle: RevocationHandle, accessToken: String, refreshToken: String) {
+        failure?.let { throw it }
+        transferredHandle = handle
+        stored = accessToken to refreshToken
     }
 }
 
@@ -192,10 +268,13 @@ private class RecordingRevocationScheduler : RevocationScheduling {
     }
 }
 
-private class TransferTokenVault(accessToken: String?, refreshToken: String?) : TokenVault {
+private class TransferTokenVault(accessToken: String?, refreshToken: String?) : TokenVault, DurableLogoutTokenVault {
     private var snapshot = SessionSnapshot(accessToken, if (accessToken == null) 0 else 1)
     var refresh: String? = refreshToken
         private set
+    private var boundOperationId: String? = null
+    private var boundAccess: String? = null
+    private var pending: PendingRevocationTransfer? = null
 
     override fun sessionSnapshot(): SessionSnapshot = snapshot
 
@@ -224,6 +303,49 @@ private class TransferTokenVault(accessToken: String?, refreshToken: String?) : 
         snapshot = SessionSnapshot(null, snapshot.epoch + 1)
         return SessionMutation(true, snapshot)
     }
+
+    override suspend fun bindLogoutOperation(expectedEpoch: Long, operationId: String): BoundLogoutCredential? {
+        if (snapshot.epoch != expectedEpoch || pending != null) return null
+        val access = snapshot.accessToken ?: return null
+        if (boundOperationId != null && boundOperationId != operationId) return null
+        boundOperationId = operationId
+        boundAccess = access
+        return BoundLogoutCredential(operationId, access, refresh ?: return null, snapshot.epoch)
+    }
+
+    override suspend fun boundLogoutOperation(expectedEpoch: Long, operationId: String): BoundLogoutCredential? {
+        if (snapshot.epoch != expectedEpoch || boundOperationId != operationId) return null
+        return BoundLogoutCredential(operationId, snapshot.accessToken ?: boundAccess ?: return null, refresh ?: return null, snapshot.epoch)
+    }
+
+    override suspend fun clearBoundLogout(expectedEpoch: Long, operationId: String): SessionMutation {
+        if (snapshot.epoch != expectedEpoch || boundOperationId != operationId) return SessionMutation(false, snapshot)
+        refresh = null
+        boundAccess = null
+        boundOperationId = null
+        snapshot = SessionSnapshot(null, snapshot.epoch + 1)
+        return SessionMutation(true, snapshot)
+    }
+
+    override suspend fun moveBoundLogoutToRevocation(
+        expectedEpoch: Long,
+        operationId: String,
+        handle: RevocationHandle,
+    ): SessionMutation {
+        val credential = boundLogoutOperation(expectedEpoch, operationId) ?: return SessionMutation(false, snapshot)
+        pending = PendingRevocationTransfer(operationId, handle, credential.accessToken, credential.refreshToken)
+        refresh = null
+        boundAccess = null
+        boundOperationId = null
+        snapshot = SessionSnapshot(null, snapshot.epoch + 1)
+        return SessionMutation(true, snapshot)
+    }
+
+    override suspend fun pendingRevocationTransfer(): PendingRevocationTransfer? = pending
+
+    override suspend fun completePendingRevocationTransfer(operationId: String, handle: RevocationHandle) {
+        if (pending?.operationId == operationId && pending?.handle == handle) pending = null
+    }
 }
 
 private class TransferAuthRemote : AuthRemoteDataSource {
@@ -242,3 +364,4 @@ private class TransferAuthRemote : AuthRemoteDataSource {
 }
 
 private const val PATIENT_ID = "11111111-1111-4111-8111-111111111111"
+private class SimulatedTransferCrash : RuntimeException()

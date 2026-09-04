@@ -1,5 +1,6 @@
 package com.vocaease.patient.feature.profile
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,6 +55,8 @@ fun SettingsScreen(
     onDismissLogout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    BackHandler(enabled = state.loading) { }
+
     Column(
         modifier = modifier.fillMaxSize().safeDrawingPadding().imePadding()
             .verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp),

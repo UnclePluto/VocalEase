@@ -76,6 +76,12 @@ class DatabaseConverters {
     @TypeConverter
     fun toAccountExitStage(value: String): AccountExitStage = enumValueOrReject(value)
 
+    @TypeConverter
+    fun fromAccountOperationKind(value: AccountOperationKind): String = value.name
+
+    @TypeConverter
+    fun toAccountOperationKind(value: String): AccountOperationKind = enumValueOrReject(value)
+
     private inline fun <reified T : Enum<T>> enumValueOrReject(value: String): T =
         enumValues<T>().firstOrNull { it.name == value }
             ?: throw IllegalArgumentException("数据库状态值无效")
@@ -88,7 +94,7 @@ class DatabaseConverters {
         AnalysisCheckpointEntity::class,
         AccountExitIntentEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -116,6 +122,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_6_7)
                 .addMigrations(MIGRATION_7_8)
                 .addMigrations(MIGRATION_8_9)
+                .addMigrations(MIGRATION_9_10)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -304,6 +311,16 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                     )
                     """.trimIndent(),
                 )
+            }
+        }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `account_exit_intents` ADD COLUMN `operation_kind` TEXT NOT NULL DEFAULT 'LEGACY_LOCAL_UNLOCK'",
+                )
+                db.execSQL("DROP TRIGGER IF EXISTS account_exit_intents_guard_insert_v1")
+                db.execSQL("DROP TRIGGER IF EXISTS account_exit_intents_guard_update_v1")
             }
         }
     }

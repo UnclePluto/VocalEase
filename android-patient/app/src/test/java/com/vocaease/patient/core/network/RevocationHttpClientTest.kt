@@ -8,6 +8,8 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
+import org.junit.Assert.assertNull
+import java.util.concurrent.TimeUnit
 
 class RevocationHttpClientTest {
     private val server = MockWebServer()
@@ -61,5 +63,29 @@ class RevocationHttpClientTest {
 
         server.enqueue(MockResponse().setResponseCode(401).setBody("{\"code\":\"not_authenticated\"}"))
         assertEquals(RevocationRemoteResult.Retryable, remote.revoke("access", "refresh"))
+    }
+
+    @Test
+    fun `503重试提示421与认证挑战均只发送一次物理请求`() = runBlocking {
+        listOf(
+            MockResponse().setResponseCode(503).addHeader("Retry-After", "0"),
+            MockResponse().setResponseCode(421),
+            MockResponse().setResponseCode(401).addHeader("WWW-Authenticate", "Basic realm=\"unsafe\""),
+        ).forEachIndexed { index, response ->
+            MockWebServer().use { oneShotServer ->
+                oneShotServer.start()
+                val remote = OkHttpRevocationRemote(
+                    oneShotServer.url("/").toString(),
+                    NetworkModule.createRevocationHttpClient(),
+                )
+                oneShotServer.enqueue(response)
+                oneShotServer.enqueue(MockResponse().setResponseCode(200))
+
+                assertEquals(RevocationRemoteResult.Retryable, remote.revoke("access-$index", "refresh-$index"))
+                assertEquals(1, oneShotServer.requestCount)
+                oneShotServer.takeRequest()
+                assertNull(oneShotServer.takeRequest(100, TimeUnit.MILLISECONDS))
+            }
+        }
     }
 }

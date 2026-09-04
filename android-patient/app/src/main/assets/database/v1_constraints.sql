@@ -23,7 +23,9 @@ CREATE TRIGGER IF NOT EXISTS account_exit_intents_guard_insert_v1 BEFORE INSERT 
     OR typeof(NEW.session_epoch) != 'integer' OR NEW.session_epoch < 0
     OR trim(NEW.operation_id) = '' OR length(NEW.operation_id) > 128
     OR NEW.operation_id GLOB '*[^A-Za-z0-9_-]*'
+    OR NEW.operation_kind NOT IN ('LOGOUT','PASSWORD_CHANGE','LEGACY_LOCAL_UNLOCK')
     OR NEW.choice NOT IN ('RETAIN','DELETE')
+    OR (NEW.operation_kind='PASSWORD_CHANGE' AND NEW.choice!='RETAIN')
     OR NEW.stage != 'INTENT_WRITTEN'
     OR typeof(NEW.operation_version) != 'integer' OR NEW.operation_version != 0
   THEN RAISE(ABORT, 'account exit intent constraint') END;
@@ -32,18 +34,27 @@ END;
 CREATE TRIGGER IF NOT EXISTS account_exit_intents_guard_update_v1 BEFORE UPDATE ON account_exit_intents BEGIN
   SELECT CASE WHEN NEW.account_scope != OLD.account_scope
     OR NEW.account_scope_hash != OLD.account_scope_hash
-    OR NEW.incarnation_proof != OLD.incarnation_proof
-    OR NEW.session_epoch != OLD.session_epoch
     OR NEW.operation_id != OLD.operation_id
+    OR NEW.operation_kind != OLD.operation_kind
     OR NEW.choice != OLD.choice
     OR NEW.operation_version != OLD.operation_version + 1
     OR NOT (
-      (OLD.stage='INTENT_WRITTEN' AND NEW.stage='PAUSED_LOCKED')
-      OR (OLD.stage='PAUSED_LOCKED' AND NEW.stage='WORK_CANCELLED')
-      OR (OLD.stage='WORK_CANCELLED' AND NEW.stage='RUNTIME_REVOKED')
-      OR (OLD.stage='RUNTIME_REVOKED' AND OLD.choice='RETAIN' AND NEW.stage='READY_TO_CLEAR')
-      OR (OLD.stage='RUNTIME_REVOKED' AND OLD.choice='DELETE' AND NEW.stage='DATA_DELETED')
-      OR (OLD.stage='DATA_DELETED' AND OLD.choice='DELETE' AND NEW.stage='READY_TO_CLEAR')
+      (NEW.incarnation_proof = OLD.incarnation_proof AND NEW.session_epoch = OLD.session_epoch AND (
+        (OLD.stage='INTENT_WRITTEN' AND NEW.stage='PAUSED_LOCKED')
+        OR (OLD.stage='PAUSED_LOCKED' AND NEW.stage='WORK_CANCELLED')
+        OR (OLD.stage='WORK_CANCELLED' AND NEW.stage='RUNTIME_REVOKED')
+        OR (OLD.stage='RUNTIME_REVOKED' AND OLD.choice='RETAIN' AND NEW.stage='READY_TO_CLEAR')
+        OR (OLD.stage='RUNTIME_REVOKED' AND OLD.choice='DELETE' AND NEW.stage='DATA_DELETED')
+        OR (OLD.stage='DATA_DELETED' AND OLD.choice='DELETE' AND NEW.stage='READY_TO_CLEAR')
+        OR (OLD.stage='READY_TO_CLEAR' AND OLD.operation_kind='LOGOUT' AND NEW.stage='AUTH_BOUND')
+        OR (OLD.stage='AUTH_BOUND' AND OLD.operation_kind='LOGOUT' AND NEW.stage='REMOTE_REVOKED')
+        OR (OLD.stage='REMOTE_REVOKED' AND OLD.operation_kind='LOGOUT' AND NEW.stage='AUTH_CLEARED')
+        OR (OLD.stage='AUTH_BOUND' AND OLD.operation_kind='LOGOUT' AND NEW.stage='AUTH_CLEARED')
+      ))
+      OR (NEW.stage = OLD.stage
+        AND (NEW.incarnation_proof != OLD.incarnation_proof OR NEW.session_epoch != OLD.session_epoch)
+        AND length(NEW.incarnation_proof) = 64 AND NEW.incarnation_proof NOT GLOB '*[^0-9a-f]*'
+        AND typeof(NEW.session_epoch) = 'integer' AND NEW.session_epoch >= 0)
     )
   THEN RAISE(ABORT, 'account exit intent transition') END;
 END;

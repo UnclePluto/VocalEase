@@ -108,16 +108,35 @@ class PlaintextUploadLeaseManager(
             if (!Files.exists(root.toPath(), LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(root.toPath()) || !root.isDirectory) return
             val rootCanonical = root.canonicalFile
             root.listFiles().orEmpty().forEach { candidate ->
-                if (candidate.name in activeOpaqueJobIds || !OPAQUE_JOB.matches(candidate.name) ||
-                    Files.isSymbolicLink(candidate.toPath()) || !candidate.isDirectory || candidate.canonicalFile.parentFile != rootCanonical
+                if (!OPAQUE_JOB.matches(candidate.name) || Files.isSymbolicLink(candidate.toPath()) ||
+                    !candidate.isDirectory || candidate.canonicalFile.parentFile != rootCanonical
                 ) return@forEach
                 val children = candidate.listFiles().orEmpty()
-                if (children.any { Files.isSymbolicLink(it.toPath()) || !it.isFile }) return@forEach
-                // 文件 mtime 必须稳定以匹配七牛的跨进程 sourceId；遗留年龄因此以 job 目录更新时间为准。
-                if (candidate.lastModified() <= nowEpochMillis - ORPHAN_AGE_MILLIS) {
-                    children.forEach { it.delete() }
+                if (children.all { it.isFile && !Files.isSymbolicLink(it.toPath()) }) {
+                    cleanupJobDirectory(candidate, nowEpochMillis, activeOpaqueJobIds)
+                } else if (children.all {
+                        it.isDirectory && !Files.isSymbolicLink(it.toPath()) &&
+                            OPAQUE_JOB.matches(it.name) && it.canonicalFile.parentFile == candidate.canonicalFile
+                    }
+                ) {
+                    children.forEach { cleanupJobDirectory(it, nowEpochMillis, activeOpaqueJobIds) }
                     deleteIfEmpty(candidate)
                 }
+            }
+        }
+
+        private fun cleanupJobDirectory(
+            candidate: File,
+            nowEpochMillis: Long,
+            activeOpaqueJobIds: Set<String>,
+        ) {
+            if (candidate.name in activeOpaqueJobIds) return
+            val children = candidate.listFiles().orEmpty()
+            if (children.any { Files.isSymbolicLink(it.toPath()) || !it.isFile }) return
+            // 文件 mtime 必须稳定以匹配七牛的跨进程 sourceId；遗留年龄因此以 job 目录更新时间为准。
+            if (candidate.lastModified() <= nowEpochMillis - ORPHAN_AGE_MILLIS) {
+                children.forEach { check(it.delete()) { "无法清理上传明文孤儿" } }
+                deleteIfEmpty(candidate)
             }
         }
 

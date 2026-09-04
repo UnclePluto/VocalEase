@@ -13,8 +13,13 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -281,8 +286,21 @@ internal class ChunkedAesGcmFileStore(
                 accountGenerations.computeIfAbsent(registryKey) { AtomicLong() }.incrementAndGet()
                 revokeAllAccountReaders(registryKey)
                 val directory = accountDirectory(scopeHash)
-                if (directory.exists()) {
-                    directory.walkBottomUp().forEach { if (it.exists() && !it.delete()) failWrite() }
+                val root = directory.toPath()
+                if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+                    if (Files.isSymbolicLink(root)) failWrite()
+                    Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+                        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                            Files.delete(file)
+                            return FileVisitResult.CONTINUE
+                        }
+
+                        override fun postVisitDirectory(dir: Path, error: java.io.IOException?): FileVisitResult {
+                            if (error != null) throw error
+                            Files.delete(dir)
+                            return FileVisitResult.CONTINUE
+                        }
+                    })
                 }
                 keyStore().deleteEntry(alias(scopeHash))
             }

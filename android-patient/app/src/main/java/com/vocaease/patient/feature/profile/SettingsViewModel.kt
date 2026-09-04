@@ -121,9 +121,10 @@ class SettingsViewModel(
             is SettingsLogoutResult.NeedsDraftDecision -> mutableState.update {
                 it.copy(pendingDraftDecisionCount = result.count)
             }
-            SettingsLogoutResult.LoggedOut,
-            SettingsLogoutResult.Superseded,
-            -> Unit
+            SettingsLogoutResult.LoggedOut -> Unit
+            SettingsLogoutResult.Superseded -> mutableState.update {
+                it.copy(errorMessage = "账户状态已变化，请重试")
+            }
             is SettingsLogoutResult.Failed -> mutableState.update { it.copy(errorMessage = result.message) }
         }
     }

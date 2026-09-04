@@ -189,6 +189,7 @@ class AndroidAppContainer(context: Context) : AppContainer {
     override val settingsAccountActions: SettingsAccountActions = ProductionSettingsAccountActions(accountExitManager)
 
     init {
+        authRepository.registerPreparedLogoutRecovery(accountExitManager::recoverAuthenticationFinalization)
         val cleanupScheduler = DailyDraftCleanupScheduler(context)
         val tempFiles = PrivateRecordingTempFiles(context)
         val stagingRecovery = RecordingStagingRecovery(tempFiles)

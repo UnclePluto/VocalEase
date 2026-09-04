@@ -13,6 +13,8 @@ import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Response
+import okhttp3.Authenticator
+import okhttp3.Protocol
 import retrofit2.Invocation
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
@@ -127,7 +129,23 @@ object NetworkModule {
         .followRedirects(false)
         .followSslRedirects(false)
         .retryOnConnectionFailure(false)
+        .authenticator(Authenticator.NONE)
+        .proxyAuthenticator(Authenticator.NONE)
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .addNetworkInterceptor(RevocationSingleExchangeInterceptor())
         .build()
+}
+
+/** 去掉 OkHttp 用于 503 follow-up 的信号；HTTP/1.1 同时排除 421 合并连接重发。 */
+private class RevocationSingleExchangeInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val response = chain.proceed(chain.request())
+        return if (response.code == 503 && response.header("Retry-After") == "0") {
+            response.newBuilder().removeHeader("Retry-After").build()
+        } else {
+            response
+        }
+    }
 }
 
 private const val MAX_AUTHENTICATED_REQUESTS = 64

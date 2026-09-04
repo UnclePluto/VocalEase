@@ -317,6 +317,36 @@ class AuthRepositoryTest {
     }
 
     @Test
+    fun `改密旧密码校验失败只返回脱敏中文提示`() = runBlocking {
+        val rawDetails = "当前密码不正确 secret-old-password"
+        val remote = FakeAuthRemote(
+            changePasswordFailure = HttpException(
+                Response.error<Any>(
+                    400,
+                    """{"code":"validation_error","message":"bad","data":{"old_password":"$rawDetails"},"request_id":"request-secret"}"""
+                        .toResponseBody(),
+                ),
+            ),
+        )
+        val repository = repository(
+            vault = FakeTokenVault(accessToken = "access", refreshToken = "refresh"),
+            remote = remote,
+        )
+
+        val result = repository.changePasswordResult("secret-old-password", "new-password")
+
+        assertEquals(
+            PasswordChangeResult.Failed("提交的信息有误，请检查后重试"),
+            result,
+        )
+        val message = (result as PasswordChangeResult.Failed).userMessage
+        assertFalse(message.contains("validation_error"))
+        assertFalse(message.contains(rawDetails))
+        assertFalse(message.contains("secret-old-password"))
+        assertFalse(message.contains("request-secret"))
+    }
+
+    @Test
     fun `同一代 token 的二十个 401 只刷新一次并共享新 token`() = runBlocking {
         val vault = FakeTokenVault(accessToken = "expired", refreshToken = "stored-refresh")
         val gate = CompletableDeferred<Unit>()
@@ -672,6 +702,7 @@ private class FakeAuthRemote(
     private val refreshResult: AuthSession = session(),
     private val refreshFailure: Throwable? = null,
     private val logoutFailure: Throwable? = null,
+    private val changePasswordFailure: Throwable? = null,
     private val refreshGate: CompletableDeferred<Unit>? = null,
 ) : AuthRemoteDataSource {
     val refreshCalls = AtomicInteger()
@@ -695,6 +726,7 @@ private class FakeAuthRemote(
 
     override suspend fun changePassword(request: ChangePasswordRequestDto) {
         lastChangePassword = request
+        changePasswordFailure?.let { throw it }
     }
 
     override suspend fun logout(request: LogoutRequestDto) {

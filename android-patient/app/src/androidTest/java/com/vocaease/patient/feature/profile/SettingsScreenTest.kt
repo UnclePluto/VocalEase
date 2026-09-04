@@ -1,6 +1,7 @@
 package com.vocaease.patient.feature.profile
 
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -77,6 +78,30 @@ class SettingsScreenTest {
         composeRule.onNodeWithTag("settings-change-submit").assertIsNotEnabled()
         composeRule.onNodeWithTag("settings-logout").assertIsNotEnabled()
         composeRule.onNodeWithText("密码修改未完成，请重试").assertIsDisplayed()
+    }
+
+    @Test
+    fun loading期间系统返回键不会离开设置页() {
+        var parentBackCalls = 0
+        composeRule.setContent {
+            BackHandler { parentBackCalls += 1 }
+            VocaEaseTheme {
+                SettingsScreen(
+                    state = SettingsUiState(loading = true),
+                    onBack = {}, onOldPasswordChange = {}, onNewPasswordChange = {}, onConfirmationChange = {},
+                    onToggleOldPassword = {}, onToggleNewPassword = {}, onToggleConfirmation = {},
+                    onSubmitPassword = {}, onRequestLogout = {}, onConfirmLogout = {},
+                    onChooseRetain = {}, onChooseDelete = {}, onDismissLogout = {},
+                )
+            }
+        }
+
+        composeRule.activityRule.scenario.onActivity {
+            it.onBackPressedDispatcher.onBackPressed()
+        }
+
+        composeRule.runOnIdle { assertEquals(0, parentBackCalls) }
+        composeRule.onNodeWithText("设置").assertIsDisplayed()
     }
 
     @Test

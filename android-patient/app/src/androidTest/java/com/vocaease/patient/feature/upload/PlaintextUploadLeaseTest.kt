@@ -142,6 +142,29 @@ class PlaintextUploadLeaseTest {
         root.deleteRecursively()
     }
 
+    @Test
+    fun 启动同时清理账户二级目录遗留并保留其中活动job() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val root = context.cacheDir.resolve("upload-lease-nested-${System.nanoTime()}").apply { mkdirs() }
+        val account = root.resolve("a".repeat(64)).apply { mkdirs() }
+        val old = account.resolve("b".repeat(64)).apply { mkdirs(); setLastModified(1) }
+        old.resolve("dead.upload").writeText("x")
+        old.setLastModified(1)
+        val active = account.resolve("c".repeat(64)).apply { mkdirs(); setLastModified(1) }
+        active.resolve("active.upload").writeText("x")
+        active.setLastModified(1)
+
+        PlaintextUploadLeaseManager.cleanupOrphans(
+            root,
+            nowEpochMillis = 3_700_002,
+            activeOpaqueJobIds = setOf("c".repeat(64)),
+        )
+
+        assertFalse(old.exists())
+        assertTrue(active.exists())
+        root.deleteRecursively()
+    }
+
     private fun realQiniuSourceId(file: File): String {
         val type = Class.forName("com.qiniu.android.storage.UploadSourceFile")
         val constructor = type.getDeclaredConstructor(File::class.java).apply { isAccessible = true }

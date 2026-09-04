@@ -30,7 +30,13 @@ class AccountExitRecoveryTest {
 
     @Test
     fun 删除退出在每个副作用后崩溃都能从Room意图幂等收敛() = runBlocking {
-        AccountExitStage.entries.filter { it != AccountExitStage.READY_TO_CLEAR }.forEachIndexed { index, crashStage ->
+        listOf(
+            AccountExitStage.INTENT_WRITTEN,
+            AccountExitStage.PAUSED_LOCKED,
+            AccountExitStage.WORK_CANCELLED,
+            AccountExitStage.RUNTIME_REVOKED,
+            AccountExitStage.DATA_DELETED,
+        ).forEachIndexed { index, crashStage ->
             val owner = owner("exit-$index")
             val store = RoomAccountExitIntentStore(database, PATIENT_ID)
             val intent = store.persist(owner, LogoutChoice.DELETE)
@@ -61,6 +67,47 @@ class AccountExitRecoveryTest {
         assertEquals(0, effects.deleteCalls)
         assertEquals(owner.operationId, recovered.operationId)
         assertEquals(owner.incarnationProof, recovered.incarnationProof)
+    }
+
+    @Test
+    fun 远端前绑定远端成功与认证清理窗口均有Room终态且可幂等收尾() = runBlocking {
+        val owner = owner("terminal-exit")
+        val firstStore = RoomAccountExitIntentStore(database, PATIENT_ID)
+        val storageReady = AccountExitProcessor(firstStore, RecordingExitEffects())
+            .converge(firstStore.persist(owner, LogoutChoice.RETAIN))
+
+        val authBound = firstStore.advance(storageReady, AccountExitStage.AUTH_BOUND)
+        assertEquals(AccountExitStage.AUTH_BOUND, RoomAccountExitIntentStore(database, PATIENT_ID).find()?.stage)
+
+        val afterRemoteCrash = RoomAccountExitIntentStore(database, PATIENT_ID)
+        val remoteRevoked = afterRemoteCrash.advance(authBound, AccountExitStage.REMOTE_REVOKED)
+        assertEquals(AccountExitStage.REMOTE_REVOKED, afterRemoteCrash.find()?.stage)
+
+        val afterClearCrash = RoomAccountExitIntentStore(database, PATIENT_ID)
+        val authCleared = afterClearCrash.advance(remoteRevoked, AccountExitStage.AUTH_CLEARED)
+        assertEquals(AccountExitStage.AUTH_CLEARED, afterClearCrash.find()?.stage)
+        assertEquals(1, afterClearCrash.deleteCompletedLogout(authCleared))
+        assertEquals(null, afterClearCrash.find())
+    }
+
+    @Test
+    fun 同账户新incarnation可接管存储阶段但保持原操作身份() = runBlocking {
+        val firstOwner = owner("old-operation")
+        val store = RoomAccountExitIntentStore(database, PATIENT_ID)
+        val written = store.persist(firstOwner, LogoutChoice.RETAIN)
+        val nextOwner = LogoutOperationOwner(
+            accountScopeHash = firstOwner.accountScopeHash,
+            incarnationProof = "c".repeat(64),
+            sessionEpoch = firstOwner.sessionEpoch + 9,
+            operationId = firstOwner.operationId,
+        )
+
+        val adopted = store.takeover(written, nextOwner)
+
+        assertEquals(nextOwner.incarnationProof, adopted.incarnationProof)
+        assertEquals(nextOwner.sessionEpoch, adopted.sessionEpoch)
+        assertEquals(firstOwner.operationId, adopted.operationId)
+        assertEquals(AccountExitStage.INTENT_WRITTEN, adopted.stage)
     }
 
     private fun owner(operationId: String) = LogoutOperationOwner(

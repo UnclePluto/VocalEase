@@ -33,7 +33,7 @@ internal class AndroidRevocationVault(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val fileStore: RevocationVaultFileStore = AtomicRevocationVaultFileStore(context.applicationContext),
-) : RevocationTokenSink, RevocationTokenSource {
+) : RevocationTransferSink, RevocationTokenSource {
     private val mutex = Mutex()
 
     override suspend fun store(accessToken: String, refreshToken: String): RevocationHandle {
@@ -47,10 +47,33 @@ internal class AndroidRevocationVault(
             do {
                 handle = RevocationHandle(ByteArray(SLOT_BYTES).also(SecureRandom()::nextBytes).toHex())
             } while (records.containsKey(handle.slotId))
-            records[handle.slotId] = RevocationCredential(accessToken, refreshToken)
-            fileStore.writeAtomically(encrypt(encodeRecords(records)))
+            storeLocked(records, handle, accessToken, refreshToken)
             handle
         }
+    }
+
+    override suspend fun store(handle: RevocationHandle, accessToken: String, refreshToken: String) = serialized {
+        require(accessToken.isNotBlank() && refreshToken.isNotBlank())
+        require(accessToken.toByteArray(Charsets.UTF_8).size <= MAX_TOKEN_BYTES)
+        require(refreshToken.toByteArray(Charsets.UTF_8).size <= MAX_TOKEN_BYTES)
+        val records = readRecords()
+        val existing = records[handle.slotId]
+        if (existing != null) {
+            check(existing == RevocationCredential(accessToken, refreshToken)) { "撤销槽句柄冲突" }
+            return@serialized
+        }
+        check(records.size < MAX_RECORDS) { "待撤销凭据过多" }
+        storeLocked(records, handle, accessToken, refreshToken)
+    }
+
+    private fun storeLocked(
+        records: LinkedHashMap<String, RevocationCredential>,
+        handle: RevocationHandle,
+        accessToken: String,
+        refreshToken: String,
+    ) {
+        records[handle.slotId] = RevocationCredential(accessToken, refreshToken)
+        fileStore.writeAtomically(encrypt(encodeRecords(records)))
     }
 
     override suspend fun lease(handle: RevocationHandle): RevocationTokenLease? = serialized {

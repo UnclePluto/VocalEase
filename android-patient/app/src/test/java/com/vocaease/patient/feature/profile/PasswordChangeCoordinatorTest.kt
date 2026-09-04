@@ -25,7 +25,7 @@ class PasswordChangeCoordinatorTest {
     }
 
     @Test
-    fun `准备失败不发远端且远端失败保留意图和认证态供重试`() = runBlocking {
+    fun `准备失败不发远端且远端失败回滚改密意图并保留认证态`() = runBlocking {
         val prepareFailure = FakePasswordChangeBoundary(prepare = null)
         assertEquals(
             PasswordChangeOutcome.Superseded,
@@ -33,12 +33,14 @@ class PasswordChangeCoordinatorTest {
         )
         assertEquals(listOf("prepare"), prepareFailure.calls)
 
-        val remoteFailure = FakePasswordChangeBoundary(remoteChanged = false)
+        val remoteFailure = FakePasswordChangeBoundary(
+            remoteAttempt = PasswordChangeAttempt.Failed("原密码错误"),
+        )
         assertEquals(
-            PasswordChangeOutcome.Failed("密码修改未完成，请重试"),
+            PasswordChangeOutcome.Failed("原密码错误"),
             PasswordChangeCoordinator(remoteFailure).change("old", "new", "new"),
         )
-        assertEquals(listOf("prepare", "remote"), remoteFailure.calls)
+        assertEquals(listOf("prepare", "remote", "rollback"), remoteFailure.calls)
     }
 
     @Test
@@ -47,7 +49,7 @@ class PasswordChangeCoordinatorTest {
         assertThrows(CancellationException::class.java) {
             runBlocking { PasswordChangeCoordinator(boundary).change("old", "new", "new") }
         }
-        assertEquals(listOf("prepare", "remote"), boundary.calls)
+        assertEquals(listOf("prepare", "remote", "rollback"), boundary.calls)
     }
 }
 
@@ -59,7 +61,7 @@ private class FakePasswordChangeBoundary(
         ),
         "11111111-1111-4111-8111-111111111111",
     ),
-    private val remoteChanged: Boolean = true,
+    private val remoteAttempt: PasswordChangeAttempt = PasswordChangeAttempt.Changed,
     private val cancelRemote: Boolean = false,
 ) : PasswordChangeAccountBoundary {
     val calls = mutableListOf<String>()
@@ -69,14 +71,22 @@ private class FakePasswordChangeBoundary(
         return prepare
     }
 
-    override suspend fun changePassword(prepared: PreparedPasswordChange, oldPassword: String, newPassword: String): Boolean {
+    override suspend fun changePassword(
+        prepared: PreparedPasswordChange,
+        oldPassword: String,
+        newPassword: String,
+    ): PasswordChangeAttempt {
         calls += "remote"
         if (cancelRemote) throw CancellationException("cancel")
-        return remoteChanged
+        return remoteAttempt
     }
 
     override suspend fun completePasswordChange(prepared: PreparedPasswordChange): Boolean {
         calls += "complete"
         return true
+    }
+
+    override suspend fun rollbackPasswordChange(prepared: PreparedPasswordChange) {
+        calls += "rollback"
     }
 }

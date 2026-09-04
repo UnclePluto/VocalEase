@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -196,6 +197,30 @@ class AuthRaceTest {
         assertEquals(AuthOperationState.Idle, repository.operation.value)
         assertEquals("access", vault.sessionSnapshot().accessToken)
         assertEquals("refresh", vault.refreshValue())
+    }
+
+    @Test
+    fun `改密持有认证操作claim时刷新不得推进epoch`() = runBlocking {
+        val vault = LinearTokenVault("expired-access", "stored-refresh")
+        val remote = GatedAuthRemote(refreshResult = authSession("refresh-access", "rotated-refresh")).apply {
+            holdChangePassword = true
+        }
+        val coordinator = RefreshCoordinator(vault, remote)
+        val repository = AuthRepository(vault, remote, coordinator, patientIdentity())
+        repository.restoreSession()
+        val originalEpoch = vault.sessionSnapshot().epoch
+
+        val change = async { repository.changePassword("old-password", "new-password") }
+        remote.changePasswordStarted.await()
+        val refresh = async { coordinator.refreshAfterUnauthorized(originalEpoch) }
+
+        assertNull(withTimeoutOrNull(100) { remote.refreshStarted.await() })
+        assertEquals(originalEpoch, vault.sessionSnapshot().epoch)
+        remote.releaseChangePassword.complete(Unit)
+
+        assertTrue(change.await())
+        assertTrue(refresh.await() is RefreshResult.Superseded)
+        assertNull(vault.sessionSnapshot().accessToken)
     }
 
     @Test

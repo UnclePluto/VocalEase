@@ -174,7 +174,7 @@ class RoomUploadStore(
     fun plaintextLeaseProvider(root: java.io.File): PlaintextUploadLeaseProvider {
         val opaqueJob = sha256("${storage.accountScopeHash}\u0000$draftId")
         return PlaintextUploadLeaseManager(
-            root = root,
+            root = java.io.File(root, storage.accountScopeHash),
             opaqueJobId = opaqueJob,
             source = { kind, destination ->
                 storage.copyUploadMediaTo(

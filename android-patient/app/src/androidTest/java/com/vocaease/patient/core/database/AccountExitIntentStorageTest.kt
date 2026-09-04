@@ -10,6 +10,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlinx.coroutines.runBlocking
 
 @RunWith(AndroidJUnit4::class)
 class AccountExitIntentStorageTest {
@@ -31,14 +32,15 @@ class AccountExitIntentStorageTest {
         val sqlite = database.openHelper.writableDatabase
         sqlite.execSQL(
             "INSERT INTO account_exit_intents(" +
-                "account_scope,account_scope_hash,incarnation_proof,session_epoch,operation_id,choice,stage,operation_version" +
-                ") VALUES(?,?,?,?,?,?,?,?)",
+                "account_scope,account_scope_hash,incarnation_proof,session_epoch,operation_id,operation_kind,choice,stage,operation_version" +
+                ") VALUES(?,?,?,?,?,?,?,?,?)",
             arrayOf<Any>(
                 "11111111-1111-4111-8111-111111111111",
                 "a".repeat(64),
                 "b".repeat(64),
                 7L,
                 "logout-operation",
+                "LOGOUT",
                 "RETAIN",
                 "INTENT_WRITTEN",
                 0L,
@@ -46,13 +48,45 @@ class AccountExitIntentStorageTest {
         )
 
         val stored = sqlite.query(
-            "SELECT choice,stage,operation_version FROM account_exit_intents WHERE account_scope=?",
+            "SELECT operation_kind,choice,stage,operation_version FROM account_exit_intents WHERE account_scope=?",
             arrayOf("11111111-1111-4111-8111-111111111111"),
         ).use { cursor ->
             check(cursor.moveToFirst())
-            listOf(cursor.getString(0), cursor.getString(1), cursor.getLong(2).toString())
+            listOf(cursor.getString(0), cursor.getString(1), cursor.getString(2), cursor.getLong(3).toString())
         }
-        assertEquals(listOf("RETAIN", "INTENT_WRITTEN", "0"), stored)
+        assertEquals(listOf("LOGOUT", "RETAIN", "INTENT_WRITTEN", "0"), stored)
+    }
+
+    @Test
+    fun freshDatabasePersistsPasswordChangeIntentAndRejectsUnknownOperationKind() {
+        runBlocking {
+            val sqlite = database.openHelper.writableDatabase
+            sqlite.execSQL(
+                "INSERT INTO account_exit_intents(" +
+                    "account_scope,account_scope_hash,incarnation_proof,session_epoch,operation_id,operation_kind,choice,stage,operation_version" +
+                    ") VALUES(?,?,?,?,?,?,?,?,?)",
+                arrayOf<Any>(
+                    "11111111-1111-4111-8111-111111111111", "a".repeat(64), "b".repeat(64), 7L,
+                    "password-change", "PASSWORD_CHANGE", "RETAIN", "INTENT_WRITTEN", 0L,
+                ),
+            )
+            assertEquals(
+                AccountOperationKind.PASSWORD_CHANGE,
+                database.accountExitIntentDao().find("11111111-1111-4111-8111-111111111111")?.operationKind,
+            )
+
+            assertThrows(SQLiteConstraintException::class.java) {
+                sqlite.execSQL(
+                    "INSERT INTO account_exit_intents(" +
+                        "account_scope,account_scope_hash,incarnation_proof,session_epoch,operation_id,operation_kind,choice,stage,operation_version" +
+                        ") VALUES(?,?,?,?,?,?,?,?,?)",
+                    arrayOf<Any>(
+                        "22222222-2222-4222-8222-222222222222", "c".repeat(64), "d".repeat(64), 8L,
+                        "bad-kind", "UNKNOWN", "RETAIN", "INTENT_WRITTEN", 0L,
+                    ),
+                )
+            }
+        }
     }
 
     @Test
@@ -66,14 +100,15 @@ class AccountExitIntentStorageTest {
             assertThrows(SQLiteConstraintException::class.java) {
                 sqlite.execSQL(
                     "INSERT INTO account_exit_intents(" +
-                        "account_scope,account_scope_hash,incarnation_proof,session_epoch,operation_id,choice,stage,operation_version" +
-                        ") VALUES(?,?,?,?,?,?,?,?)",
+                        "account_scope,account_scope_hash,incarnation_proof,session_epoch,operation_id,operation_kind,choice,stage,operation_version" +
+                        ") VALUES(?,?,?,?,?,?,?,?,?)",
                     arrayOf<Any>(
                         "11111111-1111-4111-8111-${index.toString().padStart(12, '0')}",
                         scopeHash,
                         proof,
                         1L,
                         "logout-$index",
+                        "LOGOUT",
                         "DELETE",
                         "INTENT_WRITTEN",
                         0L,

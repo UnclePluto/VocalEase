@@ -37,7 +37,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(9, reopened.openHelper.readableDatabase.version)
+            assertEquals(10, reopened.openHelper.readableDatabase.version)
             val sqlite = reopened.openHelper.writableDatabase
             val triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
@@ -118,7 +118,7 @@ class DatabaseSchemaTest {
             assertEquals("等待重试", job?.lastSafeError)
             assertEquals(null, job?.resumePipelineStage)
             assertEquals(0L, job?.operationVersion)
-            assertEquals(9, reopened.openHelper.readableDatabase.version)
+            assertEquals(10, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -153,7 +153,7 @@ class DatabaseSchemaTest {
             assertEquals(9, job?.attemptCount)
             assertEquals(54_321L, job?.nextRetryAt)
             assertEquals(0L, job?.operationVersion)
-            assertEquals(9, reopened.openHelper.readableDatabase.version)
+            assertEquals(10, reopened.openHelper.readableDatabase.version)
         } finally {
             reopened.close()
         }
@@ -166,7 +166,7 @@ class DatabaseSchemaTest {
 
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
-            assertEquals(9, reopened.openHelper.readableDatabase.version)
+            assertEquals(10, reopened.openHelper.readableDatabase.version)
             val columns = reopened.openHelper.readableDatabase.query("PRAGMA table_info(analysis_checkpoints)").use { cursor ->
                 buildList { while (cursor.moveToNext()) add(cursor.getString(1)) }
             }
@@ -193,7 +193,7 @@ class DatabaseSchemaTest {
         val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
         try {
             val sqlite = reopened.openHelper.readableDatabase
-            assertEquals(9, sqlite.version)
+            assertEquals(10, sqlite.version)
             val row = sqlite.query(
                 "SELECT account_scope_hash,session_id,incarnation_proof,status,analysis_generation,poll_step,next_deadline_at,operation_version FROM analysis_checkpoints",
             ).use { cursor ->
@@ -207,6 +207,32 @@ class DatabaseSchemaTest {
             }
             assertFalse(sql.contains("account_scope`"))
             assertFalse(sql.contains("patient-raw-uuid"))
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun versionNineAmbiguousAccountIntentMigratesToLocalUnlockOnly() = kotlinx.coroutines.runBlocking {
+        migrationHelper.createDatabase(DATABASE_NAME, 9).use { sqlite ->
+            sqlite.execSQL(
+                "INSERT INTO account_exit_intents(account_scope,account_scope_hash,incarnation_proof,session_epoch," +
+                    "operation_id,choice,stage,operation_version) VALUES(?,?,?,?,?,?,?,?)",
+                arrayOf<Any>(
+                    "11111111-1111-4111-8111-111111111111", "a".repeat(64), "b".repeat(64), 7L,
+                    "legacy-retain", "RETAIN", "READY_TO_CLEAR", 6L,
+                ),
+            )
+        }
+
+        val reopened = VocaEaseDatabase.create(context, DATABASE_NAME, allowMainThreadQueries = true)
+        try {
+            val legacy = requireNotNull(
+                reopened.accountExitIntentDao().find("11111111-1111-4111-8111-111111111111"),
+            )
+            assertEquals(AccountOperationKind.LEGACY_LOCAL_UNLOCK, legacy.operationKind)
+            assertEquals(emptyList<AccountExitIntentEntity>(), reopened.accountExitIntentDao().findAuthenticationPending())
         } finally {
             reopened.close()
         }

@@ -70,11 +70,18 @@ object QiniuRecorderDirectory {
         root.mkdirs()
         require(root.isDirectory)
         val rootCanonical = root.canonicalFile
+        val accountDirectory = File(rootCanonical, accountScopeHash).canonicalFile
+        require(accountDirectory.parentFile == rootCanonical)
+        require(!Files.exists(accountDirectory.toPath(), LinkOption.NOFOLLOW_LINKS) ||
+            !Files.isSymbolicLink(accountDirectory.toPath()))
+        accountDirectory.mkdirs()
+        require(accountDirectory.isDirectory)
+        setOwnerOnly(accountDirectory, directory = true)
         val opaqueJob = java.security.MessageDigest.getInstance("SHA-256")
             .digest("$accountScopeHash\u0000$draftId".toByteArray())
             .joinToString("") { "%02x".format(it) }
-        val directory = File(rootCanonical, opaqueJob).canonicalFile
-        require(directory.path.startsWith(rootCanonical.path + File.separator))
+        val directory = File(accountDirectory, opaqueJob).canonicalFile
+        require(directory.parentFile == accountDirectory)
         require(!Files.exists(directory.toPath(), LinkOption.NOFOLLOW_LINKS) || !Files.isSymbolicLink(directory.toPath()))
         directory.mkdirs()
         require(directory.isDirectory)

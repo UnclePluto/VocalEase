@@ -9,6 +9,8 @@ import androidx.room.Query
 
 enum class AccountExitChoice { RETAIN, DELETE }
 
+enum class AccountOperationKind { LOGOUT, PASSWORD_CHANGE, LEGACY_LOCAL_UNLOCK }
+
 enum class AccountExitStage {
     INTENT_WRITTEN,
     PAUSED_LOCKED,
@@ -16,6 +18,9 @@ enum class AccountExitStage {
     RUNTIME_REVOKED,
     DATA_DELETED,
     READY_TO_CLEAR,
+    AUTH_BOUND,
+    REMOTE_REVOKED,
+    AUTH_CLEARED,
 }
 
 @Entity(
@@ -28,6 +33,7 @@ data class AccountExitIntentEntity(
     @ColumnInfo(name = "incarnation_proof") val incarnationProof: String,
     @ColumnInfo(name = "session_epoch") val sessionEpoch: Long,
     @ColumnInfo(name = "operation_id") val operationId: String,
+    @ColumnInfo(name = "operation_kind") val operationKind: AccountOperationKind,
     val choice: AccountExitChoice,
     val stage: AccountExitStage,
     @ColumnInfo(name = "operation_version") val operationVersion: Long,
@@ -53,6 +59,12 @@ internal interface AccountExitIntentDao {
 
     @Query("SELECT * FROM account_exit_intents WHERE account_scope=:accountScope")
     suspend fun find(accountScope: String): AccountExitIntentEntity?
+
+    @Query(
+        "SELECT * FROM account_exit_intents WHERE operation_kind='LOGOUT' " +
+            "AND stage IN ('READY_TO_CLEAR','AUTH_BOUND','REMOTE_REVOKED','AUTH_CLEARED')",
+    )
+    suspend fun findAuthenticationPending(): List<AccountExitIntentEntity>
 
     @Query(
         "UPDATE account_exit_intents SET stage=:toStage,operation_version=operation_version+1 " +
@@ -88,4 +100,28 @@ internal interface AccountExitIntentDao {
             "AND incarnation_proof=:incarnationProof AND stage='READY_TO_CLEAR'",
     )
     suspend fun deleteReady(accountScope: String, operationId: String, incarnationProof: String): Int
+
+    @Query(
+        "DELETE FROM account_exit_intents WHERE account_scope=:accountScope AND operation_id=:operationId " +
+            "AND incarnation_proof=:incarnationProof AND operation_kind='PASSWORD_CHANGE' AND stage='READY_TO_CLEAR'",
+    )
+    suspend fun deleteReadyPasswordChange(accountScope: String, operationId: String, incarnationProof: String): Int
+
+    @Query(
+        "DELETE FROM account_exit_intents WHERE account_scope=:accountScope AND operation_id=:operationId " +
+            "AND operation_kind='LOGOUT' AND stage='AUTH_CLEARED'",
+    )
+    suspend fun deleteCompletedLogout(accountScope: String, operationId: String): Int
+
+    @Query(
+        "DELETE FROM account_exit_intents WHERE account_scope=:accountScope AND operation_id=:operationId " +
+            "AND operation_kind='LOGOUT' AND stage='READY_TO_CLEAR'",
+    )
+    suspend fun deletePreAuthenticationLogout(accountScope: String, operationId: String): Int
+
+    @Query(
+        "DELETE FROM account_exit_intents WHERE account_scope=:accountScope AND operation_id=:operationId " +
+            "AND operation_kind='LEGACY_LOCAL_UNLOCK'",
+    )
+    suspend fun deleteLegacyLocalUnlock(accountScope: String, operationId: String): Int
 }

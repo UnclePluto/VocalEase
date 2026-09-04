@@ -56,3 +56,31 @@ interface TokenVault {
     /** expectedEpoch=null 表示无条件使当前 epoch 失效。 */
     suspend fun clear(expectedEpoch: Long? = null): SessionMutation
 }
+
+internal data class BoundLogoutCredential(
+    val operationId: String,
+    val accessToken: String,
+    val refreshToken: String,
+    val epoch: Long,
+)
+
+internal data class PendingRevocationTransfer(
+    val operationId: String,
+    val handle: RevocationHandle,
+    val accessToken: String,
+    val refreshToken: String,
+)
+
+/** 生产 vault 在同一加密 AtomicFile 内完成 ACTIVE→REVOCATION_PENDING。 */
+internal interface DurableLogoutTokenVault {
+    suspend fun bindLogoutOperation(expectedEpoch: Long, operationId: String): BoundLogoutCredential?
+    suspend fun boundLogoutOperation(expectedEpoch: Long, operationId: String): BoundLogoutCredential?
+    suspend fun clearBoundLogout(expectedEpoch: Long, operationId: String): SessionMutation
+    suspend fun moveBoundLogoutToRevocation(
+        expectedEpoch: Long,
+        operationId: String,
+        handle: RevocationHandle,
+    ): SessionMutation
+    suspend fun pendingRevocationTransfer(): PendingRevocationTransfer?
+    suspend fun completePendingRevocationTransfer(operationId: String, handle: RevocationHandle)
+}

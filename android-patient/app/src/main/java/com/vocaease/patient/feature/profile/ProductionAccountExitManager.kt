@@ -6,20 +6,28 @@ import androidx.work.WorkManager
 import com.vocaease.patient.core.cleanup.DraftCleanupWorkContract
 import com.vocaease.patient.core.database.AccountExitIntentEntity
 import com.vocaease.patient.core.database.AccountExitStage
+import com.vocaease.patient.core.database.AccountOperationKind
 import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.media.RecordingPlaybackHandoff
+import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
-import com.vocaease.patient.core.security.RevocationRemoteResult
 import com.vocaease.patient.feature.auth.AuthRepository
+import com.vocaease.patient.feature.auth.PreparedLogoutCheckpoint
+import com.vocaease.patient.feature.auth.PasswordChangeResult
 import com.vocaease.patient.feature.history.AnalysisSyncCoordinator
 import com.vocaease.patient.feature.history.AnalysisAndroidWorkContract
 import com.vocaease.patient.feature.upload.UploadCoordinator
 import com.vocaease.patient.feature.upload.UploadWorkContract
 import java.io.File
+import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runInterruptible
@@ -36,6 +44,7 @@ internal class ProductionAccountExitManager(
     analysisCoordinator: AnalysisSyncCoordinator,
     recordingPlaybackHandoff: RecordingPlaybackHandoff,
     private val workCancellation: AccountWorkCancellation = AndroidAccountWorkCancellation(context),
+    private val beforeRecoveryClaim: suspend () -> Unit = {},
 ) : LogoutAccountBoundary, PasswordChangeAccountBoundary {
     private val mutex = Mutex()
     private val effects = ProductionAccountExitEffects(
@@ -46,14 +55,27 @@ internal class ProductionAccountExitManager(
         analysisCoordinator,
         recordingPlaybackHandoff,
         workCancellation,
+        authRepository,
         ::resolve,
     )
+
+    override suspend fun <T> withLogoutClaim(owner: LogoutOperationOwner, operation: suspend () -> T): T {
+        resolve(owner)
+        return authRepository.withDestructiveCredentialClaim {
+            resolve(owner)
+            operation()
+        }
+    }
 
     override suspend fun acquireOwner(): LogoutOperationOwner? = mutex.withLock {
         val account = currentAccount() ?: return@withLock null
         authRepository.withAuthenticatedLease(account.lease) {
             val store = RoomAccountExitIntentStore(database, account.accountScope)
-            val existing = store.find()
+            var existing = store.find()
+            if (existing?.operationKind == AccountOperationKind.LEGACY_LOCAL_UNLOCK) {
+                check(store.deleteLegacyLocalUnlock(existing) == 1) { "旧账户操作本地解锁失败" }
+                existing = null
+            }
             val operationId = existing?.operationId ?: "logout-${UUID.randomUUID()}"
             val owner = account.owner(operationId)
             if (existing != null) store.takeover(existing, owner)
@@ -67,7 +89,11 @@ internal class ProductionAccountExitManager(
 
     override suspend fun persistIntent(owner: LogoutOperationOwner, choice: LogoutChoice): LogoutIntent =
         withOwner(owner) { account ->
-            RoomAccountExitIntentStore(database, account.accountScope).persist(owner, choice)
+            RoomAccountExitIntentStore(database, account.accountScope).persist(
+                owner,
+                choice,
+                AccountOperationKind.LOGOUT,
+            )
             LogoutIntent(owner, choice)
         }
 
@@ -91,64 +117,126 @@ internal class ProductionAccountExitManager(
         check(converge(intent).stage == AccountExitStage.READY_TO_CLEAR)
     }
 
-    override suspend fun logoutServer(owner: LogoutOperationOwner): LogoutRemoteResult =
-        when (authRepository.attemptPreparedLogout(owner.sessionEpoch)) {
-            RevocationRemoteResult.Success,
-            RevocationRemoteResult.InvalidOrExpired,
-            -> LogoutRemoteResult.Revoked
-            RevocationRemoteResult.Retryable -> LogoutRemoteResult.Offline
-            null -> LogoutRemoteResult.Revoked
-        }
-
-    override suspend fun commitLoggedOut(
-        owner: LogoutOperationOwner,
-        moveRefreshToRevocationOnly: Boolean,
-    ): Boolean {
+    override suspend fun finishLogout(owner: LogoutOperationOwner): Boolean {
         val account = runCatching { resolve(owner) }.getOrNull() ?: return false
-        val store = RoomAccountExitIntentStore(database, account.accountScope)
-        val ready = store.find() ?: return false
-        if (ready.stage != AccountExitStage.READY_TO_CLEAR || !ready.matches(owner)) return false
-        val committed = authRepository.commitPreparedLogout(owner.sessionEpoch, moveRefreshToRevocationOnly)
-        if (committed) store.deleteReady(ready)
-        return committed
+        val current = RoomAccountExitIntentStore(database, account.accountScope).find() ?: return false
+        if (!current.matches(owner) || current.operationKind != AccountOperationKind.LOGOUT) return false
+        return finishPersistedLogout(current)
     }
 
     override suspend fun preparePasswordChange(): PreparedPasswordChange? {
         val owner = acquireOwner() ?: return null
-        val intent = persistIntent(owner, LogoutChoice.RETAIN)
+        val account = resolve(owner)
+        RoomAccountExitIntentStore(database, account.accountScope).persist(
+            owner,
+            LogoutChoice.RETAIN,
+            AccountOperationKind.PASSWORD_CHANGE,
+        )
+        val intent = LogoutIntent(owner, LogoutChoice.RETAIN)
         converge(intent)
-        return PreparedPasswordChange(intent, resolve(owner).accountScope)
+        return PreparedPasswordChange(intent, account.accountScope)
     }
 
     override suspend fun changePassword(
         prepared: PreparedPasswordChange,
         oldPassword: String,
         newPassword: String,
-    ): Boolean {
+    ): PasswordChangeAttempt {
         resolve(prepared.intent.owner)
-        return authRepository.changePassword(oldPassword, newPassword)
+        return when (val result = authRepository.changePasswordResult(oldPassword, newPassword)) {
+            PasswordChangeResult.Changed -> PasswordChangeAttempt.Changed
+            PasswordChangeResult.Superseded -> PasswordChangeAttempt.Superseded
+            is PasswordChangeResult.Failed -> PasswordChangeAttempt.Failed(result.userMessage)
+        }
     }
 
     override suspend fun completePasswordChange(prepared: PreparedPasswordChange): Boolean {
         val store = RoomAccountExitIntentStore(database, prepared.accountScope)
         val ready = store.find() ?: return false
         if (ready.stage != AccountExitStage.READY_TO_CLEAR || !ready.matches(prepared.intent.owner)) return false
-        return store.deleteReady(ready) == 1
+        if (ready.operationKind != AccountOperationKind.PASSWORD_CHANGE) return false
+        return store.rollbackPasswordChange(ready) == 1
+    }
+
+    override suspend fun rollbackPasswordChange(prepared: PreparedPasswordChange) {
+        val store = RoomAccountExitIntentStore(database, prepared.accountScope)
+        val current = store.find() ?: return
+        if (current.operationKind != AccountOperationKind.PASSWORD_CHANGE ||
+            current.operationId != prepared.intent.owner.operationId
+        ) return
+        val ready = if (current.stage == AccountExitStage.READY_TO_CLEAR) current
+        else AccountExitProcessor(store, effects).converge(current)
+        store.rollbackPasswordChange(ready)
     }
 
     /** 进程重启后在启动任何当前账户工作前调用。 */
     suspend fun recoverCurrentExit(): Boolean = mutex.withLock {
-        val account = currentAccount() ?: return@withLock false
-        val store = RoomAccountExitIntentStore(database, account.accountScope)
-        val existing = store.find() ?: return@withLock false
-        require(existing.accountScopeHash == account.accountScopeHash)
-        val owner = account.owner(existing.operationId)
-        val adopted = authRepository.withAuthenticatedLease(account.lease) { store.takeover(existing, owner) }
-        val intent = LogoutIntent(owner, LogoutChoice.valueOf(adopted.choice.name))
-        AccountExitProcessor(store, effects).converge(adopted)
-        val remote = logoutServer(owner)
-        check(commitLoggedOut(owner, remote == LogoutRemoteResult.Offline)) { "账户退出恢复已被新会话取代" }
-        true
+        beforeRecoveryClaim()
+        authRepository.withDestructiveCredentialClaim claim@{
+            // claim 内重读 epoch/lease，禁止 claim 前已提交的 refresh 留下旧 owner 快照。
+            val account = currentAccount() ?: return@claim false
+            val store = RoomAccountExitIntentStore(database, account.accountScope)
+            val existing = store.find() ?: return@claim false
+            require(existing.accountScopeHash == account.accountScopeHash)
+            if (existing.operationKind == AccountOperationKind.LEGACY_LOCAL_UNLOCK) {
+                check(store.deleteLegacyLocalUnlock(existing) == 1) { "旧账户操作本地解锁失败" }
+                return@claim false
+            }
+            val owner = account.owner(existing.operationId)
+            val inheritedFromOldIncarnation = existing.incarnationProof != owner.incarnationProof
+            val adopted = authRepository.withAuthenticatedLease(account.lease) { store.takeover(existing, owner) }
+            val ready = AccountExitProcessor(store, effects).converge(adopted)
+            if (ready.operationKind == AccountOperationKind.PASSWORD_CHANGE) {
+                store.rollbackPasswordChange(ready)
+                return@claim false
+            }
+            if (inheritedFromOldIncarnation && ready.stage == AccountExitStage.READY_TO_CLEAR) {
+                store.deletePreAuthenticationLogout(ready)
+                return@claim false
+            }
+            check(finishPersistedLogout(ready)) { "账户退出恢复已被新会话取代" }
+            true
+        }
+    }
+
+    /** AuthRepository.restoreSession 在 refresh/login 可用前调用，收敛已绑定旧凭据的终态。 */
+    suspend fun recoverAuthenticationFinalization() {
+        database.accountExitIntentDao().findAuthenticationPending().forEach { intent ->
+            if (intent.operationKind == AccountOperationKind.LOGOUT) {
+                check(finishPersistedLogout(intent)) { "旧账户退出凭据尚未安全收敛" }
+            }
+        }
+    }
+
+    private suspend fun finishPersistedLogout(seed: AccountExitIntentEntity): Boolean {
+        val store = RoomAccountExitIntentStore(database, seed.accountScope)
+        var current = store.find() ?: return true
+        if (current.operationId != seed.operationId || current.operationKind != AccountOperationKind.LOGOUT) return false
+        if (current.stage == AccountExitStage.AUTH_CLEARED) {
+            return store.deleteCompletedLogout(current) == 1
+        }
+        val resume = when (current.stage) {
+            AccountExitStage.READY_TO_CLEAR -> PreparedLogoutCheckpoint.READY_TO_CLEAR
+            AccountExitStage.AUTH_BOUND -> PreparedLogoutCheckpoint.AUTH_BOUND
+            AccountExitStage.REMOTE_REVOKED -> PreparedLogoutCheckpoint.REMOTE_REVOKED
+            else -> return false
+        }
+        return authRepository.finishPreparedLogout(
+            expectedEpoch = current.sessionEpoch,
+            operationId = current.operationId,
+            resumeFrom = resume,
+        ) { completed ->
+            val target = when (completed) {
+                PreparedLogoutCheckpoint.AUTH_BOUND -> AccountExitStage.AUTH_BOUND
+                PreparedLogoutCheckpoint.REMOTE_REVOKED -> AccountExitStage.REMOTE_REVOKED
+                PreparedLogoutCheckpoint.AUTH_CLEARED -> AccountExitStage.AUTH_CLEARED
+                PreparedLogoutCheckpoint.READY_TO_CLEAR -> error("非法退出检查点")
+            }
+            if (current.stage != target) current = store.advance(current, target)
+            if (target == AccountExitStage.AUTH_CLEARED) {
+                check(store.deleteCompletedLogout(current) == 1) { "账户退出终态删除失败" }
+            }
+        }
     }
 
     private suspend fun converge(intent: LogoutIntent): AccountExitIntentEntity {
@@ -239,6 +327,7 @@ private class ProductionAccountExitEffects(
     private val analysisCoordinator: AnalysisSyncCoordinator,
     private val recordingPlaybackHandoff: RecordingPlaybackHandoff,
     private val workCancellation: AccountWorkCancellation,
+    private val authRepository: AuthRepository,
     private val resolve: (LogoutOperationOwner) -> ProductionAccountExitManager.ExitAccount,
 ) : AccountExitEffects {
     private val dataEraser = AccountDataEraser(context, database, fileStore)
@@ -246,20 +335,26 @@ private class ProductionAccountExitEffects(
 
     override suspend fun cancelAndAwait(intent: LogoutIntent) {
         val account = resolve(intent.owner)
-        uploadCoordinator.cancelAndAwaitAccount(account.accountScopeHash)
-        analysisCoordinator.cancelAccount(account.accountScopeHash)
-        recordingPlaybackHandoff.discardAll()
-        workCancellation.cancelAndAwait(account.accountScopeHash)
+        authRepository.withAuthenticatedClaim(account.lease) {
+            uploadCoordinator.cancelAndAwaitAccount(account.accountScopeHash)
+            analysisCoordinator.cancelAccount(account.accountScopeHash)
+            recordingPlaybackHandoff.discardAll()
+            workCancellation.cancelAndAwait(account.accountScopeHash)
+        }
     }
 
     override suspend fun revokeRuntimeAccess(intent: LogoutIntent) {
         val account = resolve(intent.owner)
-        fileStore.revokeEncryptedMediaReaders(account.accountScope)
+        authRepository.withAuthenticatedClaim(account.lease) {
+            fileStore.revokeEncryptedMediaReaders(account.accountScope)
+        }
     }
 
     override suspend fun deleteAccountData(intent: LogoutIntent) {
         val account = resolve(intent.owner)
-        dataEraser.delete(account.accountScope, account.accountScopeHash)
+        authRepository.withAuthenticatedClaim(account.lease) {
+            dataEraser.delete(account.accountScope, account.accountScopeHash)
+        }
     }
 }
 
@@ -271,7 +366,10 @@ internal class AccountDataEraser(
     suspend fun delete(accountScope: String, accountScopeHash: String) {
         require(ChunkedAesGcmFileStore.sha256(accountScope) == accountScopeHash)
         val draftIds = database.draftDao().findAllIds(accountScope)
+        PrivateRecordingTempFiles(context).deleteAccount(accountScopeHash)
         fileStore.destroyAccountEncryption(accountScope)
+        deletePrivateTree(File(context.cacheDir, "upload-lease/$accountScopeHash"))
+        deletePrivateTree(File(context.filesDir, "qiniu-upload-recorder/$accountScopeHash"))
         draftIds.forEach { draftId ->
             val opaqueJob = ChunkedAesGcmFileStore.sha256("$accountScopeHash\u0000$draftId")
             deletePrivateTree(File(context.cacheDir, "upload-lease/$opaqueJob"))
@@ -288,11 +386,20 @@ internal class AccountDataEraser(
     }
 
     private fun deletePrivateTree(target: File) {
-        if (!target.exists()) return
-        require(!Files.isSymbolicLink(target.toPath())) { "账户临时目录不可为符号链接" }
-        target.walkBottomUp().forEach { item ->
-            require(!Files.isSymbolicLink(item.toPath())) { "账户临时文件不可为符号链接" }
-            check(!item.exists() || item.delete()) { "账户临时文件删除失败" }
-        }
+        val root = target.toPath()
+        if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+        require(!Files.isSymbolicLink(root)) { "账户临时目录不可为符号链接" }
+        Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                Files.delete(file) // 默认不跟随符号链接，只删除链接本身。
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun postVisitDirectory(dir: Path, error: IOException?): FileVisitResult {
+                if (error != null) throw error
+                Files.delete(dir)
+                return FileVisitResult.CONTINUE
+            }
+        })
     }
 }

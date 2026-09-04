@@ -143,15 +143,10 @@ private class InMemoryLogoutAccount(
         accountDataDeleted = true
     }
 
-    override suspend fun logoutServer(owner: LogoutOperationOwner): LogoutRemoteResult {
+    override suspend fun finishLogout(owner: LogoutOperationOwner): Boolean {
         check(intentPersistedBeforeSideEffects && runtimeAccessRevoked)
         serverLogoutCalled = true
-        return remoteResult
-    }
-
-    override suspend fun commitLoggedOut(owner: LogoutOperationOwner, moveRefreshToRevocationOnly: Boolean): Boolean {
-        check(serverLogoutCalled)
-        this.moveRefreshToRevocationOnly = moveRefreshToRevocationOnly
+        this.moveRefreshToRevocationOnly = remoteResult == LogoutRemoteResult.Offline
         authenticated = false
         return true
     }

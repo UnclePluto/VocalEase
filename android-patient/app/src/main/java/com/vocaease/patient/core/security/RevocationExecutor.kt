@@ -17,6 +17,11 @@ fun interface RevocationTokenSink {
     suspend fun store(accessToken: String, refreshToken: String): RevocationHandle
 }
 
+/** 启动恢复使用调用方已持久化的 handle 幂等提交，不复制生成新槽。 */
+internal interface RevocationTransferSink : RevocationTokenSink {
+    suspend fun store(handle: RevocationHandle, accessToken: String, refreshToken: String)
+}
+
 /** 仅供独立撤销执行器使用，不注入认证拦截器、刷新协调器或普通仓库。 */
 internal interface RevocationTokenSource {
     suspend fun lease(handle: RevocationHandle): RevocationTokenLease?

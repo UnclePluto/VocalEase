@@ -112,6 +112,22 @@ class PrivateRecordingTempFiles internal constructor(
             .toList()
     }
 
+    /** 删除可确认属于目标账户的恢复视频；无法读取账户归属的 sidecar 令整次删除失败。 */
+    fun deleteAccount(accountScopeHash: String) {
+        require(accountScopeHash.matches(Regex("[0-9a-f]{64}")))
+        ensureDirectory()
+        directory.listFiles().orEmpty()
+            .filter { it.isFile && METADATA_NAME.matches(it.name) }
+            .filter { readMetadataAccountHash(it) == accountScopeHash }
+            .forEach { metadata ->
+                val base = metadata.name.removeSuffix(METADATA_SUFFIX)
+                val video = File(directory, "$base$RECORDING_SUFFIX")
+                check(!video.exists() || video.delete()) { "账户录制明文删除失败" }
+                check(metadata.delete()) { "账户录制元数据删除失败" }
+                File(directory, "$base$PENDING_SUFFIX").delete()
+            }
+    }
+
     /**
      * 只清理没有恢复元数据配对的陈旧明文。配对录制由账户绑定的恢复扫描决定去留，
      * 因而应用启动时不会再像旧实现一样立即销毁可恢复录制。
@@ -157,6 +173,18 @@ class PrivateRecordingTempFiles internal constructor(
             RecoverableRecording(identity, video, metadata, createdAtMillis)
         }
     } catch (_: Exception) { null }
+
+    private fun readMetadataAccountHash(metadata: File): String =
+        DataInputStream(FileInputStream(metadata)).use { input ->
+            if (input.readInt() != MAGIC || input.readInt() != VERSION) throw IOException("元数据版本无效")
+            input.readLong()
+            val videoName = input.readUTF()
+            val expectedBase = metadata.name.removeSuffix(METADATA_SUFFIX)
+            if (videoName != "$expectedBase$RECORDING_SUFFIX") throw IOException("录制路径不匹配")
+            input.readUTF().also {
+                if (!it.matches(Regex("[0-9a-f]{64}"))) throw IOException("账户录制归属无效")
+            }
+        }
 
     private fun isOlderThan(lastModified: Long, now: Long): Boolean =
         lastModified in 0..now && now - lastModified > orphanMaxAgeMillis

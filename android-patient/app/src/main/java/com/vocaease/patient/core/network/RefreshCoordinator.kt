@@ -74,6 +74,8 @@ class RefreshCoordinator(
     }
 
     suspend fun refreshAfterUnauthorized(failedEpoch: Long): RefreshResult = mutex.withLock {
+        val operationVersion = sessionArbiter.claimRefreshOperation()
+            ?: return@withLock RefreshResult.Superseded(sessionArbiter.sessionSnapshot().epoch)
         val current = sessionArbiter.sessionSnapshot()
         if (current.epoch != failedEpoch) {
             latestOutcome.get()?.takeIf {
@@ -115,8 +117,15 @@ class RefreshCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
+            if (!sessionArbiter.refreshOperationStillOwned(operationVersion)) {
+                return@withLock RefreshResult.Superseded(sessionArbiter.sessionSnapshot().epoch)
+            }
             if (error.isExpectedRefreshFailure()) return@withLock expireEpoch(failedEpoch, error)
             throw error
+        }
+
+        if (!sessionArbiter.refreshOperationStillOwned(operationVersion)) {
+            return@withLock RefreshResult.Superseded(sessionArbiter.sessionSnapshot().epoch)
         }
 
         val replacementId = UUID.randomUUID().toString()

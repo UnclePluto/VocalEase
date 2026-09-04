@@ -13,8 +13,13 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 
 sealed interface SessionLifecycleEvent {
     data class SessionExpired(val invalidation: SessionInvalidation) : SessionLifecycleEvent
@@ -37,6 +42,9 @@ class SessionLifecycleArbiter(
     private val tokenVault: TokenVault,
 ) {
     private val mutationMutex = Mutex()
+    private val credentialOperationMutex = Mutex()
+    private val accountLifecycleMutex = Mutex()
+    private val credentialOperationState = AtomicReference(CredentialOperationState(version = 0, destructive = false))
     private val eventQueue = Channel<SessionLifecycleEvent>(capacity = Channel.UNLIMITED)
     private val sessionExpiredListeners = CopyOnWriteArrayList<(SessionInvalidation) -> Unit>()
     private val refreshSessionAppliedListeners = CopyOnWriteArrayList<(AuthSession) -> Unit>()
@@ -71,6 +79,32 @@ class SessionLifecycleArbiter(
     internal suspend fun <T> mutate(block: suspend MutationScope.() -> T): T =
         mutationMutex.withLock { MutationScope().block() }
 
+    /**
+     * 会使 refresh family 失效的操作彼此互斥，并抢占已在途 refresh 的提交权。
+     * refresh 不持有此锁，避免在途 refresh 与后发 logout 相互等待。
+     */
+    internal suspend fun <T> withCredentialOperation(operation: suspend () -> T): T {
+        if (coroutineContext[CredentialOperationElement] != null) return operation()
+        return credentialOperationMutex.withLock {
+            val claimed = credentialOperationState.updateAndGet {
+                CredentialOperationState(version = it.version + 1, destructive = true)
+            }
+            try {
+                withContext(CredentialOperationElement()) { operation() }
+            } finally {
+                credentialOperationState.compareAndSet(claimed, claimed.copy(destructive = false))
+            }
+        }
+    }
+
+    /** null 表示 destructive operation 已领取 claim，refresh 不得发送远端请求。 */
+    internal fun claimRefreshOperation(): Long? = credentialOperationState.get().let {
+        if (it.destructive) null else it.version
+    }
+
+    internal fun refreshOperationStillOwned(version: Long): Boolean =
+        credentialOperationState.get() == CredentialOperationState(version, destructive = false)
+
     /** 存储操作与登出/换号共用同一线性化边界；获锁等待保持可取消。 */
     internal suspend fun <T> withAuthenticatedAccountLease(
         expected: AuthenticatedAccountLease,
@@ -79,6 +113,20 @@ class SessionLifecycleArbiter(
         if (authenticatedAccountLease !== expected) throw StaleAccountScopeException()
         operation()
     }
+
+    /** 不跨外部 await 持 mutationMutex；独立 claim 阻止新 incarnation 插入，前后各复核一次 lease。 */
+    internal suspend fun <T> withAuthenticatedAccountClaim(
+        expected: AuthenticatedAccountLease,
+        operation: suspend () -> T,
+    ): T = accountLifecycleMutex.withLock {
+        mutate { if (authenticatedAccountLease !== expected) throw StaleAccountScopeException() }
+        val result = operation()
+        mutate { if (authenticatedAccountLease !== expected) throw StaleAccountScopeException() }
+        result
+    }
+
+    internal suspend fun <T> withAccountReplacement(operation: suspend () -> T): T =
+        accountLifecycleMutex.withLock { operation() }
 
     internal inner class MutationScope internal constructor() {
         fun sessionSnapshot(): SessionSnapshot = tokenVault.sessionSnapshot()
@@ -149,5 +197,11 @@ class SessionLifecycleArbiter(
             }
             return InvalidationClaim.Published
         }
+    }
+
+    private data class CredentialOperationState(val version: Long, val destructive: Boolean)
+
+    private class CredentialOperationElement : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<CredentialOperationElement>
     }
 }

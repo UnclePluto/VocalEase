@@ -22,6 +22,7 @@ import com.vocaease.patient.core.network.dto.LogoutRequestDto
 import com.vocaease.patient.core.network.dto.RefreshRequestDto
 import com.vocaease.patient.core.network.dto.toDomain
 import com.vocaease.patient.core.security.RefreshTokenRead
+import com.vocaease.patient.core.security.DurableLogoutTokenVault
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.TokenVault
 import com.vocaease.patient.core.security.RevocationHandle
@@ -29,6 +30,7 @@ import com.vocaease.patient.core.security.RevocationRemote
 import com.vocaease.patient.core.security.RevocationRemoteResult
 import com.vocaease.patient.core.security.RevocationScheduling
 import com.vocaease.patient.core.security.RevocationTokenSink
+import com.vocaease.patient.core.security.RevocationTransferSink
 import com.vocaease.patient.core.security.VaultInvalidatedException
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
@@ -37,6 +39,7 @@ import java.security.GeneralSecurityException
 import java.security.ProviderException
 import java.util.UUID
 import java.util.Locale
+import java.security.SecureRandom
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
@@ -64,6 +67,19 @@ sealed interface AuthOperationState {
     data object Idle : AuthOperationState
     data object Loading : AuthOperationState
     data class Error(val message: String) : AuthOperationState
+}
+
+internal enum class PreparedLogoutCheckpoint {
+    READY_TO_CLEAR,
+    AUTH_BOUND,
+    REMOTE_REVOKED,
+    AUTH_CLEARED,
+}
+
+internal sealed interface PasswordChangeResult {
+    data object Changed : PasswordChangeResult
+    data object Superseded : PasswordChangeResult
+    data class Failed(val userMessage: String) : PasswordChangeResult
 }
 
 interface AuthRemoteDataSource : RefreshRemoteDataSource {
@@ -98,7 +114,7 @@ class VocaEaseAuthRemoteDataSource(
 }
 
 class AuthRepository(
-    tokenVault: TokenVault,
+    private val tokenVault: TokenVault,
     private val remote: AuthRemoteDataSource,
     private val refreshCoordinator: RefreshCoordinator,
     private val patientIdentity: PatientIdentityRemoteDataSource,
@@ -110,6 +126,7 @@ class AuthRepository(
     private val mutableState = MutableStateFlow<AuthState>(AuthState.Restoring)
     private val mutableOperation = MutableStateFlow<AuthOperationState>(AuthOperationState.Idle)
     private val eventChannel = Channel<AuthEvent>(capacity = Channel.BUFFERED)
+    @Volatile private var preparedLogoutRecovery: (suspend () -> Unit)? = null
     val state: StateFlow<AuthState> = mutableState.asStateFlow()
     val operation: StateFlow<AuthOperationState> = mutableOperation.asStateFlow()
     val events = eventChannel.receiveAsFlow()
@@ -129,6 +146,8 @@ class AuthRepository(
     suspend fun restoreSession() {
         if (mutableState.value != AuthState.Restoring) return
         mutableOperation.value = AuthOperationState.Idle
+        preparedLogoutRecovery?.invoke()
+        recoverPendingRevocationTransfer()
         val current = sessionArbiter.sessionSnapshot()
         if (current.accessToken != null) {
             restoreAuthenticatedPatient()
@@ -165,6 +184,19 @@ class AuthRepository(
             return
         }
         mutableOperation.value = AuthOperationState.Loading
+        try {
+            preparedLogoutRecovery?.invoke()
+            recoverPendingRevocationTransfer()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            mutableOperation.value = AuthOperationState.Error("安全退出恢复未完成，请重试")
+            return
+        }
+        sessionArbiter.withAccountReplacement { performLogin(loginId, password) }
+    }
+
+    private suspend fun performLogin(loginId: String, password: String) {
         val accountIncarnationId = UUID.randomUUID().toString()
         val attemptEpoch = withContext(NonCancellable) {
             sessionArbiter.mutate {
@@ -221,29 +253,37 @@ class AuthRepository(
         }
     }
 
-    suspend fun changePassword(oldPassword: String, newPassword: String): Boolean {
+    suspend fun changePassword(oldPassword: String, newPassword: String): Boolean =
+        changePasswordResult(oldPassword, newPassword) == PasswordChangeResult.Changed
+
+    internal suspend fun changePasswordResult(oldPassword: String, newPassword: String): PasswordChangeResult {
         if (oldPassword.isBlank() || newPassword.isBlank()) {
-            mutableOperation.value = AuthOperationState.Error("请输入原密码和新密码")
-            return false
+            val message = "请输入原密码和新密码"
+            mutableOperation.value = AuthOperationState.Error(message)
+            return PasswordChangeResult.Failed(message)
         }
         mutableOperation.value = AuthOperationState.Loading
-        val expectedEpoch = sessionArbiter.sessionSnapshot().epoch
         try {
-            try {
-                remote.changePassword(ChangePasswordRequestDto(oldPassword, newPassword))
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                mutableOperation.value = AuthOperationState.Error(error.userMessage(ApiEndpoint.AUTH_CHANGE_PASSWORD))
-                return false
-            }
-            return sessionArbiter.mutate {
-                val mutation = secureClearLocked(expectedEpoch)
-                if (mutation.applied) {
-                    mutableState.value = AuthState.LoggedOut
-                    eventChannel.trySend(AuthEvent.PasswordChanged)
+            return sessionArbiter.withCredentialOperation {
+                val expectedEpoch = sessionArbiter.sessionSnapshot().epoch
+                try {
+                    remote.changePassword(ChangePasswordRequestDto(oldPassword, newPassword))
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    val message = error.userMessage(ApiEndpoint.AUTH_CHANGE_PASSWORD)
+                    mutableOperation.value = AuthOperationState.Error(message)
+                    return@withCredentialOperation PasswordChangeResult.Failed(message)
                 }
-                mutation.applied
+                val applied = sessionArbiter.mutate {
+                    val mutation = secureClearLocked(expectedEpoch)
+                    if (mutation.applied) {
+                        mutableState.value = AuthState.LoggedOut
+                        eventChannel.trySend(AuthEvent.PasswordChanged)
+                    }
+                    mutation.applied
+                }
+                if (applied) PasswordChangeResult.Changed else PasswordChangeResult.Superseded
             }
         } finally {
             finishOperation()
@@ -253,14 +293,16 @@ class AuthRepository(
     suspend fun logout() {
         mutableOperation.value = AuthOperationState.Loading
         try {
-            val credential = captureLogoutCredential() ?: run {
-                mutableState.value = AuthState.LoggedOut
-                return
-            }
-            val remoteResult = revocationRemote.revoke(credential.accessToken, credential.refreshToken)
-            val committed = commitLogoutCredential(credential, remoteResult)
-            if (!committed && sessionArbiter.sessionSnapshot().epoch == credential.epoch) {
-                mutableOperation.value = AuthOperationState.Error("安全退出未完成，请重试")
+            sessionArbiter.withCredentialOperation {
+                val credential = captureLogoutCredential() ?: run {
+                    mutableState.value = AuthState.LoggedOut
+                    return@withCredentialOperation
+                }
+                val remoteResult = revocationRemote.revoke(credential.accessToken, credential.refreshToken)
+                val committed = commitLogoutCredential(credential, remoteResult)
+                if (!committed && sessionArbiter.sessionSnapshot().epoch == credential.epoch) {
+                    mutableOperation.value = AuthOperationState.Error("安全退出未完成，请重试")
+                }
             }
         } catch (error: CancellationException) {
             throw error
@@ -295,21 +337,100 @@ class AuthRepository(
 
     internal fun currentSessionEpoch(): Long = sessionArbiter.sessionSnapshot().epoch
 
-    internal suspend fun attemptPreparedLogout(expectedEpoch: Long): RevocationRemoteResult? {
-        val credential = captureLogoutCredential(expectedEpoch) ?: return null
-        return revocationRemote.revoke(credential.accessToken, credential.refreshToken)
+    internal fun registerPreparedLogoutRecovery(recovery: suspend () -> Unit) {
+        check(preparedLogoutRecovery == null) { "账户退出恢复只能注册一次" }
+        preparedLogoutRecovery = recovery
     }
 
-    internal suspend fun commitPreparedLogout(
+    internal suspend fun finishPreparedLogout(
         expectedEpoch: Long,
-        moveRefreshToRevocationOnly: Boolean,
-    ): Boolean {
-        val credential = captureLogoutCredential(expectedEpoch) ?: return false
-        return commitLogoutCredential(
-            credential,
-            if (moveRefreshToRevocationOnly) RevocationRemoteResult.Retryable else RevocationRemoteResult.Success,
-        )
+        operationId: String,
+        resumeFrom: PreparedLogoutCheckpoint,
+        checkpoint: suspend (PreparedLogoutCheckpoint) -> Unit,
+    ): Boolean = sessionArbiter.withCredentialOperation {
+        val durable = tokenVault as? DurableLogoutTokenVault ?: return@withCredentialOperation false
+        val pending = durable.pendingRevocationTransfer()
+        if (pending?.operationId == operationId) {
+            return@withCredentialOperation withContext(NonCancellable) {
+                recoverPendingRevocationTransfer()
+                checkpoint(PreparedLogoutCheckpoint.AUTH_CLEARED)
+                publishLoggedOutIfSessionCleared()
+                true
+            }
+        }
+
+        if (resumeFrom == PreparedLogoutCheckpoint.REMOTE_REVOKED) {
+            return@withCredentialOperation withContext(NonCancellable) {
+                durable.clearBoundLogout(expectedEpoch, operationId)
+                checkpoint(PreparedLogoutCheckpoint.AUTH_CLEARED)
+                publishLoggedOutIfSessionCleared()
+                true
+            }
+        }
+
+        val credential = when (resumeFrom) {
+            PreparedLogoutCheckpoint.READY_TO_CLEAR ->
+                durable.bindLogoutOperation(expectedEpoch, operationId)?.also {
+                    checkpoint(PreparedLogoutCheckpoint.AUTH_BOUND)
+                }
+            PreparedLogoutCheckpoint.AUTH_BOUND -> durable.boundLogoutOperation(expectedEpoch, operationId)
+            PreparedLogoutCheckpoint.REMOTE_REVOKED,
+            PreparedLogoutCheckpoint.AUTH_CLEARED,
+            -> null
+        } ?: return@withCredentialOperation false
+
+        val remoteResult = revocationRemote.revoke(credential.accessToken, credential.refreshToken)
+        withContext(NonCancellable) {
+            when (remoteResult) {
+                RevocationRemoteResult.Success,
+                RevocationRemoteResult.InvalidOrExpired,
+                -> {
+                    checkpoint(PreparedLogoutCheckpoint.REMOTE_REVOKED)
+                    durable.clearBoundLogout(credential.epoch, operationId)
+                    checkpoint(PreparedLogoutCheckpoint.AUTH_CLEARED)
+                    publishLoggedOutIfSessionCleared()
+                    true
+                }
+                RevocationRemoteResult.Retryable -> {
+                    val handle = RevocationHandle(ByteArray(32).also(SecureRandom()::nextBytes).toHex())
+                    val mutation = durable.moveBoundLogoutToRevocation(credential.epoch, operationId, handle)
+                    if (!mutation.applied) return@withContext false
+                    checkpoint(PreparedLogoutCheckpoint.AUTH_CLEARED)
+                    publishLoggedOutIfSessionCleared()
+                    recoverPendingRevocationTransfer()
+                    true
+                }
+            }
+        }
     }
+
+    private suspend fun publishLoggedOutIfSessionCleared() {
+        sessionArbiter.mutate {
+            if (sessionSnapshot().accessToken == null) {
+                revokeAuthenticatedAccount()
+                mutableState.value = AuthState.LoggedOut
+            }
+        }
+    }
+
+    private suspend fun recoverPendingRevocationTransfer() {
+        val durable = tokenVault as? DurableLogoutTokenVault ?: return
+        // 进程内 ACTIVE 会话沿用既有按需解密语义；只有无 access 的冷启动才可能是转移中断。
+        if (sessionArbiter.sessionSnapshot().accessToken != null) return
+        val pending = try {
+            durable.pendingRevocationTransfer() ?: return
+        } catch (error: VaultInvalidatedException) {
+            refreshCoordinator.recordVaultInvalidation(error.invalidation, error.cause ?: error)
+            return
+        }
+        val sink = revocationTokenSink as? RevocationTransferSink
+            ?: error("缺少待撤销凭据恢复边界")
+        sink.store(pending.handle, pending.accessToken, pending.refreshToken)
+        durable.completePendingRevocationTransfer(pending.operationId, pending.handle)
+        runCatching { revocationScheduler?.schedule(pending.handle) }
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     private suspend fun captureLogoutCredential(expectedEpoch: Long): LogoutCredential? = sessionArbiter.mutate {
         val snapshot = sessionSnapshot()
@@ -323,6 +444,20 @@ class AuthRepository(
         credential: LogoutCredential,
         result: RevocationRemoteResult,
     ): Boolean {
+        if (result == RevocationRemoteResult.Retryable && tokenVault is DurableLogoutTokenVault) {
+            val operationId = "logout-${UUID.randomUUID()}"
+            val bound = tokenVault.bindLogoutOperation(credential.epoch, operationId) ?: return false
+            if (bound.accessToken != credential.accessToken || bound.refreshToken != credential.refreshToken) return false
+            val handle = RevocationHandle(ByteArray(32).also(SecureRandom()::nextBytes).toHex())
+            val moved = tokenVault.moveBoundLogoutToRevocation(credential.epoch, operationId, handle)
+            if (!moved.applied) return false
+            sessionArbiter.mutate {
+                revokeAuthenticatedAccount()
+                mutableState.value = AuthState.LoggedOut
+            }
+            runCatching { recoverPendingRevocationTransfer() }
+            return true
+        }
         var handle: RevocationHandle? = null
         val committed = sessionArbiter.mutate {
             val current = sessionSnapshot()
@@ -476,6 +611,14 @@ class AuthRepository(
         lease: AuthenticatedAccountLease,
         operation: suspend () -> T,
     ): T = sessionArbiter.withAuthenticatedAccountLease(lease, operation)
+
+    internal suspend fun <T> withAuthenticatedClaim(
+        lease: AuthenticatedAccountLease,
+        operation: suspend () -> T,
+    ): T = sessionArbiter.withAuthenticatedAccountClaim(lease, operation)
+
+    internal suspend fun <T> withDestructiveCredentialClaim(operation: suspend () -> T): T =
+        sessionArbiter.withCredentialOperation(operation)
 
     private fun Throwable.userMessage(endpoint: ApiEndpoint): String = when (this) {
         is SessionChangedException -> "登录账号已变更，请重新操作"

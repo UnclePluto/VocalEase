@@ -43,6 +43,7 @@ sealed interface LogoutOutcome {
 }
 
 interface LogoutAccountBoundary {
+    suspend fun <T> withLogoutClaim(owner: LogoutOperationOwner, operation: suspend () -> T): T = operation()
     suspend fun acquireOwner(): LogoutOperationOwner?
     suspend fun pendingDraftCount(owner: LogoutOperationOwner): Int
     suspend fun persistIntent(owner: LogoutOperationOwner, choice: LogoutChoice): LogoutIntent
@@ -50,9 +51,8 @@ interface LogoutAccountBoundary {
     suspend fun cancelAndAwait(intent: LogoutIntent)
     suspend fun revokeRuntimeAccess(intent: LogoutIntent)
     suspend fun deleteAccountData(intent: LogoutIntent)
-    suspend fun logoutServer(owner: LogoutOperationOwner): LogoutRemoteResult
-    suspend fun commitLoggedOut(owner: LogoutOperationOwner, moveRefreshToRevocationOnly: Boolean): Boolean
     suspend fun completeIntent(intent: LogoutIntent)
+    suspend fun finishLogout(owner: LogoutOperationOwner): Boolean
 }
 
 class LogoutCoordinator(
@@ -91,21 +91,19 @@ class LogoutCoordinator(
             sessionEpoch == other.sessionEpoch
 
     private suspend fun execute(owner: LogoutOperationOwner, choice: LogoutChoice): LogoutOutcome = try {
+        account.withLogoutClaim(owner) {
         val intent = account.persistIntent(owner, choice)
         account.pauseAndLock(intent)
         account.cancelAndAwait(intent)
         account.revokeRuntimeAccess(intent)
         if (choice == LogoutChoice.DELETE) account.deleteAccountData(intent)
         account.completeIntent(intent)
-        val remote = account.logoutServer(owner)
-        val committed = account.commitLoggedOut(
-            owner,
-            moveRefreshToRevocationOnly = remote == LogoutRemoteResult.Offline,
-        )
+        val committed = account.finishLogout(owner)
         if (!committed) {
             LogoutOutcome.Superseded
         } else {
             LogoutOutcome.LoggedOut
+        }
         }
     } catch (cancelled: CancellationException) {
         throw cancelled
