@@ -1,13 +1,14 @@
 # Android QA 设备矩阵
 
-验收记录日期：2026-09-04。代码基线：`160b42c`；Task 13 最终提交：本次提交（`完成安卓患者闭环验收`）。
+验收记录日期：2026-09-05。代码基线：`8c8a1b7`；本轮在该基线上补充 Pencil 复核与 Android 17/API37 兼容性修复。
 
 ## 本环境已实测
 
 | 环境 | 设备标识 | 自动化范围 | 结论 |
 | --- | --- | --- | --- |
-| Android 10 / API 29 模拟器 | `emulator-5556` | Task 13 患者闭环及关键全链定向 70/70，0 skipped | 已实测；不是国产真机 |
-| Android 14 / API 34 模拟器 | `emulator-5554` | Task 13 患者闭环及 connected 全量 205/205，0 skipped | 已实测；不是国产真机 |
+| Android 10 / API 29 模拟器 | `emulator-5556` | connected 全量 206/206，0 skipped；覆盖三键导航真实可视区 | 已实测；不是国产真机 |
+| Android 14 / API 34 模拟器 | `emulator-5554` | connected 全量 206/206，0 skipped | 已实测；不是国产真机 |
+| Android 17 / API 37 模拟器 | `emulator-5558` / `VocaEase_API_37` | connected 全量 206/206，0 skipped；覆盖强制 edge-to-edge 录制页系统栏 | 已实测系统兼容；Google APIs 镜像，不作为无 GMS 证据 |
 
 模拟器证据只覆盖应用/domain、数据库、加密媒体、MockWebServer 和确定性上传边界，不替代摄像头、耳机、来电、厂商后台策略或无 GMS 真机验收。
 
@@ -18,13 +19,17 @@ ANDROID_SERIAL=emulator-5554 ./gradlew --offline --dependency-verification stric
   :app:connectedDebugAndroidTest
 ```
 
-API 29 的 70 项关键全链命令：
+API 37 全量命令与 API 34 相同，仅将 `ANDROID_SERIAL` 改为 `emulator-5558`。首次运行 203/205，稳定复现两项 Android 17 edge-to-edge 旧假设；新增真实导航壳回归并修复录制页透明系统栏背景后，最终 206/206。
+
+API 29 的 71 项关键全链命令：
 
 ```bash
 ANDROID_SERIAL=emulator-5556 ./gradlew --offline --dependency-verification strict \
   :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.vocaease.patient.e2e.PatientClosedLoopTest,com.vocaease.patient.ProductionVaultInvalidationTest,com.vocaease.patient.feature.auth.AuthFlowTest,com.vocaease.patient.feature.catalog.CatalogScreenTest,com.vocaease.patient.feature.training.RecordingSystemChromeTest,com.vocaease.patient.feature.training.ReviewScreenTest,com.vocaease.patient.feature.upload.PendingUploadsScreenTest,com.vocaease.patient.feature.history.HistoryAndResultTest,com.vocaease.patient.ui.AppNavigationTest,com.vocaease.patient.core.database.PendingUploadCounterIntegrationTest,com.vocaease.patient.core.media.Mp4AudioTrackExtractorTest,com.vocaease.patient.feature.upload.PlaintextUploadLeaseTest,com.vocaease.patient.feature.upload.UploadCoordinatorAccountTest,com.vocaease.patient.feature.upload.UploadWorkAndroidTest,com.vocaease.patient.core.database.DatabaseConstraintTest
+  -Pandroid.testInstrumentationRunnerArguments.class=com.vocaease.patient.e2e.PatientClosedLoopTest,com.vocaease.patient.ProductionVaultInvalidationTest,com.vocaease.patient.feature.auth.AuthFlowTest,com.vocaease.patient.feature.catalog.CatalogScreenTest,com.vocaease.patient.feature.training.RecordingEdgeToEdgeTest,com.vocaease.patient.feature.training.RecordingSystemChromeTest,com.vocaease.patient.feature.training.ReviewScreenTest,com.vocaease.patient.feature.upload.PendingUploadsScreenTest,com.vocaease.patient.feature.history.HistoryAndResultTest,com.vocaease.patient.ui.AppNavigationTest,com.vocaease.patient.core.database.PendingUploadCounterIntegrationTest,com.vocaease.patient.core.media.Mp4AudioTrackExtractorTest,com.vocaease.patient.feature.upload.PlaintextUploadLeaseTest,com.vocaease.patient.feature.upload.UploadCoordinatorAccountTest,com.vocaease.patient.feature.upload.UploadWorkAndroidTest,com.vocaease.patient.core.database.DatabaseConstraintTest
 ```
+
+API 29 在 390×844/160dpi 与三键导航下另跑 connected 全量，最终 206/206 通过。录制页同时保留 390×792 的 Pencil 组件基准测试，并通过真实 `AuthenticatedApp`/`Scaffold` 验证自适应后的关闭与结束录制控件仍完整位于可视区；不会再以固定高度掩盖系统导航栏占用。
 
 Gradle HTML 证据入口为 `android-patient/app/build/reports/androidTests/connected/debug/index.html`，JUnit XML 为 `android-patient/app/build/outputs/androidTest-results/connected/debug/TEST-<设备>-_app-.xml`。Gradle 每次 connected 运行会覆盖该目录，因此归档时必须同时保存命令、设备 API、XML 和 HTML，不得用后一次单例运行冒充上述计数。
 
@@ -40,4 +45,4 @@ Gradle HTML 证据入口为 `android-patient/app/build/reports/androidTests/conn
 | vivo | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 |
 | 华为兼容 Android APK 机型 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 | 待验收 |
 
-视觉基准为 390×844，另测常见宽度、字体 1.3×、键盘遮挡、TalkBack 描述和 48dp 触控区。Pencil VS Code MCP 本轮为 `transport closed`，登录、首页、准备、录制、我的、回看、回顾的只读逐页复核待工具恢复；不凭记忆修改 UI，也不新增设置页画板。前序已保留的 f004p/f005s 与 390×844 证据不等同于本轮复核。
+视觉基准为 390×844，另测常见宽度、字体 1.3×、键盘遮挡、TalkBack 描述和 48dp 触控区。Pencil VS Code MCP 已在本轮恢复，并只读渲染/复核 `pUYpg`（01A 治疗进度首页）、`f0021`（演唱准备）、`f0036`（演唱）、`f004p`（我的）、`f005s`（演唱回顾）；没有修改 `.pen`。本地重新生成登录、首页、准备、录制、本地回看、我的、演唱回顾七张 390×844 截图，保存在忽略的 `android-patient/build/visual-qa/`，逐页确认无裁剪、溢出或层级断裂：首页仅显示治疗进度/目标次数，主导航仅“去唱歌/我的”，录制页不伪造音准与歌词，结果页仅 `is_mock=true` 展示“演示结果”。登录和本地回看在 PEN 中没有独立画板，按现有同一设计系统验收；没有新增画板。

@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -206,11 +207,13 @@ internal fun AuthenticatedApp(
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val destination = backStackEntry?.destination
+    val recordingRoute = destination?.hasRoute<AppRoute.Recording>() == true ||
+        (destination == null && initialRoute is AppRoute.Recording)
     val showBottomBar = destination?.isMainDestination()
         ?: (initialRoute == AppRoute.Catalog || initialRoute == AppRoute.Profile)
 
     Scaffold(
-        containerColor = AppBackground,
+        containerColor = if (recordingRoute) Color(0xFF06100B) else AppBackground,
         bottomBar = {
             if (showBottomBar) MainNavigationBar(navController, destination)
         },

@@ -1,6 +1,11 @@
 package com.vocaease.patient.feature.training
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsEqualTo
@@ -11,6 +16,7 @@ import androidx.compose.ui.test.assertTopPositionInRootIsEqualTo
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -18,6 +24,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.vocaease.patient.ui.AppRoute
+import com.vocaease.patient.ui.AuthenticatedApp
 import com.vocaease.patient.ui.theme.VocaEaseTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -32,19 +40,23 @@ class RecordingScreenTest {
     fun 演唱页遵循PEN深色结构但只展示播放进度与歌词空态() {
         composeRule.setContent {
             VocaEaseTheme {
-                RecordingScreen(
-                    state = RecordingUiState(
-                        songTitle = "小幸运",
-                        totalDurationMillis = 265_000,
-                        playbackPositionMillis = 88_000,
-                        recordingDurationMillis = 88_000,
-                        recordingState = RecordingState.Recording(1L, 0L),
-                        faceStatus = "面部完整 · 光线良好",
-                    ),
-                    preview = {},
-                    onStop = {},
-                    onClose = {},
-                )
+                Box(Modifier.fillMaxSize().wrapContentSize(Alignment.TopStart, unbounded = true)) {
+                    Box(Modifier.requiredSize(390.dp, 792.dp)) {
+                        RecordingScreen(
+                            state = RecordingUiState(
+                                songTitle = "小幸运",
+                                totalDurationMillis = 265_000,
+                                playbackPositionMillis = 88_000,
+                                recordingDurationMillis = 88_000,
+                                recordingState = RecordingState.Recording(1L, 0L),
+                                faceStatus = "面部完整 · 光线良好",
+                            ),
+                            preview = {},
+                            onStop = {},
+                            onClose = {},
+                        )
+                    }
+                }
             }
         }
 
@@ -75,16 +87,23 @@ class RecordingScreenTest {
     }
 
     @Test
-    fun 基准截图为390乘844且页面无裁剪() {
+    fun 真实导航壳下390乘844页面关键控件均在可视区() {
         composeRule.setContent {
             VocaEaseTheme {
-                RecordingScreen(RecordingUiState(songTitle = "小幸运"), {}, {}, {})
+                AuthenticatedApp(
+                    initialRoute = AppRoute.Recording("viewport"),
+                    recordingContent = { _, _, _ ->
+                        RecordingScreen(RecordingUiState(songTitle = "小幸运"), {}, {}, {})
+                    },
+                )
             }
         }
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("recording-root")
+            .assertIsDisplayed()
             .assertWidthIsEqualTo(390.dp)
-            .assertHeightIsEqualTo(792.dp)
+        composeRule.onNodeWithContentDescription("关闭并取消录制").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("结束录制").assertIsDisplayed()
         val image = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
         assertEquals(390, image.width)
         assertEquals(844, image.height)

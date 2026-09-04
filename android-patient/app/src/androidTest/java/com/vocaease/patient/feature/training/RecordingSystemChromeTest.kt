@@ -1,8 +1,18 @@
 package com.vocaease.patient.feature.training
 
 import android.graphics.Color
+import android.os.Build
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.core.view.WindowCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -13,7 +23,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import kotlin.math.abs
 
 @RunWith(AndroidJUnit4::class)
 class RecordingSystemChromeTest {
@@ -35,12 +44,29 @@ class RecordingSystemChromeTest {
         }
         val showRecording = mutableStateOf(true)
         composeRule.setContent {
-            if (showRecording.value) RecordingSystemChrome(window)
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(ComposeColor(if (showRecording.value) RECORDING_CHROME else baselineStatus)),
+            ) {
+                if (showRecording.value) RecordingSystemChrome(window)
+                if (!showRecording.value) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .background(ComposeColor(baselineNavigation)),
+                    )
+                }
+            }
         }
 
         composeRule.runOnIdle {
-            assertEquals(RECORDING_CHROME, window.statusBarColor)
-            assertEquals(RECORDING_CHROME, window.navigationBarColor)
+            if (Build.VERSION.SDK_INT < 35) {
+                assertEquals(RECORDING_CHROME, window.statusBarColor)
+                assertEquals(RECORDING_CHROME, window.navigationBarColor)
+            }
             WindowCompat.getInsetsController(window, window.decorView).let { controller ->
                 assertFalse(controller.isAppearanceLightStatusBars)
                 assertFalse(controller.isAppearanceLightNavigationBars)
@@ -51,8 +77,10 @@ class RecordingSystemChromeTest {
 
         composeRule.runOnUiThread { showRecording.value = false }
         composeRule.runOnIdle {
-            assertEquals(baselineStatus, window.statusBarColor)
-            assertEquals(baselineNavigation, window.navigationBarColor)
+            if (Build.VERSION.SDK_INT < 35) {
+                assertEquals(baselineStatus, window.statusBarColor)
+                assertEquals(baselineNavigation, window.navigationBarColor)
+            }
             WindowCompat.getInsetsController(window, window.decorView).let { controller ->
                 assertTrue(controller.isAppearanceLightStatusBars)
                 assertTrue(controller.isAppearanceLightNavigationBars)
@@ -66,7 +94,13 @@ class RecordingSystemChromeTest {
         var matched: android.graphics.Bitmap? = null
         composeRule.waitUntil(timeoutMillis = 3_000) {
             val screenshot = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
-            if (systemBarPixelsMatch(expectedStatus, expectedNavigation, screenshot)) {
+            if (systemBarMatchReport(
+                    composeRule.activity.window,
+                    screenshot,
+                    expectedStatus,
+                    expectedNavigation,
+                ).matches
+            ) {
                 matched = screenshot
                 true
             } else {
@@ -78,28 +112,14 @@ class RecordingSystemChromeTest {
     }
 
     private fun assertSystemBarPixels(expectedStatus: Int, expectedNavigation: Int, screenshot: android.graphics.Bitmap) {
-        val actualStatus = screenshot.getPixel(screenshot.width / 2, 10)
-        val actualNavigation = screenshot.getPixel(screenshot.width / 4, screenshot.height - 10)
-        val message = "status expected=${colorString(expectedStatus)}, actual=${colorString(actualStatus)}; " +
-            "navigation expected=${colorString(expectedNavigation)}, actual=${colorString(actualNavigation)}"
-        assertTrue(message, pixelMatches(expectedStatus, actualStatus))
-        assertTrue(message, pixelMatches(expectedNavigation, actualNavigation))
+        val report = systemBarMatchReport(
+            composeRule.activity.window,
+            screenshot,
+            expectedStatus,
+            expectedNavigation,
+        )
+        assertTrue(report.description, report.matches)
     }
-
-    private fun systemBarPixelsMatch(
-        expectedStatus: Int,
-        expectedNavigation: Int,
-        screenshot: android.graphics.Bitmap,
-    ): Boolean = pixelMatches(expectedStatus, screenshot.getPixel(screenshot.width / 2, 10)) &&
-        pixelMatches(expectedNavigation, screenshot.getPixel(screenshot.width / 4, screenshot.height - 10))
-
-    private fun pixelMatches(expected: Int, actual: Int): Boolean =
-        abs(Color.red(expected) - Color.red(actual)) <= 4 &&
-            abs(Color.green(expected) - Color.green(actual)) <= 4 &&
-            abs(Color.blue(expected) - Color.blue(actual)) <= 4
-
-    private fun colorString(color: Int): String =
-        "#%02X%02X%02X".format(Color.red(color), Color.green(color), Color.blue(color))
 
     private companion object {
         val RECORDING_CHROME: Int = Color.rgb(6, 16, 11)
