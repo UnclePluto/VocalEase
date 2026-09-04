@@ -64,6 +64,18 @@ class DatabaseConverters {
     @TypeConverter
     fun toPreparationDraftStatus(value: String): PreparationDraftStatus = enumValueOrReject(value)
 
+    @TypeConverter
+    fun fromAccountExitChoice(value: AccountExitChoice): String = value.name
+
+    @TypeConverter
+    fun toAccountExitChoice(value: String): AccountExitChoice = enumValueOrReject(value)
+
+    @TypeConverter
+    fun fromAccountExitStage(value: AccountExitStage): String = value.name
+
+    @TypeConverter
+    fun toAccountExitStage(value: String): AccountExitStage = enumValueOrReject(value)
+
     private inline fun <reified T : Enum<T>> enumValueOrReject(value: String): T =
         enumValues<T>().firstOrNull { it.name == value }
             ?: throw IllegalArgumentException("数据库状态值无效")
@@ -74,8 +86,9 @@ class DatabaseConverters {
         DraftEntity::class, MediaEntity::class, UploadJobEntity::class, PreparationDraftEntity::class,
         UploadLocalActionEntity::class,
         AnalysisCheckpointEntity::class,
+        AccountExitIntentEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -86,6 +99,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
     abstract fun preparationDraftDao(): PreparationDraftDao
     abstract fun uploadLocalActionDao(): UploadLocalActionDao
     abstract fun analysisCheckpointDao(): AnalysisCheckpointDao
+    abstract fun accountExitIntentDao(): AccountExitIntentDao
 
     companion object {
         fun create(
@@ -101,6 +115,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_5_6)
                 .addMigrations(MIGRATION_6_7)
                 .addMigrations(MIGRATION_7_8)
+                .addMigrations(MIGRATION_8_9)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -271,6 +286,26 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 )
             }
         }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `account_exit_intents` (
+                      `account_scope` TEXT NOT NULL,
+                      `account_scope_hash` TEXT NOT NULL,
+                      `incarnation_proof` TEXT NOT NULL,
+                      `session_epoch` INTEGER NOT NULL,
+                      `operation_id` TEXT NOT NULL,
+                      `choice` TEXT NOT NULL,
+                      `stage` TEXT NOT NULL,
+                      `operation_version` INTEGER NOT NULL,
+                      PRIMARY KEY(`account_scope`)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
     }
 }
 
@@ -285,6 +320,7 @@ internal object DatabaseConstraintInstaller {
         "upload_local_actions_guard_insert_v1", "upload_local_actions_guard_update_v1",
         "preparation_drafts_guard_insert_v2", "preparation_drafts_guard_update_v2",
         "analysis_checkpoints_guard_insert_v1", "analysis_checkpoints_guard_update_v1",
+        "account_exit_intents_guard_insert_v1", "account_exit_intents_guard_update_v1",
     )
 
     fun callback(context: Context) = object : RoomDatabase.Callback() {

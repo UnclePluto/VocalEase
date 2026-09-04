@@ -11,6 +11,43 @@ CREATE TRIGGER IF NOT EXISTS drafts_guard_insert_v1 BEFORE INSERT ON drafts BEGI
   THEN RAISE(ABORT, 'draft constraint') END;
 END;
 -- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS account_exit_intents_guard_insert_v1 BEFORE INSERT ON account_exit_intents BEGIN
+  SELECT CASE WHEN length(NEW.account_scope) != 36
+    OR NEW.account_scope GLOB '*[^0-9a-f-]*'
+    OR substr(NEW.account_scope,9,1) != '-' OR substr(NEW.account_scope,14,1) != '-'
+    OR substr(NEW.account_scope,19,1) != '-' OR substr(NEW.account_scope,24,1) != '-'
+    OR substr(NEW.account_scope,15,1) NOT IN ('1','2','3','4','5')
+    OR substr(NEW.account_scope,20,1) NOT IN ('8','9','a','b')
+    OR length(NEW.account_scope_hash) != 64 OR NEW.account_scope_hash GLOB '*[^0-9a-f]*'
+    OR length(NEW.incarnation_proof) != 64 OR NEW.incarnation_proof GLOB '*[^0-9a-f]*'
+    OR typeof(NEW.session_epoch) != 'integer' OR NEW.session_epoch < 0
+    OR trim(NEW.operation_id) = '' OR length(NEW.operation_id) > 128
+    OR NEW.operation_id GLOB '*[^A-Za-z0-9_-]*'
+    OR NEW.choice NOT IN ('RETAIN','DELETE')
+    OR NEW.stage != 'INTENT_WRITTEN'
+    OR typeof(NEW.operation_version) != 'integer' OR NEW.operation_version != 0
+  THEN RAISE(ABORT, 'account exit intent constraint') END;
+END;
+-- VOCAEASE-STATEMENT
+CREATE TRIGGER IF NOT EXISTS account_exit_intents_guard_update_v1 BEFORE UPDATE ON account_exit_intents BEGIN
+  SELECT CASE WHEN NEW.account_scope != OLD.account_scope
+    OR NEW.account_scope_hash != OLD.account_scope_hash
+    OR NEW.incarnation_proof != OLD.incarnation_proof
+    OR NEW.session_epoch != OLD.session_epoch
+    OR NEW.operation_id != OLD.operation_id
+    OR NEW.choice != OLD.choice
+    OR NEW.operation_version != OLD.operation_version + 1
+    OR NOT (
+      (OLD.stage='INTENT_WRITTEN' AND NEW.stage='PAUSED_LOCKED')
+      OR (OLD.stage='PAUSED_LOCKED' AND NEW.stage='WORK_CANCELLED')
+      OR (OLD.stage='WORK_CANCELLED' AND NEW.stage='RUNTIME_REVOKED')
+      OR (OLD.stage='RUNTIME_REVOKED' AND OLD.choice='RETAIN' AND NEW.stage='READY_TO_CLEAR')
+      OR (OLD.stage='RUNTIME_REVOKED' AND OLD.choice='DELETE' AND NEW.stage='DATA_DELETED')
+      OR (OLD.stage='DATA_DELETED' AND OLD.choice='DELETE' AND NEW.stage='READY_TO_CLEAR')
+    )
+  THEN RAISE(ABORT, 'account exit intent transition') END;
+END;
+-- VOCAEASE-STATEMENT
 CREATE TRIGGER IF NOT EXISTS analysis_checkpoints_guard_insert_v1 BEFORE INSERT ON analysis_checkpoints BEGIN
   SELECT CASE WHEN trim(NEW.session_id) = '' OR length(NEW.session_id) > 128
     OR NEW.session_id GLOB '*[^A-Za-z0-9_-]*'

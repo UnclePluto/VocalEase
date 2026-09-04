@@ -82,6 +82,10 @@ class AppNavigationTest {
         composeRule.setContent {
             AuthenticatedApp(
                 initialRoute = AppRoute.Profile,
+                settingsContent = { onBack ->
+                    Text("设置")
+                    Button(onClick = onBack) { Text("返回我的") }
+                },
                 profileContent = { navigation ->
                     ProfileScreen(
                         state = ProfileUiState(patientName = "Voca", patientStatus = ProfilePatientStatus.CONTENT),
@@ -98,6 +102,9 @@ class AppNavigationTest {
         composeRule.onNodeWithContentDescription("设置").performClick()
         composeRule.onNodeWithText("设置").assertIsDisplayed()
         composeRule.onNodeWithText("去唱歌").assertDoesNotExist()
+        composeRule.onNodeWithText("我的").assertDoesNotExist()
+        composeRule.onNodeWithText("返回我的").performClick()
+        composeRule.onNodeWithText("去唱歌").assertIsDisplayed()
     }
 
     @Test

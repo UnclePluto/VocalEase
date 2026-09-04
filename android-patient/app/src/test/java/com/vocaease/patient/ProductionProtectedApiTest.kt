@@ -11,6 +11,11 @@ import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.SessionSnapshot
 import com.vocaease.patient.core.security.TokenVault
+import com.vocaease.patient.core.security.RevocationHandle
+import com.vocaease.patient.core.security.RevocationRemote
+import com.vocaease.patient.core.security.RevocationRemoteResult
+import com.vocaease.patient.core.security.RevocationScheduling
+import com.vocaease.patient.core.security.RevocationTokenSink
 import com.vocaease.patient.feature.auth.AuthEvent
 import com.vocaease.patient.feature.auth.AuthState
 import java.util.concurrent.CountDownLatch
@@ -45,6 +50,33 @@ class ProductionProtectedApiTest {
     @After
     fun tearDown() {
         server.shutdown()
+    }
+
+    @Test
+    fun `生产会话图离线退出把凭据移交隔离槽并只调度句柄`() = runBlocking {
+        val vault = ProductionTokenVault("access-secret", "refresh-secret")
+        var storedAccess: String? = null
+        var storedRefresh: String? = null
+        var scheduled: RevocationHandle? = null
+        val handle = RevocationHandle("a".repeat(64))
+        val graph = createProductionSessionGraph(
+            baseUrl = server.url("/").toString(),
+            tokenVault = vault,
+            revocationTokenSink = RevocationTokenSink { access, refresh ->
+                storedAccess = access
+                storedRefresh = refresh
+                handle
+            },
+            revocationRemote = RevocationRemote { _, _ -> RevocationRemoteResult.Retryable },
+            revocationScheduler = RevocationScheduling { scheduled = it },
+        )
+
+        graph.authRepository.logout()
+
+        assertEquals("access-secret", storedAccess)
+        assertEquals("refresh-secret", storedRefresh)
+        assertEquals(handle, scheduled)
+        assertEquals(null, vault.sessionSnapshot().accessToken)
     }
 
     @Test

@@ -141,6 +141,13 @@ class UploadCoordinator(
         scheduler.cancelAccount(accountScopeHash)
     }
 
+    suspend fun cancelAndAwaitAccount(accountScopeHash: String) {
+        cancelAccount(accountScopeHash)
+        active.keys
+            .filter { it.startsWith("upload:$accountScopeHash:") }
+            .forEach { key -> executionLocks.computeIfAbsent(key) { Mutex() }.withLock { } }
+    }
+
     private fun requireCurrentStorage(contract: UploadWorkContract) = storageProvider.current().also { storage ->
         if (storage.accountScopeHash != contract.accountScopeHash || !storage.isLeaseActive()) {
             throw StaleAccountScopeException()

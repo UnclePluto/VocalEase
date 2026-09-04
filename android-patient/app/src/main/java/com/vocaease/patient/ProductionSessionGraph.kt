@@ -9,7 +9,11 @@ import com.vocaease.patient.core.network.RefreshingPatientApi
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.SessionInvalidation
 import com.vocaease.patient.core.security.TokenVault
+import com.vocaease.patient.core.security.RevocationRemote
+import com.vocaease.patient.core.security.RevocationScheduling
+import com.vocaease.patient.core.security.RevocationTokenSink
 import com.vocaease.patient.feature.auth.AuthRepository
+import com.vocaease.patient.feature.auth.legacyRevocationRemote
 import com.vocaease.patient.feature.auth.VocaEasePatientIdentityRemoteDataSource
 import com.vocaease.patient.feature.auth.VocaEaseAuthRemoteDataSource
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +31,9 @@ internal fun createProductionSessionGraph(
     diagnosticSink: ((NetworkDiagnostic) -> Unit)? = null,
     clientOverride: OkHttpClient? = null,
     beforeInvalidationPublish: suspend (SessionInvalidation) -> Unit = {},
+    revocationTokenSink: RevocationTokenSink? = null,
+    revocationRemote: RevocationRemote? = null,
+    revocationScheduler: RevocationScheduling? = null,
 ): ProductionSessionGraph {
     val client = clientOverride
         ?: diagnosticSink?.let { NetworkModule.createAuthenticatedHttpClient(tokenVault, it) }
@@ -45,6 +52,9 @@ internal fun createProductionSessionGraph(
             authRemote,
             coordinator,
             VocaEasePatientIdentityRemoteDataSource(patientApi),
+            revocationTokenSink,
+            revocationRemote ?: legacyRevocationRemote(authRemote),
+            revocationScheduler,
         ),
         patientApi = patientApi,
         sessionEvents = coordinator.events,

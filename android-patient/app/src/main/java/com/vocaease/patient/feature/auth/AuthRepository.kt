@@ -24,6 +24,11 @@ import com.vocaease.patient.core.network.dto.toDomain
 import com.vocaease.patient.core.security.RefreshTokenRead
 import com.vocaease.patient.core.security.SessionMutation
 import com.vocaease.patient.core.security.TokenVault
+import com.vocaease.patient.core.security.RevocationHandle
+import com.vocaease.patient.core.security.RevocationRemote
+import com.vocaease.patient.core.security.RevocationRemoteResult
+import com.vocaease.patient.core.security.RevocationScheduling
+import com.vocaease.patient.core.security.RevocationTokenSink
 import com.vocaease.patient.core.security.VaultInvalidatedException
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
@@ -97,6 +102,9 @@ class AuthRepository(
     private val remote: AuthRemoteDataSource,
     private val refreshCoordinator: RefreshCoordinator,
     private val patientIdentity: PatientIdentityRemoteDataSource,
+    private val revocationTokenSink: RevocationTokenSink? = null,
+    private val revocationRemote: RevocationRemote = legacyRevocationRemote(remote),
+    private val revocationScheduler: RevocationScheduling? = null,
 ) {
     private val sessionArbiter = refreshCoordinator.sessionArbiter
     private val mutableState = MutableStateFlow<AuthState>(AuthState.Restoring)
@@ -213,75 +221,128 @@ class AuthRepository(
         }
     }
 
-    suspend fun changePassword(oldPassword: String, newPassword: String) {
+    suspend fun changePassword(oldPassword: String, newPassword: String): Boolean {
         if (oldPassword.isBlank() || newPassword.isBlank()) {
             mutableOperation.value = AuthOperationState.Error("请输入原密码和新密码")
-            return
+            return false
         }
         mutableOperation.value = AuthOperationState.Loading
-        var passwordChanged = false
-        var refreshRead: RefreshTokenRead? = null
+        val expectedEpoch = sessionArbiter.sessionSnapshot().epoch
         try {
             try {
                 remote.changePassword(ChangePasswordRequestDto(oldPassword, newPassword))
             } catch (error: CancellationException) {
-                applyLoggedOutCleanup(expectedEpoch = null)
                 throw error
             } catch (error: Throwable) {
                 mutableOperation.value = AuthOperationState.Error(error.userMessage(ApiEndpoint.AUTH_CHANGE_PASSWORD))
-                return
+                return false
             }
-            passwordChanged = true
-
-            refreshRead = sessionArbiter.mutate {
-                val beforeLogout = sessionSnapshot()
-                readRefreshToken(beforeLogout.epoch)
-            }
-            val refresh = (refreshRead as? RefreshTokenRead.Available)?.lease?.value
-            try {
-                remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // 改密已成功；远端登出失败不能阻止 finally 清理本地凭据。
+            return sessionArbiter.mutate {
+                val mutation = secureClearLocked(expectedEpoch)
+                if (mutation.applied) {
+                    mutableState.value = AuthState.LoggedOut
+                    eventChannel.trySend(AuthEvent.PasswordChanged)
+                }
+                mutation.applied
             }
         } finally {
-            if (passwordChanged) {
-                withContext(NonCancellable) {
-                    sessionArbiter.mutate {
-                        if (refreshRead !is RefreshTokenRead.Invalidated) secureClearLocked()
-                        else revokeAuthenticatedAccount()
-                        mutableState.value = AuthState.LoggedOut
-                        eventChannel.trySend(AuthEvent.PasswordChanged)
-                    }
-                }
-            }
             finishOperation()
         }
     }
 
     suspend fun logout() {
         mutableOperation.value = AuthOperationState.Loading
-        val refresh = withContext(NonCancellable) {
-            sessionArbiter.mutate {
-                val beforeLogout = sessionSnapshot()
-                val refreshRead = readRefreshToken(beforeLogout.epoch)
-                if (refreshRead !is RefreshTokenRead.Invalidated) secureClearLocked()
-                else revokeAuthenticatedAccount()
-                mutableState.value = AuthState.LoggedOut
-                mutableOperation.value = AuthOperationState.Idle
-                (refreshRead as? RefreshTokenRead.Available)?.lease?.value
-            }
-        }
         try {
-            remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
+            val credential = captureLogoutCredential() ?: run {
+                mutableState.value = AuthState.LoggedOut
+                return
+            }
+            val remoteResult = revocationRemote.revoke(credential.accessToken, credential.refreshToken)
+            val committed = commitLogoutCredential(credential, remoteResult)
+            if (!committed && sessionArbiter.sessionSnapshot().epoch == credential.epoch) {
+                mutableOperation.value = AuthOperationState.Error("安全退出未完成，请重试")
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            // 远端失败不能恢复本地凭据。
+            mutableOperation.value = AuthOperationState.Error("安全退出未完成，请重试")
         } finally {
             finishOperation()
         }
+    }
+
+    private suspend fun captureLogoutCredential(): LogoutCredential? {
+        var invalidated: RefreshTokenRead.Invalidated? = null
+        val credential = sessionArbiter.mutate {
+            val snapshot = sessionSnapshot()
+            val access = snapshot.accessToken ?: run {
+                secureClearLocked(snapshot.epoch)
+                mutableState.value = AuthState.LoggedOut
+                return@mutate null
+            }
+            when (val refresh = readRefreshToken(snapshot.epoch)) {
+                is RefreshTokenRead.Available -> LogoutCredential(access, refresh.lease.value, snapshot.epoch)
+                is RefreshTokenRead.Missing -> null
+                is RefreshTokenRead.Invalidated -> {
+                    invalidated = refresh
+                    null
+                }
+            }
+        }
+        invalidated?.let { refreshCoordinator.recordVaultInvalidation(it.invalidation, it.cause) }
+        return credential
+    }
+
+    internal fun currentSessionEpoch(): Long = sessionArbiter.sessionSnapshot().epoch
+
+    internal suspend fun attemptPreparedLogout(expectedEpoch: Long): RevocationRemoteResult? {
+        val credential = captureLogoutCredential(expectedEpoch) ?: return null
+        return revocationRemote.revoke(credential.accessToken, credential.refreshToken)
+    }
+
+    internal suspend fun commitPreparedLogout(
+        expectedEpoch: Long,
+        moveRefreshToRevocationOnly: Boolean,
+    ): Boolean {
+        val credential = captureLogoutCredential(expectedEpoch) ?: return false
+        return commitLogoutCredential(
+            credential,
+            if (moveRefreshToRevocationOnly) RevocationRemoteResult.Retryable else RevocationRemoteResult.Success,
+        )
+    }
+
+    private suspend fun captureLogoutCredential(expectedEpoch: Long): LogoutCredential? = sessionArbiter.mutate {
+        val snapshot = sessionSnapshot()
+        if (snapshot.epoch != expectedEpoch) return@mutate null
+        val access = snapshot.accessToken ?: return@mutate null
+        val refresh = readRefreshToken(snapshot.epoch) as? RefreshTokenRead.Available ?: return@mutate null
+        LogoutCredential(access, refresh.lease.value, snapshot.epoch)
+    }
+
+    private suspend fun commitLogoutCredential(
+        credential: LogoutCredential,
+        result: RevocationRemoteResult,
+    ): Boolean {
+        var handle: RevocationHandle? = null
+        val committed = sessionArbiter.mutate {
+            val current = sessionSnapshot()
+            if (current.epoch != credential.epoch || current.accessToken != credential.accessToken) {
+                return@mutate false
+            }
+            val currentRefresh = readRefreshToken(current.epoch) as? RefreshTokenRead.Available
+                ?: return@mutate false
+            if (currentRefresh.lease.value != credential.refreshToken) return@mutate false
+            if (result == RevocationRemoteResult.Retryable) {
+                val sink = revocationTokenSink ?: return@mutate false
+                handle = sink.store(credential.accessToken, credential.refreshToken)
+            }
+            val mutation = secureClearLocked(credential.epoch)
+            if (!mutation.applied) return@mutate false
+            mutableState.value = AuthState.LoggedOut
+            true
+        }
+        if (committed) handle?.let { runCatching { revocationScheduler?.schedule(it) } }
+        return committed
     }
 
     fun dismissError() {
@@ -429,6 +490,24 @@ class AuthRepository(
         else -> throw this
     }
 }
+
+private data class LogoutCredential(
+    val accessToken: String,
+    val refreshToken: String,
+    val epoch: Long,
+)
+
+internal fun legacyRevocationRemote(remote: AuthRemoteDataSource): RevocationRemote =
+    RevocationRemote { _, refresh ->
+        try {
+            remote.logout(LogoutRequestDto(ClientKind.ANDROID, refresh))
+            RevocationRemoteResult.Success
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            RevocationRemoteResult.Retryable
+        }
+    }
 
 private class AuthContractException(message: String) : IllegalStateException(message)
 

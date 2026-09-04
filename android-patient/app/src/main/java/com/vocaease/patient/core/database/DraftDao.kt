@@ -82,6 +82,9 @@ internal interface DraftDao {
 
     @Query("DELETE FROM drafts WHERE account_scope = :accountScope")
     suspend fun deleteAll(accountScope: String): Int
+
+    @Query("SELECT draft_id FROM drafts WHERE account_scope = :accountScope ORDER BY draft_id")
+    suspend fun findAllIds(accountScope: String): List<String>
 }
 
 @Dao
@@ -131,4 +134,7 @@ internal interface MediaDao {
 
     @Query("DELETE FROM media WHERE account_scope = :accountScope AND draft_id = :draftId")
     suspend fun deleteAll(accountScope: String, draftId: String): Int
+
+    @Query("DELETE FROM media WHERE account_scope = :accountScope")
+    suspend fun deleteAllForAccount(accountScope: String): Int
 }

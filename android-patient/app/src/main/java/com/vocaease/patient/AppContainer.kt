@@ -15,9 +15,15 @@ import com.vocaease.patient.core.media.RecordingPlaybackHandoff
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingStagingRecovery
 import com.vocaease.patient.core.network.PatientApi
+import com.vocaease.patient.core.network.NetworkModule
+import com.vocaease.patient.core.network.OkHttpRevocationRemote
 import com.vocaease.patient.core.network.SessionLifecycleEvent
 import com.vocaease.patient.core.security.AndroidTokenVault
+import com.vocaease.patient.core.security.AndroidRevocationVault
+import com.vocaease.patient.core.security.AndroidRevocationScheduler
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import com.vocaease.patient.core.security.RevocationExecutor
+import com.vocaease.patient.core.security.RevocationWorkerGateway
 import com.vocaease.patient.feature.auth.AuthRepository
 import com.vocaease.patient.feature.catalog.PatientRepository
 import com.vocaease.patient.feature.catalog.SongPagingSource
@@ -26,6 +32,9 @@ import com.vocaease.patient.feature.catalog.VocaEasePatientRemoteDataSource
 import com.vocaease.patient.feature.catalog.VocaEaseSongRemoteDataSource
 import com.vocaease.patient.feature.profile.PendingUploadCounter
 import com.vocaease.patient.feature.profile.AccountScopedPendingUploadCounter
+import com.vocaease.patient.feature.profile.ProductionAccountExitManager
+import com.vocaease.patient.feature.profile.ProductionSettingsAccountActions
+import com.vocaease.patient.feature.profile.SettingsAccountActions
 import com.vocaease.patient.feature.training.LocalUploadQueueSignals
 import com.vocaease.patient.feature.upload.UploadCoordinator
 import com.vocaease.patient.feature.upload.VocaEaseUploadRemote
@@ -76,8 +85,11 @@ interface AppContainer {
     val pendingUploadCounter: PendingUploadCounter
     val draftStorage: AccountScopedDraftStorageProvider
     val recordingPlaybackHandoff: RecordingPlaybackHandoff
+    val settingsAccountActions: SettingsAccountActions
     /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
     val sessionEvents: Flow<SessionLifecycleEvent>
+    val revocationWorkerGateway: RevocationWorkerGateway?
+        get() = null
 
     companion object {
         fun unavailable(): AppContainer = UnavailableAppContainer
@@ -87,7 +99,21 @@ interface AppContainer {
 class AndroidAppContainer(context: Context) : AppContainer {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val tokenVault = AndroidTokenVault(context)
-    private val sessionGraph = createProductionSessionGraph(BuildConfig.API_BASE_URL, tokenVault)
+    private val revocationVault = AndroidRevocationVault(context)
+    private val revocationScheduler = AndroidRevocationScheduler(context)
+    private val revocationRemote = OkHttpRevocationRemote(
+        BuildConfig.API_BASE_URL,
+        NetworkModule.createRevocationHttpClient(),
+    )
+    private val revocationExecutor = RevocationExecutor(revocationVault, revocationVault, revocationRemote)
+    override val revocationWorkerGateway = RevocationWorkerGateway(revocationExecutor::revoke)
+    private val sessionGraph = createProductionSessionGraph(
+        BuildConfig.API_BASE_URL,
+        tokenVault,
+        revocationTokenSink = revocationVault,
+        revocationRemote = revocationRemote,
+        revocationScheduler = revocationScheduler,
+    )
 
     override val authRepository = sessionGraph.authRepository
     override val patientApi = sessionGraph.patientApi
@@ -150,34 +176,55 @@ class AndroidAppContainer(context: Context) : AppContainer {
         onAnalyzing = analysisCoordinator::schedule,
     )
     override val uploadFactory = UploadFactory { uploadCoordinator }
+    internal val accountExitManager = ProductionAccountExitManager(
+        context = context.applicationContext,
+        authRepository = authRepository,
+        storageProvider = draftStorage,
+        database = patientDatabase,
+        fileStore = encryptedFileStore,
+        uploadCoordinator = uploadCoordinator,
+        analysisCoordinator = analysisCoordinator,
+        recordingPlaybackHandoff = recordingPlaybackHandoff,
+    )
+    override val settingsAccountActions: SettingsAccountActions = ProductionSettingsAccountActions(accountExitManager)
 
     init {
         val cleanupScheduler = DailyDraftCleanupScheduler(context)
         val tempFiles = PrivateRecordingTempFiles(context)
         val stagingRecovery = RecordingStagingRecovery(tempFiles)
-        var recoveryJob: Job? = null
-        var uploadRecoveryJob: Job? = null
+        var accountRecoveryJob: Job? = null
         var previousUploadScope: String? = null
         accountSession.addLeaseChangedListener {
             recordingPlaybackHandoff.discardAll()
             previousUploadScope?.let(uploadCoordinator::cancelAccount)
             previousUploadScope?.let(analysisCoordinator::cancelAccount)
-            val storage = runCatching { draftStorage.current() }.getOrNull()
-            previousUploadScope = storage?.accountScopeHash
-            cleanupScheduler.replaceFor(storage)
-            recoveryJob?.cancel()
-            uploadRecoveryJob?.cancel()
-            recoveryJob = storage?.let { current ->
-                applicationScope.launch { stagingRecovery.recover(current) }
-            }
-            uploadRecoveryJob = storage?.let { current ->
-                applicationScope.launch {
-                    current.recoverUploadLocalActions()
-                    current.observeUploadJobs().first().forEach { job ->
-                        runCatching { uploadCoordinator.schedule(job.draftId) }
-                    }
+            accountRecoveryJob?.cancel()
+            accountRecoveryJob = applicationScope.launch {
+                val storage = runCatching { draftStorage.current() }.getOrNull()
+                previousUploadScope = storage?.accountScopeHash
+                if (storage == null) {
+                    cleanupScheduler.replaceFor(null)
+                    return@launch
+                }
+                val normalWorkSuppressed = AccountStartupRecovery(
+                    recoverExit = accountExitManager::recoverCurrentExit,
+                    startNormalWork = {
+                        cleanupScheduler.replaceFor(storage)
+                        stagingRecovery.recover(storage)
+                        storage.recoverUploadLocalActions()
+                        storage.observeUploadJobs().first().forEach { job ->
+                            runCatching { uploadCoordinator.schedule(job.draftId) }
+                        }
+                    },
+                ).run()
+                if (normalWorkSuppressed) {
+                    cleanupScheduler.replaceFor(null)
                 }
             }
+        }
+        applicationScope.launch {
+            runCatching { revocationVault.handles() }.getOrDefault(emptyList())
+                .forEach(revocationScheduler::schedule)
         }
         applicationScope.launch {
             LocalUploadQueueSignals.signals.collect { draftId ->
@@ -218,6 +265,8 @@ private object UnavailableAppContainer : AppContainer {
     override val draftStorage: AccountScopedDraftStorageProvider
         get() = unavailable()
     override val recordingPlaybackHandoff: RecordingPlaybackHandoff
+        get() = unavailable()
+    override val settingsAccountActions: SettingsAccountActions
         get() = unavailable()
     override val sessionEvents: Flow<SessionLifecycleEvent>
         get() = unavailable()

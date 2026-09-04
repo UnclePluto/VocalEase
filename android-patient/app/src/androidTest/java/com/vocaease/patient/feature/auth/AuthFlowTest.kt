@@ -197,7 +197,8 @@ class AuthFlowTest {
         composeRule.onNodeWithTag("change-old-password").performTextInput("initial-password")
         composeRule.onNodeWithTag("change-new-password").performTextInput("new-password")
         composeRule.onNodeWithTag("change-password-submit").performClick()
-        composeRule.waitUntil(5_000) { remote.logoutCalled }
+        composeRule.waitUntil(5_000) { remote.changePasswordCalled }
+        assertFalse(remote.logoutCalled)
         composeRule.onNodeWithText("密码已修改，请重新登录").assertExists()
         composeRule.onNodeWithTag("login-submit").assertExists()
     }
@@ -275,6 +276,7 @@ private class UiTokenVault : com.vocaease.patient.core.security.TokenVault {
 }
 
 private class UiAuthRemote : AuthRemoteDataSource {
+    @Volatile var changePasswordCalled = false
     @Volatile var logoutCalled = false
 
     override suspend fun login(request: LoginRequestDto) = AuthSession(
@@ -288,7 +290,9 @@ private class UiAuthRemote : AuthRemoteDataSource {
 
     override suspend fun refresh(request: RefreshRequestDto) = error("本测试不应刷新")
 
-    override suspend fun changePassword(request: ChangePasswordRequestDto) = Unit
+    override suspend fun changePassword(request: ChangePasswordRequestDto) {
+        changePasswordCalled = true
+    }
 
     override suspend fun logout(request: LogoutRequestDto) {
         logoutCalled = true

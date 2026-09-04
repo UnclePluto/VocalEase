@@ -180,10 +180,11 @@ class AuthRaceTest {
     }
 
     @Test
-    fun `改密请求挂起时取消仍先清除本地凭据并传播取消`() = runBlocking {
+    fun `改密请求挂起时取消保留本地凭据并传播取消`() = runBlocking {
         val vault = LinearTokenVault("access", "refresh")
         val remote = GatedAuthRemote().apply { holdChangePassword = true }
         val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
+        repository.restoreSession()
 
         val change = async { repository.changePassword("old-password", "new-password") }
         remote.changePasswordStarted.await()
@@ -191,26 +192,21 @@ class AuthRaceTest {
         val cancellation = runCatching { change.await() }.exceptionOrNull()
 
         assertTrue(cancellation is CancellationException)
-        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertEquals(AuthState.Authenticated, repository.state.value)
         assertEquals(AuthOperationState.Idle, repository.operation.value)
-        assertNull(vault.sessionSnapshot().accessToken)
-        assertNull(vault.refreshValue())
+        assertEquals("access", vault.sessionSnapshot().accessToken)
+        assertEquals("refresh", vault.refreshValue())
     }
 
     @Test
-    fun `改密成功后的远端登出挂起时取消仍保留重新登录提示且无凭据`() = runBlocking {
+    fun `改密成功不再发额外远端登出且立即清理凭据`() = runBlocking {
         val vault = LinearTokenVault("access", "refresh")
-        val remote = GatedAuthRemote().apply { holdLogout = true }
+        val remote = GatedAuthRemote()
         val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
         val event = async(start = CoroutineStart.UNDISPATCHED) { repository.events.first() }
 
-        val change = async { repository.changePassword("old-password", "new-password") }
-        remote.logoutStarted.await()
-        assertEquals(AuthOperationState.Loading, repository.operation.value)
-        change.cancel(CancellationException("cancel logout after change"))
-        val cancellation = runCatching { change.await() }.exceptionOrNull()
+        repository.changePassword("old-password", "new-password")
 
-        assertTrue(cancellation is CancellationException)
         assertEquals(AuthEvent.PasswordChanged, event.await())
         assertEquals(AuthState.LoggedOut, repository.state.value)
         assertEquals(AuthOperationState.Idle, repository.operation.value)
@@ -219,10 +215,31 @@ class AuthRaceTest {
     }
 
     @Test
-    fun `普通登出远端挂起时取消仍先清除凭据并传播取消`() = runBlocking {
+    fun `旧改密响应迟到不能清除随后登录的新会话`() = runBlocking {
+        val vault = LinearTokenVault("old-access", "old-refresh")
+        val remote = GatedAuthRemote(loginResult = authSession("new-access", "new-refresh")).apply {
+            holdChangePassword = true
+        }
+        val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
+        repository.restoreSession()
+
+        val change = async { repository.changePassword("old-password", "new-password") }
+        remote.changePasswordStarted.await()
+        repository.login("patient-001", "password")
+        remote.releaseChangePassword.complete(Unit)
+        change.await()
+
+        assertEquals("new-access", vault.sessionSnapshot().accessToken)
+        assertEquals("new-refresh", vault.refreshValue())
+        assertEquals(AuthState.Authenticated, repository.state.value)
+    }
+
+    @Test
+    fun `普通登出远端挂起时取消保留凭据并传播取消`() = runBlocking {
         val vault = LinearTokenVault("access", "refresh")
         val remote = GatedAuthRemote().apply { holdLogout = true }
         val repository = AuthRepository(vault, remote, RefreshCoordinator(vault, remote), patientIdentity())
+        repository.restoreSession()
 
         val logout = async { repository.logout() }
         remote.logoutStarted.await()
@@ -230,10 +247,10 @@ class AuthRaceTest {
         val cancellation = runCatching { logout.await() }.exceptionOrNull()
 
         assertTrue(cancellation is CancellationException)
-        assertEquals(AuthState.LoggedOut, repository.state.value)
+        assertEquals(AuthState.Authenticated, repository.state.value)
         assertEquals(AuthOperationState.Idle, repository.operation.value)
-        assertNull(vault.sessionSnapshot().accessToken)
-        assertNull(vault.refreshValue())
+        assertEquals("access", vault.sessionSnapshot().accessToken)
+        assertEquals("refresh", vault.refreshValue())
     }
 }
 

@@ -296,7 +296,7 @@ class AuthRepositoryTest {
     }
 
     @Test
-    fun `改密成功即使远端登出失败也清会话并提示重新登录`() = runBlocking {
+    fun `改密成功由服务端撤销令牌并直接清会话提示重新登录`() = runBlocking {
         val vault = FakeTokenVault(accessToken = "access", refreshToken = "refresh")
         val remote = FakeAuthRemote(logoutFailure = IllegalStateException("offline"))
         val repository = repository(vault, remote)
@@ -308,7 +308,7 @@ class AuthRepositoryTest {
             ChangePasswordRequestDto("initial-password", "new-password"),
             remote.lastChangePassword,
         )
-        assertEquals(LogoutRequestDto(ClientKind.ANDROID, "refresh"), remote.lastLogout)
+        assertNull(remote.lastLogout)
         assertNull(vault.sessionSnapshot().accessToken)
         assertNull(vault.refreshValue())
         assertEquals(AuthState.LoggedOut, repository.state.value)

@@ -76,6 +76,8 @@ import com.vocaease.patient.feature.catalog.CatalogScreen
 import com.vocaease.patient.feature.catalog.CatalogViewModel
 import com.vocaease.patient.feature.profile.ProfileScreen
 import com.vocaease.patient.feature.profile.ProfileViewModel
+import com.vocaease.patient.feature.profile.SettingsScreen
+import com.vocaease.patient.feature.profile.SettingsViewModel
 import com.vocaease.patient.core.media.PreviewPlayer
 import com.vocaease.patient.core.media.AccountScopedRecordingArtifactPublisher
 import com.vocaease.patient.core.media.AndroidRecordingAudioFocus
@@ -143,6 +145,7 @@ typealias RecordingContent = @Composable (String, () -> Unit, (String) -> Unit) 
 typealias ReviewContent = @Composable (String, () -> Unit, (String) -> Unit, (String) -> Unit) -> Unit
 typealias HistoryContent = @Composable (() -> Unit, (String) -> Unit) -> Unit
 typealias ResultContent = @Composable (String, () -> Unit) -> Unit
+typealias SettingsContent = @Composable (() -> Unit) -> Unit
 
 private sealed interface RecordingPlaybackClaim {
     data object Loading : RecordingPlaybackClaim
@@ -204,6 +207,7 @@ internal fun AuthenticatedApp(
     reviewContent: ReviewContent = { _, _, _, _ -> PlaceholderScreen("本地回看") },
     historyContent: HistoryContent = { onBack, onResult -> HistoryRoute(onBack, onResult) },
     resultContent: ResultContent = { sessionId, onBack -> ResultRoute(sessionId, onBack) },
+    settingsContent: SettingsContent = { onBack -> SettingsRoute(onBack) },
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -228,6 +232,7 @@ internal fun AuthenticatedApp(
             reviewContent = reviewContent,
             historyContent = historyContent,
             resultContent = resultContent,
+            settingsContent = settingsContent,
         )
     }
 }
@@ -319,6 +324,7 @@ private fun AppNavHost(
     reviewContent: ReviewContent,
     historyContent: HistoryContent,
     resultContent: ResultContent,
+    settingsContent: SettingsContent,
 ) {
     NavHost(
         navController = navController,
@@ -390,8 +396,33 @@ private fun AppNavHost(
             val route = entry.toRoute<AppRoute.Result>()
             resultContent(route.sessionId) { navController.popBackStack() }
         }
-        composable<AppRoute.Settings> { PlaceholderScreen("设置") }
+        composable<AppRoute.Settings> { settingsContent { navController.popBackStack() } }
     }
+}
+
+@Composable
+private fun SettingsRoute(onBack: () -> Unit) {
+    val container = LocalAppContainer.current
+    val settingsViewModel: SettingsViewModel = viewModel(
+        factory = SettingsViewModel.factory(container.settingsAccountActions),
+    )
+    val state by settingsViewModel.state.collectAsState()
+    SettingsScreen(
+        state = state,
+        onBack = onBack,
+        onOldPasswordChange = settingsViewModel::updateOldPassword,
+        onNewPasswordChange = settingsViewModel::updateNewPassword,
+        onConfirmationChange = settingsViewModel::updateConfirmation,
+        onToggleOldPassword = settingsViewModel::toggleOldPassword,
+        onToggleNewPassword = settingsViewModel::toggleNewPassword,
+        onToggleConfirmation = settingsViewModel::toggleConfirmation,
+        onSubmitPassword = settingsViewModel::submitPasswordChange,
+        onRequestLogout = settingsViewModel::requestLogout,
+        onConfirmLogout = settingsViewModel::confirmLogout,
+        onChooseRetain = settingsViewModel::chooseRetain,
+        onChooseDelete = settingsViewModel::chooseDelete,
+        onDismissLogout = settingsViewModel::dismissLogout,
+    )
 }
 
 @Composable

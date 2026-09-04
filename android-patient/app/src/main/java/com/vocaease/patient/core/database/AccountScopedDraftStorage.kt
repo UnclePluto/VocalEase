@@ -92,6 +92,7 @@ class AccountScopedDraftStorage internal constructor(
     private val session: AuthenticatedAccountSession,
     private val lease: AuthenticatedAccountLease,
 ) {
+    internal val accountScope: String = lease.patientId
     val accountScopeHash: String = ChunkedAesGcmFileStore.sha256(lease.patientId)
     val cleanupScopeToken: String = ChunkedAesGcmFileStore.sha256(lease.patientId + "\u0000" + lease.incarnationId)
 
@@ -1018,7 +1019,12 @@ class AccountScopedDraftStorage internal constructor(
     }
 
     private suspend fun <T> checked(block: suspend () -> T): T {
-        return session.withCurrentLease(lease, block)
+        return session.withCurrentLease(lease) {
+            if (database.accountExitIntentDao().find(lease.patientId) != null) {
+                throw StaleAccountScopeException()
+            }
+            block()
+        }
     }
 
     private suspend fun insertPreparationEntity(draft: PreparationDraftSnapshot) {

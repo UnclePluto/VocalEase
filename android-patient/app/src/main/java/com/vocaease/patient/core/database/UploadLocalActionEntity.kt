@@ -68,4 +68,7 @@ internal interface UploadLocalActionDao {
 
     @Query("DELETE FROM upload_local_actions WHERE account_scope=:accountScope AND draft_id=:draftId")
     suspend fun delete(accountScope: String, draftId: String): Int
+
+    @Query("DELETE FROM upload_local_actions WHERE account_scope=:accountScope")
+    suspend fun deleteAll(accountScope: String): Int
 }

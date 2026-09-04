@@ -126,4 +126,7 @@ internal interface PreparationDraftDao {
 
     @Query("DELETE FROM preparation_drafts WHERE account_scope=:accountScope AND draft_id=:draftId")
     suspend fun delete(accountScope: String, draftId: String): Int
+
+    @Query("DELETE FROM preparation_drafts WHERE account_scope=:accountScope")
+    suspend fun deleteAll(accountScope: String): Int
 }

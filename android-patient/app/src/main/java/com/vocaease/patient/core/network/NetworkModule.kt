@@ -118,6 +118,16 @@ object NetworkModule {
         .addInterceptor(SafeNetworkDiagnosticInterceptor(diagnosticSink))
         .addNetworkInterceptor(RetryRequestSingleAttemptInterceptor())
         .build()
+
+    /**
+     * 待撤销凭据只能经这个无认证拦截器、无重定向、无连接重试的客户端发送。
+     * 一次执行因此最多产生一个物理请求，也不会把凭据带往响应指定的其它地址。
+     */
+    internal fun createRevocationHttpClient(): OkHttpClient = OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .retryOnConnectionFailure(false)
+        .build()
 }
 
 private const val MAX_AUTHENTICATED_REQUESTS = 64

@@ -71,4 +71,7 @@ internal interface AnalysisCheckpointDao {
         expectedVersion: Long,
         nextVersion: Long,
     ): Int
+
+    @Query("DELETE FROM analysis_checkpoints WHERE account_scope_hash=:accountScopeHash")
+    suspend fun deleteAll(accountScopeHash: String): Int
 }
