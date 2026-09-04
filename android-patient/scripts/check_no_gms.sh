@@ -9,6 +9,8 @@ report_file="$project_dir/app/build/reports/release-runtime-dependencies.txt"
 mkdir -p "$(dirname "$report_file")"
 "$project_dir/gradlew" \
   -p "$project_dir" \
+  --offline \
+  --dependency-verification strict \
   -PvocaeaseApiBaseUrl="$VOCAEASE_API_BASE_URL" \
   :app:dependencies \
   --configuration releaseRuntimeClasspath \

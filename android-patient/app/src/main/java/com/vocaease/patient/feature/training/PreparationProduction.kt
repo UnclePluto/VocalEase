@@ -83,6 +83,7 @@ class AndroidReadinessSource(
     private val activity: Activity,
     private val permissionsRequested: () -> Boolean,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val isOnline: () -> Boolean = { AndroidAppConnectivity(activity.applicationContext).isOnline() },
 ) : ReadinessSource {
     override suspend fun inspect(durationSeconds: Long, previewBuffered: Boolean): DeviceReadiness {
         val context = activity.applicationContext
@@ -92,7 +93,7 @@ class AndroidReadinessSource(
             availableBytes = StatFs(context.filesDir.absolutePath).availableBytes,
             durationSeconds = durationSeconds,
             previewBuffered = previewBuffered,
-            online = context.isOnline(),
+            online = isOnline(),
             frontCameraAvailable = withContext(ioDispatcher) {
                 runCatching {
                     ProcessCameraProvider.getInstance(context).get(
@@ -163,12 +164,24 @@ class AndroidPreparationEnvironmentMonitor(context: Context) : PreparationEnviro
     }
 }
 
-private fun Context.isOnline(): Boolean {
-    val manager = getSystemService(ConnectivityManager::class.java) ?: return false
-    val network = manager.activeNetwork ?: return false
-    val capabilities = manager.getNetworkCapabilities(network) ?: return false
-    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+interface AppConnectivity {
+    fun isOnline(): Boolean
+    fun environmentMonitor(): PreparationEnvironmentMonitor
+}
+
+class AndroidAppConnectivity(context: Context) : AppConnectivity {
+    private val applicationContext = context.applicationContext
+
+    override fun isOnline(): Boolean {
+        val manager = applicationContext.getSystemService(ConnectivityManager::class.java) ?: return false
+        val network = manager.activeNetwork ?: return false
+        val capabilities = manager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    override fun environmentMonitor(): PreparationEnvironmentMonitor =
+        AndroidPreparationEnvironmentMonitor(applicationContext)
 }
 
 private fun Context.headphonesConnected(): Boolean {

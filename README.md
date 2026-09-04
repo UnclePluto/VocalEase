@@ -1,6 +1,30 @@
 # VocaEase
 
-VocaEase 是一个以唱歌训练辅助胃上嗳气治疗的全栈项目。本仓库当前交付医生后台、Django 共享服务、患者 Android 端预留 API，以及可替换真实算法的模拟分析协议；不包含 Android App 和真实 AI 算法。
+VocaEase 是一个以唱歌训练辅助胃上嗳气治疗的全栈项目。本仓库交付医生后台、Django 共享服务和 Android 10+ 患者客户端，以及可替换真实算法的演示分析协议；不包含真实 AI 算法。
+
+## Android 患者客户端
+
+客户端位于 `android-patient/`，要求 JDK 17、Android SDK（platform 29/37，compileSdk 37）并设置 `ANDROID_HOME`。应用面向 Android 10（API 29）及以上竖屏手机，运行时不依赖 GMS、Firebase、Google 登录或 Google 在线接口，主导航仅“去唱歌 / 我的”。
+
+依赖版本和校验文件已锁定。中国大陆开发环境应通过可访问的 Maven 代理或内部制品缓存先完成一次受控预热，再用严格校验和离线模式复跑；验证脚本本身不会下载依赖。debug 默认只允许模拟器通过 `http://10.0.2.2:8000/` 联调，release 必须显式提供完整 HTTPS 且以 `/` 结尾的 API 基址：
+
+```bash
+export JAVA_HOME=/path/to/jdk-17
+export ANDROID_HOME=/path/to/android-sdk
+cd android-patient
+./gradlew --dependency-verification strict :app:assembleDebug
+export VOCAEASE_API_BASE_URL=https://api.example.invalid/
+./scripts/verify_release.sh
+```
+
+本地服务端联调先按下文启动 Django，再安装 debug APK；Android 模拟器使用 `10.0.2.2` 访问宿主机。患者闭环定向验证：
+
+```bash
+ANDROID_SERIAL=emulator-5554 ./gradlew --offline :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.vocaease.patient.e2e.PatientClosedLoopTest
+```
+
+当前自动化证据覆盖 API 29/API 34 模拟器。七牛真实私有空间、Android 17/API 37、小米/荣耀/OPPO/vivo/华为实体机及本轮 Pencil 只读复核仍是外部待验收项，详见 `android-patient/docs/`；不得把模拟器证据视为国产真机或无 GMS 全闭环验收。
 
 ## 本地启动
 
@@ -40,7 +64,7 @@ docker compose --env-file .env -f deploy/compose.yaml exec server \
 | 患者一 | `PDEMO001` | `888888` |
 | 患者二 | `PDEMO002` | `888888` |
 
-所有演示账号首次登录后必须修改密码。医生后台仅接受系统管理员或医生账号；患者账号供未来 Android 客户端和 API 联调使用。
+所有演示账号首次登录后必须修改密码。医生后台仅接受系统管理员或医生账号；患者账号供 Android 客户端和 API 联调使用。
 
 ## 本地媒体与七牛云
 

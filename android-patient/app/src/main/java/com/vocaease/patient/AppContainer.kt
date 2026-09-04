@@ -1,19 +1,27 @@
 package com.vocaease.patient
 
 import android.content.Context
+import androidx.camera.core.Preview
+import androidx.lifecycle.LifecycleOwner
+import androidx.media3.ui.PlayerView
 import androidx.compose.runtime.staticCompositionLocalOf
-import com.vocaease.patient.BuildConfig
 import com.vocaease.patient.core.database.AccountScopedDraftStorageProvider
+import com.vocaease.patient.core.database.AccountScopedDraftStorage
 import com.vocaease.patient.core.database.AuthenticatedAccountLease
 import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.AccountLeaseListenerRegistration
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.cleanup.DailyDraftCleanupScheduler
 import com.vocaease.patient.core.media.ExoPreviewEngine
-import com.vocaease.patient.core.media.PreviewEngine
+import com.vocaease.patient.core.media.LinearizedReviewPlayer
+import com.vocaease.patient.core.media.Media3ReviewPlayerEngine
+import com.vocaease.patient.core.media.PreviewPlayer
+import com.vocaease.patient.core.media.PreviewSession
 import com.vocaease.patient.core.media.RecordingPlaybackHandoff
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingStagingRecovery
+import com.vocaease.patient.core.media.CameraXRecordingCapture
+import com.vocaease.patient.core.media.RecordingCapture
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.NetworkModule
 import com.vocaease.patient.core.network.OkHttpRevocationRemote
@@ -36,7 +44,13 @@ import com.vocaease.patient.feature.profile.ProductionAccountExitManager
 import com.vocaease.patient.feature.profile.ProductionSettingsAccountActions
 import com.vocaease.patient.feature.profile.SettingsAccountActions
 import com.vocaease.patient.feature.training.LocalUploadQueueSignals
+import com.vocaease.patient.feature.training.ReviewPlayer
+import com.vocaease.patient.feature.training.VocaEasePreviewGrantSource
+import com.vocaease.patient.feature.training.AndroidAppConnectivity
+import com.vocaease.patient.feature.training.AppConnectivity
 import com.vocaease.patient.feature.upload.UploadCoordinator
+import com.vocaease.patient.feature.upload.QiniuUploader
+import com.vocaease.patient.feature.upload.QiniuV2Uploader
 import com.vocaease.patient.feature.upload.VocaEaseUploadRemote
 import com.vocaease.patient.feature.history.AccountScopedAnalysisAccount
 import com.vocaease.patient.feature.history.AnalysisSyncCoordinator
@@ -49,11 +63,40 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import okhttp3.OkHttpClient
+import java.io.File
 
 fun interface AppClock {
     fun nowEpochMilliseconds(): Long
 }
+
+fun interface AppMonotonicClock {
+    fun nowNanoseconds(): Long
+}
+
+fun interface RecordingCaptureFactory {
+    fun create(context: Context, lifecycleOwner: LifecycleOwner, surfaceProvider: Preview.SurfaceProvider): RecordingCapture
+}
+
+fun interface QiniuUploaderFactory {
+    fun create(recorderDirectory: File): QiniuUploader
+}
+
+/** 所有设备/网络/SDK 外部边界均从容器装配；默认值保持生产真实实现。 */
+data class AndroidAppDependencies(
+    val apiBaseUrl: String = BuildConfig.API_BASE_URL,
+    val authenticatedClientFactory: (com.vocaease.patient.core.security.TokenVault) -> OkHttpClient =
+        NetworkModule::createAuthenticatedHttpClient,
+    val clock: AppClock = AppClock(System::currentTimeMillis),
+    val monotonicClock: AppMonotonicClock = AppMonotonicClock(System::nanoTime),
+    val connectivityFactory: (Context) -> AppConnectivity = ::AndroidAppConnectivity,
+    val recordingCaptureFactory: RecordingCaptureFactory = RecordingCaptureFactory { context, owner, surface ->
+        CameraXRecordingCapture(context, owner, surface)
+    },
+    val qiniuUploaderFactory: QiniuUploaderFactory = QiniuUploaderFactory(::QiniuV2Uploader),
+)
 
 interface AppDispatchers {
     val io: CoroutineDispatcher
@@ -64,8 +107,9 @@ fun interface RepositoryFactory {
     fun create(name: String): Any
 }
 
-fun interface MediaFactory {
-    fun createPreviewEngine(): PreviewEngine
+interface MediaFactory {
+    fun createPreviewSession(): PreviewSession
+    fun createReviewPlayer(storage: AccountScopedDraftStorage, playerView: PlayerView? = null): ReviewPlayer
 }
 
 fun interface UploadFactory {
@@ -74,6 +118,7 @@ fun interface UploadFactory {
 
 interface AppContainer {
     val clock: AppClock
+    val monotonicClock: AppMonotonicClock
     val dispatchers: AppDispatchers
     val repositoryFactory: RepositoryFactory
     val mediaFactory: MediaFactory
@@ -86,6 +131,12 @@ interface AppContainer {
     val draftStorage: AccountScopedDraftStorageProvider
     val recordingPlaybackHandoff: RecordingPlaybackHandoff
     val settingsAccountActions: SettingsAccountActions
+    val connectivity: AppConnectivity
+        get() = error("尚未提供网络状态边界")
+    val recordingCaptureFactory: RecordingCaptureFactory
+        get() = error("尚未提供相机边界")
+    val qiniuUploaderFactory: QiniuUploaderFactory
+        get() = error("尚未提供七牛上传边界")
     /** 预留给 Task10 上传协调器的单消费者会话失效队列；UI 使用 authRepository.events。 */
     val sessionEvents: Flow<SessionLifecycleEvent>
     val revocationWorkerGateway: RevocationWorkerGateway?
@@ -96,20 +147,24 @@ interface AppContainer {
     }
 }
 
-class AndroidAppContainer(context: Context) : AppContainer {
+class AndroidAppContainer(
+    context: Context,
+    dependencies: AndroidAppDependencies = AndroidAppDependencies(),
+) : AppContainer, AutoCloseable {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val tokenVault = AndroidTokenVault(context)
     private val revocationVault = AndroidRevocationVault(context)
     private val revocationScheduler = AndroidRevocationScheduler(context)
     private val revocationRemote = OkHttpRevocationRemote(
-        BuildConfig.API_BASE_URL,
+        dependencies.apiBaseUrl,
         NetworkModule.createRevocationHttpClient(),
     )
     private val revocationExecutor = RevocationExecutor(revocationVault, revocationVault, revocationRemote)
     override val revocationWorkerGateway = RevocationWorkerGateway(revocationExecutor::revoke)
     private val sessionGraph = createProductionSessionGraph(
-        BuildConfig.API_BASE_URL,
+        dependencies.apiBaseUrl,
         tokenVault,
+        clientOverride = dependencies.authenticatedClientFactory(tokenVault),
         revocationTokenSink = revocationVault,
         revocationRemote = revocationRemote,
         revocationScheduler = revocationScheduler,
@@ -142,7 +197,11 @@ class AndroidAppContainer(context: Context) : AppContainer {
     )
     override val recordingPlaybackHandoff = RecordingPlaybackHandoff()
     override val pendingUploadCounter = AccountScopedPendingUploadCounter(draftStorage)
-    override val clock = AppClock(System::currentTimeMillis)
+    override val clock = dependencies.clock
+    override val monotonicClock = dependencies.monotonicClock
+    override val connectivity = dependencies.connectivityFactory(context.applicationContext)
+    override val recordingCaptureFactory = dependencies.recordingCaptureFactory
+    override val qiniuUploaderFactory = dependencies.qiniuUploaderFactory
     override val dispatchers = object : AppDispatchers {
         override val io: CoroutineDispatcher = Dispatchers.IO
         override val default: CoroutineDispatcher = Dispatchers.Default
@@ -167,12 +226,23 @@ class AndroidAppContainer(context: Context) : AppContainer {
             else -> error("仓库尚未提供：$name")
         }
     }
-    override val mediaFactory = MediaFactory { ExoPreviewEngine(context.applicationContext) }
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    override val mediaFactory = object : MediaFactory {
+        override fun createPreviewSession(): PreviewSession = PreviewPlayer(
+            ExoPreviewEngine(context.applicationContext),
+            VocaEasePreviewGrantSource(patientApi),
+        )
+
+        @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+        override fun createReviewPlayer(storage: AccountScopedDraftStorage, playerView: PlayerView?): ReviewPlayer =
+            LinearizedReviewPlayer(Media3ReviewPlayerEngine(context.applicationContext, storage, playerView))
+    }
     private val uploadCoordinator = UploadCoordinator(
         context = context,
         storageProvider = draftStorage,
         remoteFactory = { scopeHash -> VocaEaseUploadRemote(patientApi, scopeHash) },
         nowEpochMillis = clock::nowEpochMilliseconds,
+        uploaderFactory = qiniuUploaderFactory::create,
         onAnalyzing = analysisCoordinator::schedule,
     )
     override val uploadFactory = UploadFactory { uploadCoordinator }
@@ -234,6 +304,11 @@ class AndroidAppContainer(context: Context) : AppContainer {
         }
         tempFiles.cleanupOrphans()
     }
+
+    override fun close() {
+        applicationScope.cancel()
+        patientDatabase.close()
+    }
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {
@@ -244,6 +319,8 @@ private object UnavailableAppContainer : AppContainer {
     private fun unavailable(): Nothing = error("该依赖将在后续任务中提供")
 
     override val clock: AppClock
+        get() = unavailable()
+    override val monotonicClock: AppMonotonicClock
         get() = unavailable()
     override val dispatchers: AppDispatchers
         get() = unavailable()
@@ -268,6 +345,12 @@ private object UnavailableAppContainer : AppContainer {
     override val recordingPlaybackHandoff: RecordingPlaybackHandoff
         get() = unavailable()
     override val settingsAccountActions: SettingsAccountActions
+        get() = unavailable()
+    override val connectivity: AppConnectivity
+        get() = unavailable()
+    override val recordingCaptureFactory: RecordingCaptureFactory
+        get() = unavailable()
+    override val qiniuUploaderFactory: QiniuUploaderFactory
         get() = unavailable()
     override val sessionEvents: Flow<SessionLifecycleEvent>
         get() = unavailable()

@@ -24,7 +24,7 @@ if "$validator" "$debug_manifest" "$test_dir/release-injected.xml" "$network_con
   exit 1
 fi
 
-sed 's#</domain-config>#<domain includeSubdomains="false">localhost</domain></domain-config>#' \
+sed 's#</domain-config>#<domain includeSubdomains="false">evil.example</domain></domain-config>#' \
   "$network_config" > "$test_dir/network-injected.xml"
 if "$validator" "$debug_manifest" "$release_manifest" "$test_dir/network-injected.xml" >/dev/null 2>&1; then
   echo "debug 注入额外明文域必须使校验失败" >&2

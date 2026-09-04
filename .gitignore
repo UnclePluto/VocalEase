@@ -1,4 +1,8 @@
 docs/
+!android-patient/docs/
+!android-patient/docs/qa-device-matrix.md
+!android-patient/docs/privacy-checklist.md
+!android-patient/docs/qiniu-integration-runbook.md
 .DS_Store
 .pytest_cache/
 __pycache__/

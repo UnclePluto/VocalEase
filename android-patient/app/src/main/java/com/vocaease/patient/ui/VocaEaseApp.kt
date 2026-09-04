@@ -78,25 +78,19 @@ import com.vocaease.patient.feature.profile.ProfileScreen
 import com.vocaease.patient.feature.profile.ProfileViewModel
 import com.vocaease.patient.feature.profile.SettingsScreen
 import com.vocaease.patient.feature.profile.SettingsViewModel
-import com.vocaease.patient.core.media.PreviewPlayer
 import com.vocaease.patient.core.media.AccountScopedRecordingArtifactPublisher
 import com.vocaease.patient.core.media.AndroidRecordingAudioFocus
-import com.vocaease.patient.core.media.CameraXRecordingCapture
 import com.vocaease.patient.core.media.DefaultRecordingCoordinator
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingPlayback
-import com.vocaease.patient.core.media.LinearizedReviewPlayer
-import com.vocaease.patient.core.media.Media3ReviewPlayerEngine
 import com.vocaease.patient.core.media.Media3PrivateVideoEngine
 import com.vocaease.patient.core.media.RecordingEnvironmentInterruptionCoordinator
 import com.vocaease.patient.feature.training.AccountScopedPreparationDraftStoreProvider
 import com.vocaease.patient.feature.training.AndroidReadinessSource
-import com.vocaease.patient.feature.training.AndroidPreparationEnvironmentMonitor
 import com.vocaease.patient.feature.training.PreparationScreen
 import com.vocaease.patient.feature.training.PreparationViewModel
 import com.vocaease.patient.feature.training.SavedStatePreparationState
 import com.vocaease.patient.feature.training.VocaEasePreparationSongSource
-import com.vocaease.patient.feature.training.VocaEasePreviewGrantSource
 import com.vocaease.patient.feature.training.VocaEaseTrainingSessionCreator
 import com.vocaease.patient.feature.training.AccountScopedRecordingDraftGateway
 import com.vocaease.patient.feature.training.RecordingScreen
@@ -637,10 +631,7 @@ private fun PreparationRoute(
     var permissionsRequested by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val preview = remember(songId, container) {
-        PreviewPlayer(
-            container.mediaFactory.createPreviewEngine(),
-            VocaEasePreviewGrantSource(container.patientApi),
-        )
+        container.mediaFactory.createPreviewSession()
     }
     val factory = remember(songId, container, activity) {
         viewModelFactory {
@@ -648,8 +639,13 @@ private fun PreparationRoute(
                 PreparationViewModel(
                     songId = songId,
                     songSource = VocaEasePreparationSongSource(container.patientApi),
-                    readinessSource = AndroidReadinessSource(activity, { permissionsRequested }, container.dispatchers.io),
-                    environmentMonitor = AndroidPreparationEnvironmentMonitor(activity.applicationContext),
+                    readinessSource = AndroidReadinessSource(
+                        activity,
+                        { permissionsRequested },
+                        container.dispatchers.io,
+                        container.connectivity::isOnline,
+                    ),
+                    environmentMonitor = container.connectivity.environmentMonitor(),
                     preview = preview,
                     storageProvider = AccountScopedPreparationDraftStoreProvider(container.draftStorage),
                     sessionCreator = VocaEaseTrainingSessionCreator(container.patientApi),
@@ -775,9 +771,9 @@ private fun RecordingRoute(
     val tempFiles = remember(context) { PrivateRecordingTempFiles(context).also { it.cleanupOrphans() } }
     val coordinator = remember(draftId, previewView, lifecycleOwner, playback, storage) {
         DefaultRecordingCoordinator(
-            capture = CameraXRecordingCapture(context, lifecycleOwner, previewView.surfaceProvider),
+            capture = container.recordingCaptureFactory.create(context, lifecycleOwner, previewView.surfaceProvider),
             playback = playback,
-            clockNanos = System::nanoTime,
+            clockNanos = container.monotonicClock::nowNanoseconds,
             tempFiles = tempFiles,
             publisher = AccountScopedRecordingArtifactPublisher(storage),
         )
@@ -879,7 +875,7 @@ private fun ReviewRoute(
         }
     }
     val player = remember(draftId, storage, playerView) {
-        LinearizedReviewPlayer(Media3ReviewPlayerEngine(context, storage, playerView))
+        container.mediaFactory.createReviewPlayer(storage, playerView)
     }
     val gateway = remember(storage) {
         DraftRepository(AccountScopedLocalReviewStore(storage), LocalUploadQueueSignals)

@@ -42,8 +42,8 @@ if [[ "$(xmllint --xpath 'count(/network-security-config/domain-config)' "$netwo
   exit 1
 fi
 
-if [[ "$(xmllint --xpath 'count(/network-security-config/domain-config/domain)' "$network_config")" != "1" ]]; then
-  echo "debug 明文域配置只能包含一个域名" >&2
+if [[ "$(xmllint --xpath 'count(/network-security-config/domain-config/domain)' "$network_config")" != "2" ]]; then
+  echo "debug 明文域配置必须且只能包含两个环回域名" >&2
   exit 1
 fi
 
@@ -52,12 +52,13 @@ if [[ "$(xmllint --xpath 'string(/network-security-config/domain-config/@clearte
   exit 1
 fi
 
-if [[ "$(xmllint --xpath 'normalize-space(/network-security-config/domain-config/domain)' "$network_config")" != "10.0.2.2" ]]; then
-  echo "debug 明文域必须且只能是 10.0.2.2" >&2
+if [[ "$(xmllint --xpath 'normalize-space(/network-security-config/domain-config/domain[1])' "$network_config")" != "10.0.2.2" ]] ||
+   [[ "$(xmllint --xpath 'normalize-space(/network-security-config/domain-config/domain[2])' "$network_config")" != "localhost" ]]; then
+  echo "debug 明文域必须且只能依次是 10.0.2.2 与 localhost" >&2
   exit 1
 fi
 
-if [[ "$(xmllint --xpath 'string(/network-security-config/domain-config/domain/@includeSubdomains)' "$network_config")" != "false" ]]; then
+if [[ "$(xmllint --xpath 'count(/network-security-config/domain-config/domain[@includeSubdomains="false"])' "$network_config")" != "2" ]]; then
   echo "debug 明文域不得包含子域" >&2
   exit 1
 fi

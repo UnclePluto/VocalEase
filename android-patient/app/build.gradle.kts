@@ -58,6 +58,8 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    sourceSets.getByName("androidTest").assets.srcDir("src/test/resources")
 }
 
 val validateReleaseApiBaseUrl = tasks.register<ValidateReleaseApiBaseUrlTask>("validateReleaseApiBaseUrl") {
