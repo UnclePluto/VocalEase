@@ -1,0 +1,194 @@
+name: VocaEase 构建与生产发布
+
+on:
+  push:
+    branches: [codex/production-deployment]
+    tags: ["deploy-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vocaease-production
+  cancel-in-progress: false
+
+env:
+  ACR_REGISTRY: crpi-vu9eu0iguupfgpzi.cn-guangzhou.personal.cr.aliyuncs.com
+  ACR_IMAGE: crpi-vu9eu0iguupfgpzi.cn-guangzhou.personal.cr.aliyuncs.com/dypluto/voca-ease
+
+jobs:
+  verify:
+    name: 验证服务端和后台
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: 安装服务端依赖
+        working-directory: server
+        run: |
+          python -m pip install uv==0.9.0
+          uv sync --frozen
+      - name: 服务端测试与迁移检查
+        working-directory: server
+        env:
+          DJANGO_SETTINGS_MODULE: vocaease.settings.test
+        run: |
+          uv run --no-sync pytest -q
+          uv run --no-sync python manage.py check
+          uv run --no-sync python manage.py makemigrations --check --dry-run
+          uv run --no-sync python manage.py spectacular --file /tmp/vocaease-schema.yaml --validate --fail-on-warn
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: 后台测试与构建
+        working-directory: web-admin
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm test --run
+          pnpm typecheck
+          pnpm lint
+          pnpm build
+
+  publish:
+    name: 构建并推送 ACR 镜像
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: 构建服务端
+        id: server
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/docker/server.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.ACR_IMAGE }}:server-${{ github.sha }}
+          cache-from: type=gha,scope=vocaease-server
+          cache-to: type=gha,mode=max,scope=vocaease-server
+      - name: 构建后台
+        id: web
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/docker/web.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.ACR_IMAGE }}:web-${{ github.sha }}
+          cache-from: type=gha,scope=vocaease-web
+          cache-to: type=gha,mode=max,scope=vocaease-web
+      - name: 发布数据库基础镜像
+        id: postgres
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/docker/postgres.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.ACR_IMAGE }}:postgres-${{ github.sha }}
+      - name: 发布 Redis 基础镜像
+        id: redis
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/docker/redis.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.ACR_IMAGE }}:redis-${{ github.sha }}
+      - name: 保存固定摘要的发布包
+        env:
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          SERVER_DIGEST: ${{ steps.server.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.postgres.outputs.digest }}
+          REDIS_DIGEST: ${{ steps.redis.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          images = {name + '_IMAGE': os.environ['ACR_IMAGE'] + '@' + os.environ[name + '_DIGEST'] for name in ('WEB', 'SERVER', 'POSTGRES', 'REDIS')}
+          Path('deploy/images.json').write_text(json.dumps(images, indent=2))
+          PY
+          tar -C deploy -cf release.tar compose.prod.yaml validate-production.py deploy-production.sh openresty.vocaease.conf images.json
+      - name: 在临时运行器验证生产容器启动
+        run: |
+          python3 - <<'PY'
+          import os, secrets
+          from pathlib import Path
+          text = Path('deploy/production.env.example').read_text()
+          values = {'DJANGO_SECRET_KEY': secrets.token_hex(32), 'POSTGRES_PASSWORD': secrets.token_hex(32), 'QINIU_ACCESS_KEY': 'ci-placeholder', 'QINIU_SECRET_KEY': 'ci-placeholder', 'QINIU_BUCKET': 'ci-no-uploads'}
+          lines = []
+          for line in text.splitlines():
+              key = line.split('=', 1)[0]
+              lines.append(key + '=' + values[key] if key in values else line)
+          path = Path(os.environ['RUNNER_TEMP']) / 'vocaease-smoke.env'
+          path.write_text('\n'.join(lines) + '\n')
+          path.chmod(0o600)
+          PY
+          export APP_ENV_FILE="$RUNNER_TEMP/vocaease-smoke.env"
+          python3 deploy/validate-production.py "$APP_ENV_FILE" deploy
+          docker network create whest_Lan
+          compose() { docker compose -p vocaease-ci --env-file "$APP_ENV_FILE" --env-file deploy/images.env -f deploy/compose.prod.yaml "$@"; }
+          compose up -d --wait --wait-timeout 120 postgres redis
+          compose run --rm --no-deps server uv run --no-sync python manage.py migrate --noinput
+          compose up -d --wait --wait-timeout 180 server celery celery-beat web
+          curl -fsS --max-time 15 -H 'Host: vocaease.whestsun.com' -H 'X-Forwarded-Proto: https' http://127.0.0.1:19080/api/schema/ > /tmp/production-schema.yaml
+          grep -q openapi /tmp/production-schema.yaml
+      - name: 清理临时运行器的测试容器
+        if: always()
+        run: |
+          if [ -f deploy/images.env ] && [ -f "$RUNNER_TEMP/vocaease-smoke.env" ]; then
+            export APP_ENV_FILE="$RUNNER_TEMP/vocaease-smoke.env"
+            docker compose -p vocaease-ci --env-file "$APP_ENV_FILE" --env-file deploy/images.env -f deploy/compose.prod.yaml down -v
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vocaease-release-${{ github.sha }}
+          path: release.tar
+          retention-days: 30
+
+  deploy:
+    name: 发布到独立 Compose 项目
+    if: startsWith(github.ref, 'refs/tags/deploy-')
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vocaease-release-${{ github.sha }}
+      - name: 配置专用发布密钥
+        env:
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/vocaease_deploy
+          printf '%s\n' "$SERVER_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/vocaease_deploy ~/.ssh/known_hosts
+      - name: 传送并部署指定版本
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/vocaease_deploy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            motioncare@171.43.135.71 "deploy $RELEASE_SHA" < release.tar

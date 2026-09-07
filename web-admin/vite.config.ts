@@ -12,5 +12,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     restoreMocks: true,
+    // 页面测试会挂载完整 Ant Design 界面，限制并发以适配 CI 的有限 CPU。
+    maxWorkers: 2,
   },
 })

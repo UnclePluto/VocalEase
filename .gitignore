@@ -11,3 +11,10 @@ __pycache__/
 .superpowers/
 web-admin/node_modules/
 web-admin/dist/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+server/.venv/
+deploy/releases/

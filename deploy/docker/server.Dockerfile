@@ -18,4 +18,4 @@ USER app
 
 ENTRYPOINT ["/usr/local/bin/vocaease-entrypoint"]
 
-CMD ["uv", "run", "--no-sync", "python", "manage.py", "runserver", "0.0.0.0:8000"]
+CMD ["uv", "run", "--no-sync", "gunicorn", "vocaease.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--worker-class", "gthread", "--threads", "4", "--timeout", "90", "--access-logfile", "-", "--error-logfile", "-"]

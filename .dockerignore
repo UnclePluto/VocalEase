@@ -7,3 +7,9 @@ web-admin/dist
 .git
 .worktrees
 .superpowers
+.env
+.env.*
+**/*.pem
+**/*.key
+android-patient
+docs
