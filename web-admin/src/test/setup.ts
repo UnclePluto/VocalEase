@@ -1,5 +1,4 @@
 import '@testing-library/jest-dom/vitest'
-import process from 'node:process'
 import { cleanup, configure } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 
@@ -9,7 +8,7 @@ import { clearVisibleTestCookies } from './cookies'
 import { server } from './server'
 
 // CI 的 jsdom 首次挂载完整管理界面显著慢于开发机；保持断言，增加异步等待预算。
-configure({ asyncUtilTimeout: process.env.CI ? 10000 : 1000 })
+configure({ asyncUtilTimeout: 10000 })
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>()
