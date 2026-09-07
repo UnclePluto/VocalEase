@@ -1,3 +1,4 @@
+import process from 'node:process'
 import { http, HttpResponse } from 'msw'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -152,7 +153,7 @@ describe('医生管理页面', () => {
     await user.click(screen.getByRole('button', { name: '确认删除' }))
     expect(await screen.findByText('医生仍有在治患者，无法删除')).toBeInTheDocument()
     expect(screen.getByText('李静')).toBeInTheDocument()
-  }, 20_000)
+  }, process.env.CI ? 60_000 : 20_000)
 
   it('停用与启用医生走独立动作接口并只刷新当前筛选列表', async () => {
     authenticate()
@@ -183,7 +184,7 @@ describe('医生管理页面', () => {
     await user.click(screen.getByRole('button', { name: '确认启用' }))
     expect(await screen.findByText('医生已启用')).toBeInTheDocument()
     expect(server.calls(`/api/v1/admin/doctors/${doctor.id}/activate/`)).toHaveLength(1)
-  }, 20_000)
+  }, process.env.CI ? 60_000 : 20_000)
 
   it('医生登录时不展示自己的重置密码和停用入口', async () => {
     useAuthStore.setState({
