@@ -1,9 +1,8 @@
-name: VocaEase 构建与生产发布
+name: VocaEase 构建与镜像验证
 
 on:
   push:
     branches: [codex/production-deployment]
-    tags: ["deploy-*"]
   workflow_dispatch:
 
 permissions:
@@ -165,30 +164,3 @@ jobs:
           name: vocaease-release-${{ github.sha }}
           path: release.tar
           retention-days: 30
-
-  deploy:
-    name: 发布到独立 Compose 项目
-    if: startsWith(github.ref, 'refs/tags/deploy-')
-    needs: publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: production
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: vocaease-release-${{ github.sha }}
-      - name: 配置专用发布密钥
-        env:
-          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
-          SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/vocaease_deploy
-          printf '%s\n' "$SERVER_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/vocaease_deploy ~/.ssh/known_hosts
-      - name: 传送并部署指定版本
-        env:
-          RELEASE_SHA: ${{ github.sha }}
-        run: |
-          ssh -i ~/.ssh/vocaease_deploy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            motioncare@171.43.135.71 "deploy $RELEASE_SHA" < release.tar

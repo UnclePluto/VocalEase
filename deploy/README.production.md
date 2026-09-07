@@ -4,7 +4,7 @@
 
 ## 发布链路
 
-分支推送执行测试、构建并上传 ACR，不部署。显式推送 `deploy-*` 标签才执行服务器部署。四种镜像（Web、Django/Celery、PostgreSQL 17、Redis 8）均通过 ACR 拉取，以完整提交 SHA 标记，实际部署固定镜像摘要。GitHub 的 `vocaease-release-<SHA>` 工件包含配置和摘要，不包含生产密钥。
+分支推送执行测试、构建并上传 ACR，不部署。显式推送 `deploy-*` 标签才执行服务器部署；发布工作流只获取同一提交已经成功验证的发布包，不重新构建镜像。四种镜像（Web、Django/Celery、PostgreSQL 17、Redis 8）均通过 ACR 拉取，以完整提交 SHA 标记，实际部署固定镜像摘要。GitHub 的 `vocaease-release-<SHA>` 工件包含配置和摘要，不包含生产密钥。
 
 生产配置保存于服务器 `/home/motioncare/vocaease-production/.env`，权限 600。仓库仅保留示例。ACR 密码及专用 SSH 发布密钥存放 GitHub Actions Secrets；专用公钥的强制命令只接受本项目发布包，不提供交互 Shell。
 

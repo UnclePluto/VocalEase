@@ -1,0 +1,46 @@
+name: VocaEase 发布已验证版本
+
+on:
+  push:
+    tags: ["deploy-*"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: vocaease-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 将已验证镜像发布到独立 Compose 项目
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: 获取同一提交已通过验证的发布包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          run_id=$(gh api "repos/$REPO/actions/workflows/production.yml/runs?head_sha=$RELEASE_SHA&status=success&per_page=10" --jq '.workflow_runs | map(select(.head_branch == "codex/production-deployment")) | .[0].id // empty')
+          test -n "$run_id" || { echo '该提交尚无成功构建，拒绝部署。'; exit 1; }
+          gh run download "$run_id" -R "$REPO" -n "vocaease-release-$RELEASE_SHA"
+          test -s release.tar
+      - name: 配置专用发布密钥
+        env:
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/vocaease_deploy
+          printf '%s\n' "$SERVER_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/vocaease_deploy ~/.ssh/known_hosts
+      - name: 传送并部署指定版本
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/vocaease_deploy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            motioncare@171.43.135.71 "deploy $RELEASE_SHA" < release.tar
