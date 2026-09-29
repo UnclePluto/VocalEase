@@ -1,7 +1,7 @@
 import { ApiError } from '../../api/errors'
 import { apiRequest } from '../../api/client'
 import { useAuthStore } from '../../auth/store'
-import type { AnalysisTask, PaginatedSongs, Song, SongListQuery, SongWrite, UploadGrant } from './types'
+import type { AnalysisTask, PaginatedSongs, Song, SongListQuery, SongResourceField, SongTrack, SongWrite, UploadGrant } from './types'
 
 export const songKeys = {
   all: ['songs'] as const,
@@ -38,6 +38,10 @@ export async function createSongReliably(values: SongWrite, signal?: AbortSignal
       && existing.genre === values.genre
       && existing.language === values.language
       && existing.duration_seconds === values.duration_seconds
+      && (existing.ingestion_mode ?? 'existing') === (values.ingestion_mode ?? 'existing')
+      && (existing.vocal_asset ?? null) === (values.vocal_asset ?? null)
+      && (existing.accompaniment_asset ?? null) === (values.accompaniment_asset ?? null)
+      && (existing.lyrics_asset ?? null) === (values.lyrics_asset ?? null)
     if (!matchesSubmittedSong) {
       throw new ApiError('song_reconciliation_conflict', '已有歌曲与本次提交内容不一致', error.requestId, undefined, 409)
     }
@@ -54,8 +58,25 @@ export function getSongAnalysis(id: string, signal?: AbortSignal) { return apiRe
 export function requestUploadGrant(file: File, songId?: string, signal?: AbortSignal) {
   return apiRequest<UploadGrant>('/v1/admin/songs/upload-grants/', { method: 'POST', body: JSON.stringify({ mime: file.type, size: file.size, ...(songId ? { song_id: songId } : {}) }), signal })
 }
+export function requestSongResourceGrant(file: File, mediaType: 'song_source' | 'song_vocal' | 'song_accompaniment' | 'lyrics', songId?: string, signal?: AbortSignal) {
+  return apiRequest<UploadGrant>('/v1/admin/songs/upload-grants/', { method: 'POST', body: JSON.stringify({ media_type: mediaType, mime: file.type, size: file.size, ...(songId ? { song_id: songId } : {}) }), signal })
+}
+export type SongResourceChange = { updates: Partial<Record<SongResourceField, string>>; expected: Partial<Record<SongResourceField, string | null>> }
+export function updateSongResources(id: string, change: SongResourceChange, signal?: AbortSignal) {
+  return apiRequest<Song>(`/v1/admin/songs/${id}/resources/`, { method: 'PATCH', body: JSON.stringify(change), signal })
+}
+export async function updateSongResourcesReliably(id: string, change: SongResourceChange, signal?: AbortSignal) {
+  try { return await updateSongResources(id, change, signal) }
+  catch (error) {
+    if (error instanceof ApiError && error.status === 409) throw error
+    const current = await getSong(id, signal)
+    if (Object.entries(change.updates).every(([field, assetId]) => current[field as SongResourceField] === assetId)) return current
+    throw error
+  }
+}
+export function getSongLyrics(id: string, signal?: AbortSignal) { return apiRequest<{ lines: Array<{ time_ms: number; text: string }> }>(`/v1/admin/songs/${id}/lyrics/`, { signal }) }
 export function confirmUpload(assetId: string, signal?: AbortSignal) { return apiRequest(`/v1/admin/media/${assetId}/complete/`, { method: 'POST', body: JSON.stringify({}), signal }) }
-export function requestPreview(id: string, signal?: AbortSignal) { return apiRequest<{ url: string; expires_at: string }>(`/v1/admin/songs/${id}/preview/`, { method: 'POST', signal }) }
+export function requestPreview(id: string, signal?: AbortSignal, track: SongTrack = 'source') { return apiRequest<{ url: string; expires_at: string }>(`/v1/admin/songs/${id}/preview/`, { method: 'POST', body: JSON.stringify({ track }), signal }) }
 /** callbackUrl 开启时，七牛将业务服务的回调响应原样返回给浏览器。 */
 export function validateQiniuCallback(body: string, expectedAssetId: string) {
   try {

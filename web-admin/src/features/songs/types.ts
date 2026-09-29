@@ -1,5 +1,7 @@
 export type SongAnalysisStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'retrying'
 export type SongPublicationStatus = 'draft' | 'published'
+export type SongResourceField = 'vocal_asset' | 'accompaniment_asset' | 'lyrics_asset'
+export type SongTrack = 'source' | 'vocal' | 'accompaniment'
 
 export type Song = {
   id: string
@@ -9,6 +11,11 @@ export type Song = {
   language: string
   duration_seconds: number
   source_asset: string | null
+  vocal_asset?: string | null
+  accompaniment_asset?: string | null
+  lyrics_asset?: string | null
+  ingestion_mode?: 'existing' | 'manual'
+  artifacts?: SongArtifacts
   analysis_status: SongAnalysisStatus
   publication_status: SongPublicationStatus
   uploaded_at: string
@@ -17,6 +24,10 @@ export type Song = {
 export type SongWrite = Pick<Song, 'id' | 'title' | 'artist' | 'genre' | 'language' | 'duration_seconds'> & {
   source_asset: string
   auto_analyze?: boolean
+  ingestion_mode?: 'existing' | 'manual'
+  vocal_asset?: string
+  accompaniment_asset?: string
+  lyrics_asset?: string
 }
 
 export type SongListQuery = {
