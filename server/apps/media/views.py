@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from urllib.parse import parse_qs
 
 from django.conf import settings
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -38,6 +40,49 @@ from common.api.schema import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _single_byte_range(value: str, size: int) -> tuple[int, int]:
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
+    if not match or size <= 0 or not any(match.groups()):
+        raise ValueError("无效的字节范围")
+    first, last = match.groups()
+    if first:
+        start = int(first)
+        end = int(last) if last else size - 1
+        if start >= size or end < start:
+            raise ValueError("字节范围超出文件")
+        return start, min(end, size - 1)
+    suffix = int(last)
+    if suffix <= 0:
+        raise ValueError("无效的字节范围")
+    return max(0, size - suffix), size - 1
+
+
+class _FileRange:
+    def __init__(self, source, start: int, length: int):
+        self.source = source
+        self.remaining = length
+        source.seek(start)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self.remaining:
+            self.close()
+            raise StopIteration
+        chunk = self.source.read(min(64 * 1024, self.remaining))
+        if not chunk:
+            self.close()
+            raise StopIteration
+        self.remaining -= len(chunk)
+        if not self.remaining:
+            self.close()
+        return chunk
+
+    def close(self):
+        self.source.close()
 
 
 def _patient_for_user(user) -> PatientProfile:
@@ -229,7 +274,24 @@ class LocalPrivateDownloadView(APIView):
             source = backend.verify_and_open_private(request.query_params.get("signature", ""), object_key, asset_id=asset.id, expected_generation=asset.manifest_generation)
         except StorageValidationError as exc:
             raise PermissionDenied(str(exc), code="media_private_url_invalid") from exc
-        return FileResponse(source, content_type="application/octet-stream", as_attachment=False)
+        size = os.fstat(source.fileno()).st_size
+        byte_range = request.headers.get("Range")
+        if byte_range:
+            try:
+                start, end = _single_byte_range(byte_range, size)
+            except ValueError:
+                source.close()
+                response = HttpResponse(status=416)
+                response["Content-Range"] = f"bytes */{size}"
+                response["Accept-Ranges"] = "bytes"
+                return response
+            response = StreamingHttpResponse(_FileRange(source, start, end - start + 1), status=206, content_type=asset.mime)
+            response["Content-Range"] = f"bytes {start}-{end}/{size}"
+            response["Content-Length"] = str(end - start + 1)
+        else:
+            response = FileResponse(source, content_type=asset.mime, as_attachment=False)
+        response["Accept-Ranges"] = "bytes"
+        return response
 
 
 class QiniuCallbackView(APIView):

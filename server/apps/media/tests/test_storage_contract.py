@@ -280,7 +280,28 @@ def test_local_upload_complete_and_private_download_are_authorized_and_do_not_ex
     settings.MEDIA_BACKEND = "qiniu"
     download_response = api_client.get(private_url)
     assert download_response.status_code == 200
+    assert download_response["Accept-Ranges"] == "bytes"
+    assert download_response["Content-Type"] == "audio/mpeg"
     assert b"".join(download_response.streaming_content) == content
+
+    partial = api_client.get(private_url, HTTP_RANGE="bytes=3-9")
+    assert partial.status_code == 206
+    assert partial["Accept-Ranges"] == "bytes"
+    assert partial["Content-Range"] == f"bytes 3-9/{len(content)}"
+    assert partial["Content-Length"] == "7"
+    assert partial["Content-Type"] == "audio/mpeg"
+    assert b"".join(partial.streaming_content) == content[3:10]
+
+    suffix = api_client.get(private_url, HTTP_RANGE="bytes=-5")
+    assert suffix.status_code == 206
+    assert b"".join(suffix.streaming_content) == content[-5:]
+
+    unsatisfiable = api_client.get(private_url, HTTP_RANGE="bytes=999-")
+    assert unsatisfiable.status_code == 416
+    assert unsatisfiable["Content-Range"] == f"bytes */{len(content)}"
+
+    malformed = api_client.get(private_url, HTTP_RANGE="bytes=0-2,4-6")
+    assert malformed.status_code == 416
 
     settings.MEDIA_BACKEND = "local"
     backend = get_storage_backend()
