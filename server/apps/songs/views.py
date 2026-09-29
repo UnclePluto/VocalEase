@@ -29,7 +29,7 @@ from .selectors import songs_for_admin, songs_for_patient
 from .serializers import (PatientSongListQuerySerializer, PatientSongReadSerializer,
                           ReanalyzeSerializer, SongListQuerySerializer,
                           SongReadSerializer, SongUploadGrantSerializer,
-                          SongWriteSerializer)
+                          SongWriteSerializer, SongPreviewSerializer)
 from .services import (SourceAssetInvalid, issue_song_upload_grant, preview_source,
                        publish_song, soft_delete_song, update_song, create_song,
                        validate_source_asset)
@@ -149,9 +149,12 @@ class AdminSongUnpublishView(APIView):
 class AdminSongPreviewView(APIView):
     permission_classes = [IsAdminNamespaceUser]
 
-    @extend_schema(request=None, responses={200: ApiEnvelopeSerializer})
+    @extend_schema(request=SongPreviewSerializer, responses={200: ApiEnvelopeSerializer})
     def post(self, request, song_id):
-        private_url = preview_source(actor=request.user, request_id=request.request_id, song=get_object_or_404(songs_for_admin(), pk=song_id))
+        serializer = SongPreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from .resources import preview_song_resource
+        private_url = preview_song_resource(actor=request.user, request_id=request.request_id, song=get_object_or_404(songs_for_admin(), pk=song_id), **serializer.validated_data)
         return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)
 
 
@@ -166,6 +169,9 @@ class AdminSongReanalyzeView(APIView):
         serializer = ReanalyzeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         song = get_object_or_404(songs_for_admin().select_related("source_asset"), pk=song_id)
+        if song.ingestion_mode == Song.IngestionMode.MANUAL:
+            from .services import SongStateConflict
+            raise SongStateConflict("人工歌曲不支持重新分析", code="manual_song_no_analysis")
         if not song.source_asset:
             return Response({"code": "song_source_invalid", "message": "歌曲源媒体不可用或验证失败", "data": None, "request_id": request.request_id}, status=status.HTTP_409_CONFLICT)
         task = request_song_analysis(song=song, source_asset=song.source_asset, **serializer.validated_data)

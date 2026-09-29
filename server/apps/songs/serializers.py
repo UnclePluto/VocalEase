@@ -57,10 +57,19 @@ class PatientSongListQuerySerializer(PaginationQuerySerializer):
 
 
 class SongUploadGrantSerializer(serializers.Serializer):
-    mime = serializers.ChoiceField(choices=("audio/mpeg", "audio/wav", "audio/flac"))
+    mime = serializers.CharField(max_length=127)
     size = serializers.IntegerField(min_value=1, max_value=50 * 1024 * 1024)
     song_id = serializers.UUIDField(required=False)
     media_type = serializers.ChoiceField(choices=("song_source", "song_vocal", "song_accompaniment", "lyrics"), required=False, default="song_source")
+
+
+class SongResourcesUpdateSerializer(serializers.Serializer):
+    updates = serializers.DictField(child=serializers.UUIDField())
+    expected = serializers.DictField(child=serializers.UUIDField(allow_null=True))
+
+
+class SongPreviewSerializer(serializers.Serializer):
+    track = serializers.ChoiceField(choices=("source", "vocal", "accompaniment"), required=False, default="source")
 
 
 class ReanalyzeSerializer(serializers.Serializer):

@@ -197,6 +197,8 @@ def create_song(*, actor, request_id: str, song_id: UUID | None, source_asset: U
 def update_song(*, actor, request_id: str, song: Song, source_asset: UUID | None = None, **values) -> Song:
     with transaction.atomic():
         locked = Song.objects.select_for_update().get(pk=song.pk, deleted_at__isnull=True)
+        if locked.ingestion_mode == Song.IngestionMode.MANUAL and source_asset is not None:
+            raise SongStateConflict("人工歌曲暂不支持替换原曲")
         editable = {key: value for key, value in values.items() if key in {"title", "artist", "genre", "language", "duration_seconds"}}
         if source_asset is not None and source_asset != locked.source_asset_id:
             asset = _require_bound_source(song_id=locked.id, asset_id=source_asset, require_intent=True)
@@ -268,7 +270,7 @@ def publish_song(*, actor, request_id: str, song: Song, publish: bool) -> Song:
                 status=AnalysisTask.Status.SUCCEEDED,
                 analysis_result__isnull=False,
             ).exists()
-            if locked.analysis_status != Song.AnalysisStatus.SUCCEEDED or not locked.source_asset or not has_current_result:
+            if not locked.source_asset or (locked.ingestion_mode != Song.IngestionMode.MANUAL and (locked.analysis_status != Song.AnalysisStatus.SUCCEEDED or not has_current_result)):
                 raise SongStateConflict("仅分析成功且源媒体真实存在的歌曲可以发布", code="song_not_publishable")
             try:
                 validate_source_asset(song=locked, asset=locked.source_asset)

@@ -1,6 +1,8 @@
 from uuid import UUID
 
 from django.db import transaction
+from django.conf import settings
+from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import ValidationError
 
 from apps.audit.services import record
@@ -8,7 +10,7 @@ from apps.media.models import MediaAsset
 from apps.media.services import create_upload_grant
 
 from .models import Song, SongUploadIntent
-from .services import SourceAssetInvalid, SourceVerificationTemporary, backend_for_asset, validate_source_asset
+from .services import SourceAssetInvalid, SourceVerificationTemporary, SongStateConflict, backend_for_asset, preview_source
 
 
 RESOURCE_TYPES = {"vocal_asset": "song_vocal", "accompaniment_asset": "song_accompaniment", "lyrics_asset": "lyrics"}
@@ -51,3 +53,47 @@ def issue_optional_song_upload_grant(*, actor, request_id: str, song_id: UUID | 
     asset, grant = create_upload_grant(owner_type="song", owner_id=song_id, media_type=media_type, mime=mime, size=size)
     record(actor=actor, action="song.resource_upload_grant", target=asset, changes={"song_id": str(song_id), "media_type": media_type}, request_id=request_id)
     return song_id, asset, grant
+
+
+def update_song_resources(*, actor, request_id: str, song: Song, updates: dict, expected: dict) -> Song:
+    if not updates or set(updates) - RESOURCE_TYPES.keys() or set(expected) != set(updates):
+        raise ValidationError({"resources": "资源字段或预期旧值无效"})
+    with transaction.atomic():
+        locked = Song.objects.select_for_update().get(pk=song.pk, deleted_at__isnull=True)
+        if locked.ingestion_mode != Song.IngestionMode.MANUAL:
+            raise SongStateConflict("仅人工歌曲支持维护资源")
+        for field, new_id in updates.items():
+            if new_id is None or str(getattr(locked, f"{field}_id") or "") != str(expected[field] or ""):
+                raise SongStateConflict("歌曲资源已被其他管理员修改", code="song_resource_conflict")
+            setattr(locked, field, validate_song_resource(song_id=locked.id, asset_id=new_id, media_type=RESOURCE_TYPES[field]))
+        locked.save(update_fields=[*updates, "updated_at"])
+        record(actor=actor, action="song.resources_update", target=locked, changes={field: {"from": str(expected[field]) if expected[field] else None, "to": str(value)} for field, value in updates.items()}, request_id=request_id)
+        return locked
+
+
+def preview_song_resource(*, actor, request_id: str, song: Song, track: str):
+    if track == "source":
+        return preview_source(actor=actor, request_id=request_id, song=song)
+    field = {"vocal": "vocal_asset", "accompaniment": "accompaniment_asset"}.get(track)
+    if field is None:
+        raise ValidationError({"track": "不支持的音轨"})
+    asset_id = getattr(song, f"{field}_id")
+    if not asset_id:
+        from django.http import Http404
+        raise Http404
+    asset = validate_song_resource(song_id=song.id, asset_id=asset_id, media_type=RESOURCE_TYPES[field])
+    backend = backend_for_asset(asset)
+    from apps.media.backends.local import LocalStorageBackend
+    private = backend.create_private_url(asset.object_key, ttl_seconds=settings.MEDIA_PRIVATE_URL_TTL_SECONDS, **({"asset_id": asset.id, "expected_generation": asset.manifest_generation} if isinstance(backend, LocalStorageBackend) else {}))
+    record(actor=actor, action="song.preview_authorized", target=song, changes={"asset_id": str(asset.id), "media_type": asset.media_type}, request_id=request_id)
+    return private
+
+
+def read_song_lyrics(*, song: Song) -> list[dict]:
+    if not song.lyrics_asset_id:
+        from django.http import Http404
+        raise Http404
+    asset = validate_song_resource(song_id=song.id, asset_id=song.lyrics_asset_id, media_type="lyrics")
+    from apps.media.readers import read_verified_asset_bytes
+    from .lyrics import parse_lrc
+    return parse_lrc(read_verified_asset_bytes(asset=asset, max_bytes=1024 * 1024))
