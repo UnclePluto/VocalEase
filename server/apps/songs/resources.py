@@ -28,6 +28,15 @@ def validate_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) ->
         raise SourceAssetInvalid("歌曲资源验证失败", code="song_resource_invalid")
     if asset.backend == "qiniu" and (not asset.etag or asset.etag != metadata.etag):
         raise SourceAssetInvalid("歌曲资源验证失败", code="song_resource_invalid")
+    if media_type == "lyrics":
+        from apps.media.readers import read_verified_asset_bytes
+        from .lyrics import parse_lrc
+        try:
+            parse_lrc(read_verified_asset_bytes(asset=asset, max_bytes=1024 * 1024))
+        except Exception as exc:
+            if isinstance(exc, (ValidationError, SourceAssetInvalid, SourceVerificationTemporary)):
+                raise
+            raise SourceVerificationTemporary("歌词存储暂时不可用") from exc
     return asset
 
 
