@@ -14,6 +14,17 @@ const song: Song = {
 function envelope<T>(data: T) { return { code: 'ok', message: '', data, request_id: 'preview-test' } }
 
 describe('AudioPlayer', () => {
+  it('人工歌曲可试听人声并查看歌词', async () => {
+    server.use(
+      http.post(`/api/v1/admin/songs/${song.id}/preview/`, () => HttpResponse.json(envelope({ url: 'https://private.example/vocal.mp3', expires_at: '2026-09-29T00:10:00Z' }))),
+      http.get(`/api/v1/admin/songs/${song.id}/lyrics/`, () => HttpResponse.json(envelope({ lines: [{ time_ms: 1000, text: '第一句' }] }))),
+    )
+    render(<AudioPlayer song={{ ...song, ingestion_mode: 'manual' }} artifacts={{ source: true, vocal: true, lyrics: true }} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: '人声试听' }))
+    expect(await screen.findByLabelText('正在试听人声')).toBeInTheDocument()
+    expect(await screen.findByText('第一句')).toBeInTheDocument()
+    expect(server.lastJson(`/api/v1/admin/songs/${song.id}/preview/`)).toEqual({ track: 'vocal' })
+  })
   it('没有真实分析产物时禁用伴奏试听', () => {
     render(<AudioPlayer song={song} artifacts={{}} onClose={vi.fn()} />)
     expect(screen.getByRole('button', { name: '伴奏（不可用）' })).toBeDisabled()
