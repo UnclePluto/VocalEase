@@ -204,6 +204,7 @@ textarea, select { font: inherit; }
 .song-resource-field label { font-weight: 500; }
 .song-resource-picker { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .song-resource-filename { min-width: 0; max-width: 100%; }
+.song-duration-status { margin: 0 0 18px; }
 .ant-modal audio { width: 100%; margin-top: 16px; }
 .patient-data-error, .media-playback-error { margin: 16px 0; }
 .patient-data-page { display: grid; gap: 16px; }

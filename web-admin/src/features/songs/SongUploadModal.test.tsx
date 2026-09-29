@@ -7,6 +7,11 @@ import { SongUploadModal } from './SongUploadModal'
 import { useAuthStore } from '../../auth/store'
 import { server } from '../../test/server'
 
+vi.mock('./audioDuration', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./audioDuration')>()),
+  useAudioDuration: (file?: File | null) => ({ file: file ?? undefined, seconds: file ? 97 : undefined, loading: false }),
+}))
+
 const songId = '10000000-0000-0000-0000-000000000010'
 const assetId = '20000000-0000-0000-0000-000000000010'
 
@@ -15,7 +20,7 @@ function envelope<T>(data: T) {
 }
 
 const createdSong = {
-  id: songId, title: '甜蜜蜜', artist: '邓丽君', genre: '流行', language: '中文', duration_seconds: 180,
+  id: songId, title: '甜蜜蜜', artist: '邓丽君', genre: '流行', language: '中文', duration_seconds: 97,
   source_asset: assetId, analysis_status: 'pending', publication_status: 'draft', uploaded_at: '2026-08-13T00:00:00Z',
 }
 
@@ -56,7 +61,7 @@ describe('SongUploadModal', () => {
     expect(server.calls().map((call) => call.path)).toEqual(expect.arrayContaining([
       '/api/v1/admin/songs/upload-grants/', `/api/v1/admin/media/${assetId}/complete/`, '/api/v1/admin/songs/',
     ]))
-    expect(server.lastJson('/api/v1/admin/songs/')).toMatchObject({ id: songId, source_asset: assetId, title: '甜蜜蜜' })
+    expect(server.lastJson('/api/v1/admin/songs/')).toMatchObject({ id: songId, source_asset: assetId, title: '甜蜜蜜', duration_seconds: 97 })
   })
 
   it('创建歌曲失败时保留表单且可以重试，不会双重提交', async () => {

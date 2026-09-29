@@ -5,6 +5,11 @@ import { expect, it, vi } from 'vitest'
 import { server } from '../../test/server'
 import { SongManualUploadModal } from './SongManualUploadModal'
 
+vi.mock('./audioDuration', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./audioDuration')>()),
+  useAudioDuration: (file?: File | null) => ({ file: file ?? undefined, seconds: file ? 97 : undefined, loading: false }),
+}))
+
 const songId = '10000000-0000-0000-0000-000000000010'
 const sourceId = '20000000-0000-0000-0000-000000000010'
 const vocalId = '20000000-0000-0000-0000-000000000011'
@@ -31,7 +36,7 @@ it('要求原曲并按音轨类型上传资源后创建人工歌曲', async () =
   fireEvent.change(screen.getByLabelText('歌手'), { target: { value: '歌手' } })
   fireEvent.click(screen.getByRole('button', { name: '保存人工歌曲' }))
   await waitFor(() => expect(done).toHaveBeenCalledWith(songId))
-  expect(server.lastJson('/api/v1/admin/songs/')).toMatchObject({ ingestion_mode: 'manual', source_asset: sourceId, vocal_asset: vocalId })
+  expect(server.lastJson('/api/v1/admin/songs/')).toMatchObject({ ingestion_mode: 'manual', source_asset: sourceId, vocal_asset: vocalId, duration_seconds: 97 })
   expect(server.calls('/api/v1/admin/songs/upload-grants/')).toHaveLength(2)
 })
 
