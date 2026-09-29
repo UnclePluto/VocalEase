@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Alert, Button, Form, Input, InputNumber, Modal } from 'antd'
 
 import { createSongReliably } from './api'
+import { describeUploadError } from './manualUpload'
 import { SongResourceFields } from './SongResourceFields'
 import { useSongResourceUpload } from './useSongResourceUpload'
 import type { SongWrite } from './types'
@@ -28,7 +29,7 @@ export function SongManualUploadModal({ open, onCancel, onDone }: { open: boolea
       const created = await createSongReliably({ ...values, id: songId, source_asset: assets.song_source!, ingestion_mode: 'manual', ...(assets.song_vocal ? { vocal_asset: assets.song_vocal } : {}), ...(assets.song_accompaniment ? { accompaniment_asset: assets.song_accompaniment } : {}), ...(assets.lyrics ? { lyrics_asset: assets.lyrics } : {}) })
       if (run !== generation.current) return
       upload.reset(); form.resetFields(); onDone(created.id)
-    } catch (caught) { if (run === generation.current) upload.setError(caught instanceof Error ? caught.message : '保存失败，请重试') }
+    } catch (caught) { if (run === generation.current) upload.setError(describeUploadError(caught)) }
     finally { if (run === generation.current) { submitting.current = false; setSaving(false) } }
   }
   const busy = upload.busy || saving

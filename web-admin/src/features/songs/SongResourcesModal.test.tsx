@@ -44,3 +44,25 @@ it('关闭资源弹窗后迟到的保存响应不再触发完成回调', async (
   await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)) })
   expect(done).not.toHaveBeenCalled()
 })
+
+it('并发冲突后刷新旧值，允许管理员基于新版本重试', async () => {
+  const remoteId = '20000000-0000-0000-0000-000000000099'
+  let patches = 0
+  server.use(
+    http.post('/api/v1/admin/songs/upload-grants/', () => HttpResponse.json(envelope({ song_id: song.id, asset_id: assetId, upload_url: `/api/v1/media/local-upload/${assetId}/?signature=token`, upload_token: '', fields: {} }), { status: 201 })),
+    http.put(`/api/v1/media/local-upload/${assetId}/`, () => new HttpResponse(null, { status: 204 })),
+    http.post(`/api/v1/admin/media/${assetId}/complete/`, () => HttpResponse.json(envelope({ id: assetId, status: 'ready' }))),
+    http.patch(`/api/v1/admin/songs/${song.id}/resources/`, () => ++patches === 1
+      ? HttpResponse.json({ code: 'song_resource_conflict', message: '资源已变化', request_id: 'test', data: null }, { status: 409 })
+      : HttpResponse.json(envelope({ ...song, vocal_asset: assetId }))),
+    http.get(`/api/v1/admin/songs/${song.id}/`, () => HttpResponse.json(envelope({ ...song, vocal_asset: remoteId }))),
+  )
+  const done = vi.fn()
+  render(<SongResourcesModal song={song} open onCancel={vi.fn()} onDone={done} />)
+  fireEvent.change(screen.getByLabelText('纯人声文件'), { target: { files: [new File(['vocal'], 'vocal.mp3', { type: 'audio/mpeg' })] } })
+  fireEvent.click(screen.getByRole('button', { name: '保存资源' }))
+  expect(await screen.findByText(/资源已刷新/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '保存资源' }))
+  await waitFor(() => expect(done).toHaveBeenCalled())
+  expect(server.lastJson(`/api/v1/admin/songs/${song.id}/resources/`)).toEqual({ updates: { vocal_asset: assetId }, expected: { vocal_asset: remoteId } })
+})

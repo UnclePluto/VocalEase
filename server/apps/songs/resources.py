@@ -16,10 +16,12 @@ from .services import SourceAssetInvalid, SourceVerificationTemporary, SongState
 RESOURCE_TYPES = {"vocal_asset": "song_vocal", "accompaniment_asset": "song_accompaniment", "lyrics_asset": "lyrics"}
 
 
-def validate_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) -> MediaAsset:
+def _validated_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) -> tuple[MediaAsset, list[dict] | None]:
     asset = MediaAsset.objects.filter(pk=asset_id, deleted_at__isnull=True).first()
     if not asset or asset.owner_type != "song" or asset.owner_id != song_id or asset.media_type != media_type or asset.status != "ready":
         raise SourceAssetInvalid("歌曲资源不可用", code="song_resource_invalid")
+    if media_type == "lyrics" and (asset.mime != "text/plain" or asset.size > 1024 * 1024):
+        raise SourceAssetInvalid("歌词类型或大小不符合人工上传要求", code="song_resource_invalid")
     try:
         metadata = backend_for_asset(asset).stat(asset.object_key)
     except Exception as exc:
@@ -33,16 +35,24 @@ def validate_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) ->
     if media_type == "lyrics":
         from apps.media.readers import read_verified_asset_bytes
         from .lyrics import parse_lrc
+        from apps.media.contracts import StorageValidationError
         try:
-            parse_lrc(read_verified_asset_bytes(asset=asset, max_bytes=1024 * 1024))
+            lines = parse_lrc(read_verified_asset_bytes(asset=asset, max_bytes=1024 * 1024))
         except Exception as exc:
             if isinstance(exc, (ValidationError, SourceAssetInvalid, SourceVerificationTemporary)):
                 raise
+            if isinstance(exc, StorageValidationError) and "回执不一致" in str(exc):
+                raise SourceAssetInvalid("歌词内容与可信回执不一致", code="song_resource_invalid") from exc
             raise SourceVerificationTemporary("歌词存储暂时不可用") from exc
-    return asset
+        return asset, lines
+    return asset, None
 
 
-def issue_optional_song_upload_grant(*, actor, request_id: str, song_id: UUID | None, media_type: str, mime: str, size: int):
+def validate_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) -> MediaAsset:
+    return _validated_song_resource(song_id=song_id, asset_id=asset_id, media_type=media_type)[0]
+
+
+def issue_optional_song_upload_grant(*, actor, request_id: str, media_type: str, mime: str, size: int, song_id: UUID | None = None):
     if song_id is None:
         raise ValidationError({"song_id": "上传选填资源前须先取得歌曲标识"})
     song = Song.objects.filter(pk=song_id, deleted_at__isnull=True).first()
@@ -93,7 +103,5 @@ def read_song_lyrics(*, song: Song) -> list[dict]:
     if not song.lyrics_asset_id:
         from django.http import Http404
         raise Http404
-    asset = validate_song_resource(song_id=song.id, asset_id=song.lyrics_asset_id, media_type="lyrics")
-    from apps.media.readers import read_verified_asset_bytes
-    from .lyrics import parse_lrc
-    return parse_lrc(read_verified_asset_bytes(asset=asset, max_bytes=1024 * 1024))
+    _, lines = _validated_song_resource(song_id=song.id, asset_id=song.lyrics_asset_id, media_type="lyrics")
+    return lines or []

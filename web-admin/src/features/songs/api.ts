@@ -68,9 +68,11 @@ export function updateSongResources(id: string, change: SongResourceChange, sign
 export async function updateSongResourcesReliably(id: string, change: SongResourceChange, signal?: AbortSignal) {
   try { return await updateSongResources(id, change, signal) }
   catch (error) {
-    if (error instanceof ApiError && error.status === 409) throw error
-    const current = await getSong(id, signal)
-    if (Object.entries(change.updates).every(([field, assetId]) => current[field as SongResourceField] === assetId)) return current
+    if (error instanceof ApiError && error.status !== undefined && error.status !== 409 && error.status < 500) throw error
+    try {
+      const current = await getSong(id, signal)
+      if (Object.entries(change.updates).every(([field, assetId]) => current[field as SongResourceField] === assetId)) return current
+    } catch { /* 保留原始保存错误，避免对账请求失败掩盖冲突原因。 */ }
     throw error
   }
 }

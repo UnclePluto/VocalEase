@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { createSongReliably, validateQiniuCallback } from './api'
+import { createSongReliably, updateSongResourcesReliably, validateQiniuCallback } from './api'
 import { http, HttpResponse } from 'msw'
 import { server } from '../../test/server'
 
@@ -26,4 +26,14 @@ it('人工歌曲创建冲突时必须比对所有选填资源', async () => {
     http.get(`/api/v1/admin/songs/${songId}/`, () => HttpResponse.json({ code: 'ok', message: '', request_id: 'test', data: { ...values, vocal_asset: null } })),
   )
   await expect(createSongReliably(values)).rejects.toThrow('已有歌曲与本次提交内容不一致')
+})
+
+it('资源更新响应丢失后重试遇到冲突，当前资源已达目标时收敛成功', async () => {
+  const songId = '10000000-0000-0000-0000-000000000010'
+  const assetId = '20000000-0000-0000-0000-000000000011'
+  server.use(
+    http.patch(`/api/v1/admin/songs/${songId}/resources/`, () => HttpResponse.json({ code: 'song_resource_conflict', message: '资源已变化', data: null, request_id: 'test' }, { status: 409 })),
+    http.get(`/api/v1/admin/songs/${songId}/`, () => HttpResponse.json({ code: 'ok', message: '', request_id: 'test', data: { id: songId, vocal_asset: assetId } })),
+  )
+  await expect(updateSongResourcesReliably(songId, { updates: { vocal_asset: assetId }, expected: { vocal_asset: null } })).resolves.toMatchObject({ vocal_asset: assetId })
 })

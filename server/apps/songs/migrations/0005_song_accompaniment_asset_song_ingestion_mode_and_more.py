@@ -7,7 +7,9 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('media', '0009_irreversible_schema_barrier'),
+        # MediaAsset 在 0001 即存在；沿用 songs.0001 的依赖策略，避免回退媒体时
+        # 先撤销歌曲资源字段，再遇到 media.0009 的不可逆屏障。
+        ('media', '0001_initial'),
         ('songs', '0004_songavailabilityscanstate_batch_version_and_more'),
     ]
 

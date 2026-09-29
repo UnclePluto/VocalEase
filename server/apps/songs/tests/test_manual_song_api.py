@@ -7,7 +7,7 @@ from apps.accounts.models import Role, User
 
 @pytest.mark.django_db
 @override_settings(MEDIA_BACKEND="local")
-def test_manual_song_publishes_and_resource_update_uses_expected_asset(tmp_path, settings):
+def test_manual_song_publishes_and_resource_update_uses_expected_asset(tmp_path, settings, monkeypatch):
     settings.MEDIA_LOCAL_ROOT = str(tmp_path)
     admin = User.objects.create_user(login_id="manual-api-admin", password="888888", role=Role.SYSTEM_ADMIN, must_change_password=False)
     client = APIClient()
@@ -42,6 +42,30 @@ def test_manual_song_publishes_and_resource_update_uses_expected_asset(tmp_path,
     lyrics = upload("lyrics", b"[00:01.00]hello", song_id)
     linked = client.patch(f"/api/v1/admin/songs/{song_id}/resources/", {"updates": {"lyrics_asset": lyrics["asset_id"]}, "expected": {"lyrics_asset": None}}, format="json")
     assert linked.status_code == 200
+    from apps.media import readers
+    original_read = readers.read_verified_asset_bytes
+    reads = 0
+
+    def read_once(**kwargs):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise RuntimeError("歌词重复读取")
+        return original_read(**kwargs)
+
+    monkeypatch.setattr(readers, "read_verified_asset_bytes", read_once)
     lines = client.get(f"/api/v1/admin/songs/{song_id}/lyrics/")
     assert lines.status_code == 200
     assert lines.json()["data"]["lines"] == [{"time_ms": 1000, "text": "hello"}]
+    assert reads == 1
+    monkeypatch.undo()
+    # 通用媒体凭证允许 application/json 歌词资产；人工歌曲绑定仍只认 LRC 的 text/plain。
+    from django.core.cache import cache
+    cache.clear()
+    other = client.post("/api/v1/admin/media/upload-grants/", {"owner_type": "song", "owner_id": song_id, "media_type": "lyrics", "mime": "application/json", "size": len(b"[00:01.00]hello")}, format="json")
+    assert other.status_code == 201
+    generic = other.json()["data"]
+    assert client.put(generic["upload_url"], b"[00:01.00]hello", content_type="application/json").status_code == 204
+    assert client.post(f"/api/v1/admin/media/{generic['asset_id']}/complete/", {}, format="json").status_code == 200
+    invalid = client.patch(f"/api/v1/admin/songs/{song_id}/resources/", {"updates": {"lyrics_asset": generic["asset_id"]}, "expected": {"lyrics_asset": lyrics["asset_id"]}}, format="json")
+    assert invalid.status_code == 409

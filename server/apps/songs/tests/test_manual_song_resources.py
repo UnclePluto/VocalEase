@@ -53,6 +53,8 @@ def test_optional_grant_requires_existing_song_or_intent():
     admin = User.objects.create_user(login_id="manual-no-intent", password="888888", role=Role.SYSTEM_ADMIN, must_change_password=False)
     client = APIClient()
     client.force_authenticate(admin)
+    missing = client.post("/api/v1/admin/songs/upload-grants/", {"mime": "audio/mpeg", "size": 5, "media_type": "song_vocal"}, format="json")
+    assert missing.status_code == 400
     response = client.post("/api/v1/admin/songs/upload-grants/", {"mime": "audio/mpeg", "size": 5, "song_id": "c4e3d599-ad85-4b88-b0f9-d9414eaab09b", "media_type": "song_vocal"}, format="json")
     assert response.status_code == 400
 
