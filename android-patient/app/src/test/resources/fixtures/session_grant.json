@@ -1,0 +1,14 @@
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "session_id": "55555555-5555-4555-8555-555555555555",
+    "asset_id": "66666666-6666-4666-8666-666666666666",
+    "object_key": "private/session/audio.m4a",
+    "expires_at": "2026-08-27T10:00:00Z",
+    "upload_url": "https://upload.qiniup.com",
+    "upload_token": "upload-secret",
+    "fields": {"x:owner": "patient"}
+  },
+  "request_id": "session-grant-1"
+}

@@ -1,0 +1,6 @@
+{
+  "code": "singing_submission_conflict",
+  "message": "请求与当前会话冲突：https://private.example/path?token=do-not-log",
+  "data": null,
+  "request_id": "error-request-1"
+}

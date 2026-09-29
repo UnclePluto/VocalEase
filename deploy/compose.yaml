@@ -1,0 +1,236 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/docker/web.Dockerfile
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:8080"
+    environment:
+      WEB_MEDIA_ORIGIN: ${WEB_MEDIA_ORIGIN:-}
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vocaease}
+      POSTGRES_USER: ${POSTGRES_USER:-vocaease}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vocaease}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/docker/server.Dockerfile
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-vocaease.settings.local}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_SECURE_SSL_REDIRECT: ${DJANGO_SECURE_SSL_REDIRECT:-false}
+      DJANGO_SECURE_HSTS_SECONDS: ${DJANGO_SECURE_HSTS_SECONDS:-0}
+      DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS: ${DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS:-false}
+      DJANGO_SECURE_HSTS_PRELOAD: ${DJANGO_SECURE_HSTS_PRELOAD:-false}
+      AUTH_WEB_ALLOWED_ORIGINS: ${AUTH_WEB_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      POSTGRES_DB: ${POSTGRES_DB:-vocaease}
+      POSTGRES_USER: ${POSTGRES_USER:-vocaease}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vocaease}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MEDIA_BACKEND: ${MEDIA_BACKEND:-local}
+      MEDIA_ENVIRONMENT: ${MEDIA_ENVIRONMENT:-local}
+      MEDIA_LOCAL_ROOT: /app/private-media
+      MEDIA_UPLOAD_GRANT_TTL_SECONDS: ${MEDIA_UPLOAD_GRANT_TTL_SECONDS:-900}
+      MEDIA_PRIVATE_URL_TTL_SECONDS: ${MEDIA_PRIVATE_URL_TTL_SECONDS:-600}
+      MEDIA_AUDIO_MAX_BYTES: ${MEDIA_AUDIO_MAX_BYTES:-52428800}
+      MEDIA_VIDEO_MAX_BYTES: ${MEDIA_VIDEO_MAX_BYTES:-524288000}
+      MEDIA_OTHER_MAX_BYTES: ${MEDIA_OTHER_MAX_BYTES:-10485760}
+      MEDIA_SCANNER_MAX_MARKERS: ${MEDIA_SCANNER_MAX_MARKERS:-1000}
+      MEDIA_SCANNER_MAX_MARKER_BYTES: ${MEDIA_SCANNER_MAX_MARKER_BYTES:-65536}
+      QINIU_ACCESS_KEY: ${QINIU_ACCESS_KEY:-}
+      QINIU_SECRET_KEY: ${QINIU_SECRET_KEY:-}
+      QINIU_BUCKET: ${QINIU_BUCKET:-}
+      QINIU_DOMAIN: ${QINIU_DOMAIN:-}
+      QINIU_CALLBACK_URL: ${QINIU_CALLBACK_URL:-}
+      QINIU_UPLOAD_URL: ${QINIU_UPLOAD_URL:-https://up.qiniup.com}
+      QINIU_RS_HOST: ${QINIU_RS_HOST:-https://rs.qiniu.com}
+      QINIU_STAT_TIMEOUT_SECONDS: ${QINIU_STAT_TIMEOUT_SECONDS:-5}
+      ANALYSIS_TASK_LEASE_SECONDS: ${ANALYSIS_TASK_LEASE_SECONDS:-300}
+      ANALYTICS_SYNC_EXPORT_LIMIT: ${ANALYTICS_SYNC_EXPORT_LIMIT:-1000}
+      ANALYTICS_EXPORT_TTL_SECONDS: ${ANALYTICS_EXPORT_TTL_SECONDS:-86400}
+      ANALYTICS_EXPORT_LEASE_SECONDS: ${ANALYTICS_EXPORT_LEASE_SECONDS:-300}
+      ANALYTICS_EXPORT_HEARTBEAT_SECONDS: ${ANALYTICS_EXPORT_HEARTBEAT_SECONDS:-60}
+      ANALYTICS_EXPORT_MAX_ATTEMPTS: ${ANALYTICS_EXPORT_MAX_ATTEMPTS:-4}
+      RUN_MIGRATIONS: "1"
+    command: uv run --no-sync python manage.py runserver 0.0.0.0:8000
+    ports:
+      - "${SERVER_BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - private_media:/app/private-media
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health/ready/')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  celery:
+    build:
+      context: ..
+      dockerfile: deploy/docker/server.Dockerfile
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-vocaease.settings.local}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_SECURE_SSL_REDIRECT: ${DJANGO_SECURE_SSL_REDIRECT:-false}
+      DJANGO_SECURE_HSTS_SECONDS: ${DJANGO_SECURE_HSTS_SECONDS:-0}
+      DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS: ${DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS:-false}
+      DJANGO_SECURE_HSTS_PRELOAD: ${DJANGO_SECURE_HSTS_PRELOAD:-false}
+      AUTH_WEB_ALLOWED_ORIGINS: ${AUTH_WEB_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      POSTGRES_DB: ${POSTGRES_DB:-vocaease}
+      POSTGRES_USER: ${POSTGRES_USER:-vocaease}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vocaease}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MEDIA_BACKEND: ${MEDIA_BACKEND:-local}
+      MEDIA_ENVIRONMENT: ${MEDIA_ENVIRONMENT:-local}
+      MEDIA_LOCAL_ROOT: /app/private-media
+      MEDIA_UPLOAD_GRANT_TTL_SECONDS: ${MEDIA_UPLOAD_GRANT_TTL_SECONDS:-900}
+      MEDIA_PRIVATE_URL_TTL_SECONDS: ${MEDIA_PRIVATE_URL_TTL_SECONDS:-600}
+      MEDIA_AUDIO_MAX_BYTES: ${MEDIA_AUDIO_MAX_BYTES:-52428800}
+      MEDIA_VIDEO_MAX_BYTES: ${MEDIA_VIDEO_MAX_BYTES:-524288000}
+      MEDIA_OTHER_MAX_BYTES: ${MEDIA_OTHER_MAX_BYTES:-10485760}
+      MEDIA_SCANNER_MAX_MARKERS: ${MEDIA_SCANNER_MAX_MARKERS:-1000}
+      MEDIA_SCANNER_MAX_MARKER_BYTES: ${MEDIA_SCANNER_MAX_MARKER_BYTES:-65536}
+      QINIU_ACCESS_KEY: ${QINIU_ACCESS_KEY:-}
+      QINIU_SECRET_KEY: ${QINIU_SECRET_KEY:-}
+      QINIU_BUCKET: ${QINIU_BUCKET:-}
+      QINIU_DOMAIN: ${QINIU_DOMAIN:-}
+      QINIU_CALLBACK_URL: ${QINIU_CALLBACK_URL:-}
+      QINIU_UPLOAD_URL: ${QINIU_UPLOAD_URL:-https://up.qiniup.com}
+      QINIU_RS_HOST: ${QINIU_RS_HOST:-https://rs.qiniu.com}
+      QINIU_STAT_TIMEOUT_SECONDS: ${QINIU_STAT_TIMEOUT_SECONDS:-5}
+      ANALYSIS_TASK_LEASE_SECONDS: ${ANALYSIS_TASK_LEASE_SECONDS:-300}
+      ANALYTICS_SYNC_EXPORT_LIMIT: ${ANALYTICS_SYNC_EXPORT_LIMIT:-1000}
+      ANALYTICS_EXPORT_TTL_SECONDS: ${ANALYTICS_EXPORT_TTL_SECONDS:-86400}
+      ANALYTICS_EXPORT_LEASE_SECONDS: ${ANALYTICS_EXPORT_LEASE_SECONDS:-300}
+      ANALYTICS_EXPORT_HEARTBEAT_SECONDS: ${ANALYTICS_EXPORT_HEARTBEAT_SECONDS:-60}
+      ANALYTICS_EXPORT_MAX_ATTEMPTS: ${ANALYTICS_EXPORT_MAX_ATTEMPTS:-4}
+    command: uv run --no-sync celery -A vocaease worker --loglevel=INFO --hostname=worker@%h
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - private_media:/app/private-media
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-sync celery -A vocaease inspect ping --destination worker@$${HOSTNAME} --timeout 5 | grep -q pong"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: deploy/docker/server.Dockerfile
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-vocaease.settings.local}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_SECURE_SSL_REDIRECT: ${DJANGO_SECURE_SSL_REDIRECT:-false}
+      DJANGO_SECURE_HSTS_SECONDS: ${DJANGO_SECURE_HSTS_SECONDS:-0}
+      DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS: ${DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS:-false}
+      DJANGO_SECURE_HSTS_PRELOAD: ${DJANGO_SECURE_HSTS_PRELOAD:-false}
+      AUTH_WEB_ALLOWED_ORIGINS: ${AUTH_WEB_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      POSTGRES_DB: ${POSTGRES_DB:-vocaease}
+      POSTGRES_USER: ${POSTGRES_USER:-vocaease}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vocaease}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MEDIA_BACKEND: ${MEDIA_BACKEND:-local}
+      MEDIA_ENVIRONMENT: ${MEDIA_ENVIRONMENT:-local}
+      MEDIA_LOCAL_ROOT: /app/private-media
+      MEDIA_UPLOAD_GRANT_TTL_SECONDS: ${MEDIA_UPLOAD_GRANT_TTL_SECONDS:-900}
+      MEDIA_PRIVATE_URL_TTL_SECONDS: ${MEDIA_PRIVATE_URL_TTL_SECONDS:-600}
+      MEDIA_AUDIO_MAX_BYTES: ${MEDIA_AUDIO_MAX_BYTES:-52428800}
+      MEDIA_VIDEO_MAX_BYTES: ${MEDIA_VIDEO_MAX_BYTES:-524288000}
+      MEDIA_OTHER_MAX_BYTES: ${MEDIA_OTHER_MAX_BYTES:-10485760}
+      MEDIA_SCANNER_MAX_MARKERS: ${MEDIA_SCANNER_MAX_MARKERS:-1000}
+      MEDIA_SCANNER_MAX_MARKER_BYTES: ${MEDIA_SCANNER_MAX_MARKER_BYTES:-65536}
+      QINIU_ACCESS_KEY: ${QINIU_ACCESS_KEY:-}
+      QINIU_SECRET_KEY: ${QINIU_SECRET_KEY:-}
+      QINIU_BUCKET: ${QINIU_BUCKET:-}
+      QINIU_DOMAIN: ${QINIU_DOMAIN:-}
+      QINIU_CALLBACK_URL: ${QINIU_CALLBACK_URL:-}
+      QINIU_UPLOAD_URL: ${QINIU_UPLOAD_URL:-https://up.qiniup.com}
+      QINIU_RS_HOST: ${QINIU_RS_HOST:-https://rs.qiniu.com}
+      QINIU_STAT_TIMEOUT_SECONDS: ${QINIU_STAT_TIMEOUT_SECONDS:-5}
+      ANALYSIS_TASK_LEASE_SECONDS: ${ANALYSIS_TASK_LEASE_SECONDS:-300}
+      ANALYTICS_SYNC_EXPORT_LIMIT: ${ANALYTICS_SYNC_EXPORT_LIMIT:-1000}
+      ANALYTICS_EXPORT_TTL_SECONDS: ${ANALYTICS_EXPORT_TTL_SECONDS:-86400}
+      ANALYTICS_EXPORT_LEASE_SECONDS: ${ANALYTICS_EXPORT_LEASE_SECONDS:-300}
+      ANALYTICS_EXPORT_HEARTBEAT_SECONDS: ${ANALYTICS_EXPORT_HEARTBEAT_SECONDS:-60}
+      ANALYTICS_EXPORT_MAX_ATTEMPTS: ${ANALYTICS_EXPORT_MAX_ATTEMPTS:-4}
+    command: uv run --no-sync celery -A vocaease beat --loglevel=INFO --pidfile=/tmp/celerybeat.pid
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - private_media:/app/private-media
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tmp/celerybeat.pid && kill -0 $$(cat /tmp/celerybeat.pid)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  private_media:

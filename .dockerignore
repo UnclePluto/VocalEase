@@ -1,0 +1,15 @@
+server/.venv
+server/.pytest_cache
+web-admin/node_modules
+web-admin/dist
+**/__pycache__
+**/*.pyc
+.git
+.worktrees
+.superpowers
+.env
+.env.*
+**/*.pem
+**/*.key
+android-patient
+docs

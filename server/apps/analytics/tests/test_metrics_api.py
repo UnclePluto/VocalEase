@@ -1,0 +1,327 @@
+from datetime import datetime, timedelta, timezone as datetime_timezone
+from decimal import Decimal
+import uuid
+
+import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from apps.accounts.models import Role, User
+from apps.analysis.models import AnalysisResult, AnalysisTask
+from apps.analytics.calculations import METRIC_VERSION
+from apps.media.models import MediaAsset
+from apps.singing.models import SingingSession
+from apps.songs.models import Song
+
+
+def _source_asset(*, owner_type, owner_id, media_type, mime):
+    return MediaAsset.objects.create(
+        owner_type=owner_type,
+        owner_id=owner_id,
+        media_type=media_type,
+        backend="qiniu",
+        object_key=f"test/{media_type}/{uuid.uuid4().hex}",
+        mime=mime,
+        size=1024,
+        etag=uuid.uuid4().hex,
+        status="ready",
+        upload_expires_at=timezone.now() + timedelta(hours=1),
+    )
+
+
+@pytest.fixture
+def analytics_song():
+    song_id = uuid.uuid4()
+    source = _source_asset(owner_type="song", owner_id=song_id, media_type="song_source", mime="audio/mpeg")
+    return Song.objects.create(
+        id=song_id,
+        title="统计歌曲",
+        artist="歌手",
+        genre="流行",
+        language="中文",
+        duration_seconds=60,
+        source_asset=source,
+    )
+
+
+def _completed_session(
+    patient, song, *, completed_at, score, burp_count, duration=60, generation=0,
+    with_current_result=True, with_analysis=True, submitted_at=None,
+):
+    plan = patient.treatment_plans.get(status="active")
+    session = SingingSession.objects.create(
+        patient=patient,
+        song=song,
+        treatment_plan=plan,
+        patient_snapshot={"id": str(patient.id), "medical_record_no": patient.medical_record_no, "name": patient.name},
+        song_snapshot={"id": str(song.id), "title": song.title, "artist": song.artist, "duration_seconds": duration},
+        treatment_plan_snapshot={"id": str(plan.id), "target_session_count": plan.target_session_count},
+        status="completed",
+        analysis_generation=generation,
+        score=score,
+        burp_count=burp_count,
+        duration_seconds=duration,
+        is_mock=True,
+        submitted_at=submitted_at or completed_at - timedelta(minutes=1),
+        completed_at=completed_at,
+    )
+    if not with_analysis:
+        return session
+    audio = MediaAsset.objects.create(
+        patient_owner=patient,
+        owner_type="patient",
+        owner_id=patient.id,
+        media_type="singing_audio",
+        backend="qiniu",
+        object_key=f"test/singing_audio/{uuid.uuid4().hex}",
+        mime="audio/mpeg",
+        size=1024,
+        etag=uuid.uuid4().hex,
+        status="ready",
+        upload_expires_at=timezone.now() + timedelta(hours=1),
+    )
+    result_generation = generation if with_current_result else max(0, generation - 1)
+    task = AnalysisTask.objects.create(
+        target_type="singing_session",
+        target_id=session.id,
+        source_asset=audio,
+        task_type="singing_audio_metrics",
+        protocol_version="1.0",
+        executor="mock_singing",
+        status="succeeded",
+        generation=result_generation,
+        idempotency_key=f"analytics:{session.id}:{result_generation}",
+        completed_at=completed_at,
+    )
+    AnalysisResult.objects.create(
+        task=task,
+        protocol_version="1.0",
+        is_mock=True,
+        payload={"protocol_version": "1.0", "is_mock": True, "score": score, "burp_events": list(range(burp_count))},
+    )
+    return session
+
+
+@pytest.mark.django_db
+def test_dashboard_and_patient_metrics_use_current_completed_generation(patient, analytics_song):
+    start = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
+    for index, (score, burps, duration) in enumerate([
+        (60, 4, 60), (60, 3, 60), (60, 2, 60), (80, 2, 60), (80, 1, 60), (80, 1, 60),
+    ]):
+        _completed_session(patient, analytics_song, completed_at=start + timedelta(days=index), score=score, burp_count=burps, duration=duration)
+    # 当前代没有成功汇总仍属于已完成演唱与有效得分，只从嗳气口径排除。
+    _completed_session(patient, analytics_song, completed_at=start + timedelta(days=7), score=100, burp_count=50, generation=1, with_current_result=False)
+    patient.treatment_plans.update(target_session_count=5)
+    patient.user.must_change_password = False
+    patient.user.save(update_fields=["must_change_password"])
+    client = APIClient()
+    client.force_authenticate(patient.primary_doctor.user)
+
+    dashboard = client.get("/api/v1/admin/analytics/dashboard/")
+    listing = client.get("/api/v1/admin/analytics/patients/?page_size=100")
+
+    assert dashboard.status_code == listing.status_code == 200
+    assert dashboard.json()["data"] == {
+        "metric_version": METRIC_VERSION,
+        "active_patient_count": 1,
+        "completed_session_count": 7,
+        "average_score": "74.29",
+        "average_burp_count": "2.17",
+        "is_mock": True,
+    }
+    row = listing.json()["data"]["results"][0]
+    assert listing.json()["data"]["metric_version"] == METRIC_VERSION
+    assert row["treatment_progress"] == "100.00"
+    assert row["completed_count"] == 7
+    assert row["total_duration_seconds"] == 420
+    assert row["average_score"] == "74.29"
+    assert row["score_trend"] == {"difference": "20.00", "direction": "up", "has_enough_data": True}
+    assert row["burp_improvement"] == "0.5556"
+    assert row["is_mock"] is True
+
+
+@pytest.mark.django_db
+def test_completed_without_analysis_counts_for_progress_duration_score_but_not_burp(patient, analytics_song):
+    occurred = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
+    _completed_session(
+        patient, analytics_song, completed_at=occurred, score=88, burp_count=99,
+        duration=120, with_analysis=False,
+    )
+    patient.treatment_plans.update(target_session_count=2)
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    dashboard = client.get("/api/v1/admin/analytics/dashboard/").json()["data"]
+    row = client.get("/api/v1/admin/analytics/patients/").json()["data"]["results"][0]
+
+    assert dashboard["completed_session_count"] == 1
+    assert dashboard["average_score"] == "88.00"
+    assert dashboard["average_burp_count"] is None
+    assert row["completed_count"] == 1
+    assert row["total_duration_seconds"] == 120
+    assert row["treatment_progress"] == "50.00"
+    assert row["average_score"] == "88.00"
+    assert row["burp_improvement"] is None
+
+
+@pytest.mark.django_db
+def test_patient_metrics_order_uses_singing_occurrence_then_id_not_analysis_completion(patient, analytics_song):
+    tied = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
+    sessions = [
+        _completed_session(patient, analytics_song, completed_at=tied, score=score, burp_count=1)
+        for score in (10, 20, 30, 70, 80, 90)
+    ]
+    # 同完成时间下 submitted_at 仍相同，最终 UUID 升序决定前后三次。
+    ordered = sorted(sessions, key=lambda item: item.id)
+    for session, score in zip(ordered, (10, 20, 30, 70, 80, 90), strict=True):
+        SingingSession.objects.filter(pk=session.id).update(score=score)
+        AnalysisResult.objects.filter(task__target_id=session.id).update(payload={
+            "protocol_version": "1.0", "is_mock": True, "score": score, "burp_events": [1],
+        })
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    row = client.get("/api/v1/admin/analytics/patients/").json()["data"]["results"][0]
+
+    assert row["score_trend"]["difference"] == "60.00"
+
+
+@pytest.mark.django_db
+def test_patient_metrics_late_analysis_retry_does_not_reorder_score_trend(patient, analytics_song):
+    occurred = datetime(2026, 8, 1, tzinfo=datetime_timezone.utc)
+    for index, score in enumerate((10, 20, 30, 70, 80, 90)):
+        # 最早一次演唱的分析最晚完成，趋势仍必须按演唱发生时间排序。
+        session = _completed_session(
+            patient, analytics_song,
+            submitted_at=occurred + timedelta(days=index),
+            completed_at=occurred + timedelta(days=20 - index),
+            score=score, burp_count=1,
+        )
+        AnalysisTask.objects.filter(target_id=session.id).update(
+            completed_at=occurred + timedelta(days=30 - index)
+        )
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    row = client.get("/api/v1/admin/analytics/patients/").json()["data"]["results"][0]
+
+    assert row["score_trend"]["difference"] == "60.00"
+
+
+@pytest.mark.django_db
+def test_treatment_status_filter_uses_same_current_plan_as_display(patient):
+    from apps.patients.models import TreatmentPlan
+
+    TreatmentPlan.objects.create(
+        patient=patient,
+        start_date=datetime(2025, 1, 1).date(),
+        cycle_weeks=4,
+        target_session_count=10,
+        status=TreatmentPlan.Status.COMPLETED,
+    )
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    active = client.get("/api/v1/admin/analytics/patients/?treatment_status=active").json()["data"]
+    completed = client.get("/api/v1/admin/analytics/patients/?treatment_status=completed").json()["data"]
+
+    assert active["count"] == 1
+    assert active["results"][0]["treatment_status"] == "active"
+    assert completed["count"] == 0
+
+
+@pytest.mark.django_db
+def test_admin_filters_are_normalized_unknown_params_rejected_and_patient_forbidden(patient):
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+    filtered = client.get(
+        f"/api/v1/admin/analytics/patients/?name=患者&medical_record_no={patient.medical_record_no}&treatment_status=active&primary_doctor={patient.primary_doctor_id}&created_from=2026-01-01&created_to=2026-12-31"
+    )
+    unknown = client.get("/api/v1/admin/analytics/patients/?unknown=1")
+    client.force_authenticate(patient.user)
+    forbidden = client.get("/api/v1/admin/analytics/dashboard/")
+
+    assert filtered.status_code == 200 and filtered.json()["data"]["count"] == 1
+    assert unknown.status_code == 400 and "unknown" in unknown.json()["data"]
+    assert forbidden.status_code == 403
+
+
+@pytest.mark.django_db
+def test_patient_metric_query_count_is_constant_for_page_size(patient, other_patient, analytics_song):
+    now = timezone.now()
+    _completed_session(patient, analytics_song, completed_at=now, score=80, burp_count=1)
+    _completed_session(other_patient, analytics_song, completed_at=now, score=70, burp_count=2)
+    patient.primary_doctor.user.must_change_password = False
+    patient.primary_doctor.user.save(update_fields=["must_change_password"])
+    client = APIClient(); client.force_authenticate(patient.primary_doctor.user)
+
+    with CaptureQueriesContext(connection) as queries:
+        response = client.get("/api/v1/admin/analytics/patients/?page_size=100")
+
+    assert response.status_code == 200 and response.json()["data"]["count"] == 2
+    assert len(queries) <= 8
+
+
+@pytest.mark.django_db
+def test_system_admin_can_view_all_patients(patient):
+    admin = User.objects.create_user(login_id="analytics-admin", password="888888", role=Role.SYSTEM_ADMIN, must_change_password=False)
+    client = APIClient(); client.force_authenticate(admin)
+    assert client.get("/api/v1/admin/analytics/patients/").json()["data"]["count"] == 1
+
+
+@pytest.mark.django_db
+def test_single_patient_ten_thousand_sessions_uses_streaming_fixed_windows(patient, monkeypatch):
+    from apps.analytics.selectors import patient_metric_rows
+
+    plan = patient.treatment_plans.get(status="active")
+    patient.metric_plans = [plan]
+    patient.current_plan_id = plan.id
+
+    class StreamingSessions:
+        def filter(self, **kwargs):
+            return self
+
+        def annotate(self, **kwargs):
+            return self
+
+        def values(self, *fields):
+            return self
+
+        def order_by(self, *fields):
+            return self
+
+        def __iter__(self):
+            raise AssertionError("指标实现不得填充 QuerySet 缓存或完整历史列表")
+
+        def iterator(self, **kwargs):
+            for index in range(10000):
+                score = 10 if index < 9997 else (70, 80, 90)[index - 9997]
+                burp = 6 if index < 3 else (3, 2, 1)[index - 9997] if index >= 9997 else 4
+                yield {
+                    "id": uuid.UUID(int=index + 1),
+                    "patient_id": patient.id,
+                    "treatment_plan_id": plan.id,
+                    "score": Decimal(score),
+                    "burp_count": burp,
+                    "duration_seconds": 60,
+                    "is_mock": True,
+                    "has_current_audio_result": True,
+                    "occurred_at": datetime(2026, 1, 1, tzinfo=datetime_timezone.utc) + timedelta(seconds=index),
+                }
+
+    monkeypatch.setattr("apps.analytics.selectors.completed_sessions", lambda: StreamingSessions())
+
+    row = patient_metric_rows([patient])[0]
+
+    assert row["completed_count"] == 10000
+    assert row["total_duration_seconds"] == 600000
+    assert row["average_score"] == "10.02"
+    assert row["score_trend"] == {"difference": "70.00", "direction": "up", "has_enough_data": True}
+    assert row["burp_improvement"] == "0.6667"

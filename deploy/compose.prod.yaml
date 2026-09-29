@@ -1,0 +1,124 @@
+name: vocaease-prod
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 128
+
+x-app: &app
+  <<: *common
+  image: ${SERVER_IMAGE:?必须提供服务端镜像摘要}
+  env_file: ["${APP_ENV_FILE:?必须提供生产配置文件路径}"]
+  environment:
+    RUN_MIGRATIONS: "0"
+  networks: [private, egress]
+  volumes: [private_media:/app/private-media]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  stop_grace_period: 90s
+
+services:
+  web:
+    <<: *common
+    image: ${WEB_IMAGE:?必须提供后台镜像摘要}
+    environment:
+      WEB_MEDIA_ORIGIN: ${WEB_MEDIA_ORIGIN:?必须提供七牛媒体和上传来源}
+    ports: ["127.0.0.1:19080:8080"]
+    networks:
+      private: {}
+      edge:
+        aliases: [vocaease-web]
+    cpus: 0.15
+    mem_limit: 128m
+    depends_on:
+      server: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, --spider, "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    <<: *common
+    image: ${POSTGRES_IMAGE:?必须提供 PostgreSQL 镜像摘要}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    networks: [private]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    cpus: 0.4
+    mem_limit: 640m
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    <<: *common
+    image: ${REDIS_IMAGE:?必须提供 Redis 镜像摘要}
+    command: [redis-server, --appendonly, "yes", --maxmemory, 128mb, --maxmemory-policy, noeviction]
+    networks: [private]
+    volumes: [redis_data:/data]
+    cpus: 0.15
+    mem_limit: 192m
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  server:
+    <<: *app
+    cpus: 0.6
+    mem_limit: 768m
+    healthcheck:
+      # HTTPS 由入口终止，探针显式模拟可信代理，避免 HTTP 重定向到容器的 443。
+      test: [CMD, /app/server/.venv/bin/python, -c, "from urllib.request import Request,urlopen; urlopen(Request('http://localhost:8000/health/ready/',headers={'X-Forwarded-Proto':'https'}),timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 30s
+
+  celery:
+    <<: *app
+    command: [uv, run, --no-sync, celery, -A, vocaease, worker, --loglevel=INFO, --concurrency=1, "--hostname=worker@%h"]
+    cpus: 0.5
+    mem_limit: 768m
+    healthcheck:
+      test: [CMD-SHELL, 'uv run --no-sync celery -A vocaease inspect ping --destination worker@$${HOSTNAME} --timeout 5 | grep -q pong']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  celery-beat:
+    <<: *app
+    command: [uv, run, --no-sync, celery, -A, vocaease, beat, --loglevel=INFO, --pidfile=/tmp/celerybeat.pid, --schedule=/tmp/celerybeat-schedule]
+    cpus: 0.1
+    mem_limit: 192m
+    healthcheck:
+      test: [CMD-SHELL, 'test -s /tmp/celerybeat.pid && kill -0 $$(cat /tmp/celerybeat.pid)']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+networks:
+  private:
+    internal: true
+  egress: {}
+  edge:
+    external: true
+    name: whest_Lan
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  private_media: {}

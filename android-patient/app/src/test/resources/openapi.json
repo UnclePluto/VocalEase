@@ -1,0 +1,4024 @@
+{
+    "openapi": "3.0.3",
+    "info": {
+        "title": "VocaEase API",
+        "version": "1.0.0",
+        "description": "VocaEase 医生后台与患者端共享服务 API"
+    },
+    "paths": {
+        "/api/v1/admin/analytics/dashboard/": {
+            "get": {
+                "operationId": "v1_admin_analytics_dashboard_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/analytics/exports/": {
+            "post": {
+                "operationId": "v1_admin_analytics_exports_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ExportRequestRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ExportRequestRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ExportRequestRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "text/csv": {
+                                "schema": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            },
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+                                "schema": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "202": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/analytics/exports/{job_id}/": {
+            "get": {
+                "operationId": "v1_admin_analytics_exports_retrieve_by_job_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "job_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/analytics/exports/{job_id}/private-url/": {
+            "post": {
+                "operationId": "v1_admin_analytics_exports_private_url_create_by_job_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "job_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/analytics/patients/": {
+            "get": {
+                "operationId": "v1_admin_analytics_patients_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/doctors/": {
+            "get": {
+                "operationId": "v1_admin_doctors_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "post": {
+                "operationId": "v1_admin_doctors_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DoctorWriteRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DoctorWriteRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DoctorWriteRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/doctors/{doctor_id}/": {
+            "get": {
+                "operationId": "v1_admin_doctors_retrieve_by_doctor_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "doctor_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "patch": {
+                "operationId": "v1_admin_doctors_partial_update_by_doctor_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "doctor_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedDoctorWriteRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedDoctorWriteRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedDoctorWriteRequest"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "delete": {
+                "operationId": "v1_admin_doctors_destroy_by_doctor_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "doctor_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No response body"
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/doctors/{doctor_id}/activate/": {
+            "post": {
+                "operationId": "v1_admin_doctors_activate_create_by_doctor_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "doctor_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/doctors/{doctor_id}/deactivate/": {
+            "post": {
+                "operationId": "v1_admin_doctors_deactivate_create_by_doctor_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "doctor_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/doctors/{doctor_id}/option/": {
+            "get": {
+                "operationId": "v1_admin_doctors_option_retrieve_by_doctor_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "doctor_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/me/": {
+            "get": {
+                "operationId": "v1_admin_me_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/media/{asset_id}/complete/": {
+            "post": {
+                "operationId": "v1_admin_media_complete_create_by_asset_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "asset_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/media/{asset_id}/private-url/": {
+            "post": {
+                "operationId": "v1_admin_media_private_url_create_by_asset_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "asset_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/media/upload-grants/": {
+            "post": {
+                "operationId": "v1_admin_media_upload_grants_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/MediaUploadGrantRequestRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/MediaUploadGrantRequestRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/MediaUploadGrantRequestRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/patients/": {
+            "get": {
+                "operationId": "v1_admin_patients_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "post": {
+                "operationId": "v1_admin_patients_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatientWriteRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatientWriteRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatientWriteRequest"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/patients/{patient_id}/": {
+            "get": {
+                "operationId": "v1_admin_patients_retrieve_by_patient_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "patient_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "patch": {
+                "operationId": "v1_admin_patients_partial_update_by_patient_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "patient_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedPatientWriteRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedPatientWriteRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedPatientWriteRequest"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "delete": {
+                "operationId": "v1_admin_patients_destroy_by_patient_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "patient_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No response body"
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/singing-sessions/": {
+            "get": {
+                "operationId": "v1_admin_singing_sessions_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/singing-sessions/{session_id}/": {
+            "get": {
+                "operationId": "v1_admin_singing_sessions_retrieve_by_session_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/": {
+            "get": {
+                "operationId": "v1_admin_songs_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "post": {
+                "operationId": "v1_admin_songs_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SongWriteRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SongWriteRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SongWriteRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/": {
+            "get": {
+                "operationId": "v1_admin_songs_retrieve_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "patch": {
+                "operationId": "v1_admin_songs_partial_update_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedSongWriteRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedSongWriteRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatchedSongWriteRequest"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "delete": {
+                "operationId": "v1_admin_songs_destroy_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No response body"
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/analysis/": {
+            "get": {
+                "operationId": "v1_admin_songs_analysis_retrieve_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/preview/": {
+            "post": {
+                "operationId": "v1_admin_songs_preview_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/publish/": {
+            "post": {
+                "operationId": "v1_admin_songs_publish_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/reanalyze/": {
+            "post": {
+                "operationId": "v1_admin_songs_reanalyze_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ReanalyzeRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ReanalyzeRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ReanalyzeRequest"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/unpublish/": {
+            "post": {
+                "operationId": "v1_admin_songs_unpublish_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/upload-grants/": {
+            "post": {
+                "operationId": "v1_admin_songs_upload_grants_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SongUploadGrantRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SongUploadGrantRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SongUploadGrantRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/users/{user_id}/reset-password/": {
+            "post": {
+                "operationId": "v1_admin_users_reset_password_create_by_user_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "user_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/change-password/": {
+            "post": {
+                "operationId": "v1_auth_change_password_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ChangePasswordRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ChangePasswordRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ChangePasswordRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/login/": {
+            "post": {
+                "operationId": "v1_auth_login_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/LoginRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/LoginRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/LoginRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    },
+                    {}
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LoginEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/logout/": {
+            "post": {
+                "operationId": "v1_auth_logout_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/LogoutRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/LogoutRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/LogoutRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "logoutBearerAuth": []
+                    },
+                    {}
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/refresh/": {
+            "post": {
+                "operationId": "v1_auth_refresh_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/RefreshRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/RefreshRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/RefreshRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    },
+                    {}
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/RefreshEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/media/local-upload/{asset_id}/": {
+            "put": {
+                "operationId": "v1_media_local_upload_update_by_asset_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "asset_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {
+                                "type": "string",
+                                "format": "binary"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No response body"
+                    }
+                }
+            }
+        },
+        "/api/v1/media/private/{object_key}": {
+            "get": {
+                "operationId": "v1_media_private_retrieve_by_object_key",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "object_key",
+                        "schema": {
+                            "type": "string"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    },
+                    {}
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/octet-stream": {
+                                "schema": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/media/qiniu/callback/": {
+            "post": {
+                "operationId": "v1_media_qiniu_callback_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/QiniuCallbackRequestRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/me/": {
+            "get": {
+                "operationId": "v1_patient_me_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PatientMeEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/media/{asset_id}/complete/": {
+            "post": {
+                "operationId": "v1_patient_media_complete_create_by_asset_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "asset_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/media/{asset_id}/private-url/": {
+            "post": {
+                "operationId": "v1_patient_media_private_url_create_by_asset_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "asset_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PrivateUrlEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/media/upload-grants/": {
+            "post": {
+                "operationId": "v1_patient_media_upload_grants_create",
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatientMediaUploadGrantRequestRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatientMediaUploadGrantRequestRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PatientMediaUploadGrantRequestRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PatientMediaUploadGrantEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/": {
+            "get": {
+                "operationId": "v1_patient_singing_sessions_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SingingSessionPageEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            },
+            "post": {
+                "operationId": "v1_patient_singing_sessions_create",
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "schema": {
+                            "type": "string"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CreateSessionRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CreateSessionRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CreateSessionRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SingingSessionEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SingingSessionEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/{session_id}/": {
+            "get": {
+                "operationId": "v1_patient_singing_sessions_retrieve_by_session_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SingingSessionEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/{session_id}/cancel/": {
+            "post": {
+                "operationId": "v1_patient_singing_sessions_cancel_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SingingSessionEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/{session_id}/confirm-upload/": {
+            "post": {
+                "operationId": "v1_patient_singing_sessions_confirm_upload_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ConfirmSessionMediaRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ConfirmSessionMediaRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ConfirmSessionMediaRequest"
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SingingSessionEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/{session_id}/retry/": {
+            "post": {
+                "operationId": "v1_patient_singing_sessions_retry_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "schema": {
+                            "type": "string"
+                        },
+                        "required": true
+                    },
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SessionMutationEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "202": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SessionMutationEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/{session_id}/submit/": {
+            "post": {
+                "operationId": "v1_patient_singing_sessions_submit_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "schema": {
+                            "type": "string"
+                        },
+                        "required": true
+                    },
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SessionMutationEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "202": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SessionMutationEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/singing-sessions/{session_id}/upload-grants/": {
+            "post": {
+                "operationId": "v1_patient_singing_sessions_upload_grants_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SessionUploadGrantRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SessionUploadGrantRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SessionUploadGrantRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SessionUploadGrantEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    },
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SessionUploadGrantEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/songs/": {
+            "get": {
+                "operationId": "v1_patient_songs_retrieve",
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PatientSongPageEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/songs/{song_id}/": {
+            "get": {
+                "operationId": "v1_patient_songs_retrieve_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PatientSongEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/songs/{song_id}/preview/": {
+            "post": {
+                "operationId": "v1_patient_songs_preview_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PrivateUrlEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "AccountSnapshot": {
+                "type": "object",
+                "properties": {
+                    "login_id": {
+                        "type": "string",
+                        "readOnly": true
+                    },
+                    "role": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/RoleEnum"
+                            }
+                        ],
+                        "readOnly": true
+                    },
+                    "must_change_password": {
+                        "type": "boolean",
+                        "readOnly": true
+                    }
+                },
+                "required": [
+                    "login_id",
+                    "must_change_password",
+                    "role"
+                ]
+            },
+            "AnalysisStatusEnum": {
+                "enum": [
+                    "pending",
+                    "processing",
+                    "succeeded",
+                    "failed",
+                    "retrying"
+                ],
+                "type": "string",
+                "description": "* `pending` - 待分析\n* `processing` - 分析中\n* `succeeded` - 分析成功\n* `failed` - 分析失败\n* `retrying` - 重试中"
+            },
+            "AnalysisTimeSeriesData": {
+                "type": "object",
+                "properties": {
+                    "sample_interval_ms": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "values": {
+                        "type": "array",
+                        "items": {
+                            "type": "number",
+                            "format": "double"
+                        }
+                    }
+                },
+                "required": [
+                    "sample_interval_ms",
+                    "values"
+                ]
+            },
+            "ApiEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {},
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "BlankEnum": {
+                "enum": [
+                    ""
+                ]
+            },
+            "ChangePasswordRequest": {
+                "type": "object",
+                "properties": {
+                    "old_password": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "new_password": {
+                        "type": "string",
+                        "minLength": 6
+                    }
+                },
+                "required": [
+                    "new_password",
+                    "old_password"
+                ]
+            },
+            "ClientKindEnum": {
+                "enum": [
+                    "web",
+                    "android"
+                ],
+                "type": "string",
+                "description": "* `web` - web\n* `android` - android"
+            },
+            "ConfirmSessionMediaRequest": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "object_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                    }
+                }
+            },
+            "CreateSessionRequest": {
+                "type": "object",
+                "properties": {
+                    "song_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    }
+                },
+                "required": [
+                    "song_id"
+                ]
+            },
+            "DoctorWriteRequest": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "gender": {
+                        "$ref": "#/components/schemas/GenderEnum"
+                    },
+                    "phone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32
+                    },
+                    "department": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    }
+                },
+                "required": [
+                    "department",
+                    "gender",
+                    "name",
+                    "phone",
+                    "title"
+                ]
+            },
+            "ExportFiltersRequest": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "default": "",
+                        "maxLength": 64
+                    },
+                    "medical_record_no": {
+                        "type": "string",
+                        "default": "",
+                        "maxLength": 16
+                    },
+                    "treatment_status": {
+                        "default": "",
+                        "oneOf": [
+                            {
+                                "$ref": "#/components/schemas/TreatmentStatusEnum"
+                            },
+                            {
+                                "$ref": "#/components/schemas/BlankEnum"
+                            }
+                        ]
+                    },
+                    "primary_doctor": {
+                        "type": "string",
+                        "format": "uuid",
+                        "nullable": true
+                    },
+                    "created_from": {
+                        "type": "string",
+                        "format": "date",
+                        "nullable": true
+                    },
+                    "created_to": {
+                        "type": "string",
+                        "format": "date",
+                        "nullable": true
+                    }
+                }
+            },
+            "ExportRequestRequest": {
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "$ref": "#/components/schemas/FormatEnum"
+                    },
+                    "filters": {
+                        "$ref": "#/components/schemas/ExportFiltersRequest"
+                    },
+                    "selected_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "maxItems": 10000
+                    },
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                    }
+                },
+                "required": [
+                    "format",
+                    "idempotency_key"
+                ]
+            },
+            "FormatEnum": {
+                "enum": [
+                    "csv",
+                    "xlsx"
+                ],
+                "type": "string",
+                "description": "* `csv` - csv\n* `xlsx` - xlsx"
+            },
+            "GenderEnum": {
+                "enum": [
+                    "male",
+                    "female"
+                ],
+                "type": "string",
+                "description": "* `male` - 男\n* `female` - 女"
+            },
+            "LoginData": {
+                "type": "object",
+                "properties": {
+                    "access": {
+                        "type": "string"
+                    },
+                    "refresh": {
+                        "type": "string"
+                    },
+                    "refresh_expires_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "user": {
+                        "$ref": "#/components/schemas/AccountSnapshot"
+                    }
+                },
+                "required": [
+                    "access",
+                    "refresh_expires_at",
+                    "user"
+                ]
+            },
+            "LoginEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/LoginData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "LoginRequest": {
+                "type": "object",
+                "properties": {
+                    "login_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32
+                    },
+                    "password": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "client_kind": {
+                        "$ref": "#/components/schemas/ClientKindEnum"
+                    },
+                    "remember_me": {
+                        "type": "boolean",
+                        "default": false
+                    }
+                },
+                "required": [
+                    "client_kind",
+                    "login_id",
+                    "password"
+                ]
+            },
+            "LogoutRequest": {
+                "type": "object",
+                "properties": {
+                    "client_kind": {
+                        "$ref": "#/components/schemas/ClientKindEnum"
+                    },
+                    "refresh": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "required": [
+                    "client_kind"
+                ]
+            },
+            "MediaUploadGrantRequestRequest": {
+                "type": "object",
+                "properties": {
+                    "owner_type": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "owner_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "media_type": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "mime": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "size": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "required": [
+                    "media_type",
+                    "mime",
+                    "size"
+                ]
+            },
+            "MimeEnum": {
+                "enum": [
+                    "audio/mpeg",
+                    "audio/wav",
+                    "audio/flac"
+                ],
+                "type": "string",
+                "description": "* `audio/mpeg` - audio/mpeg\n* `audio/wav` - audio/wav\n* `audio/flac` - audio/flac"
+            },
+            "PatchedDoctorWriteRequest": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "gender": {
+                        "$ref": "#/components/schemas/GenderEnum"
+                    },
+                    "phone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32
+                    },
+                    "department": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    }
+                }
+            },
+            "PatchedPatientWriteRequest": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "gender": {
+                        "$ref": "#/components/schemas/GenderEnum"
+                    },
+                    "enrollment_age": {
+                        "type": "integer",
+                        "maximum": 150,
+                        "minimum": 0
+                    },
+                    "phone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32
+                    },
+                    "primary_doctor": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "format": "date",
+                        "writeOnly": true
+                    },
+                    "cycle_weeks": {
+                        "type": "integer",
+                        "maximum": 520,
+                        "minimum": 1,
+                        "writeOnly": true
+                    },
+                    "notes": {
+                        "type": "string"
+                    }
+                }
+            },
+            "PatchedSongWriteRequest": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    },
+                    "artist": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    },
+                    "genre": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "language": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "maximum": 86400,
+                        "minimum": 1
+                    },
+                    "source_asset": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "auto_analyze": {
+                        "type": "boolean",
+                        "writeOnly": true,
+                        "default": false
+                    }
+                }
+            },
+            "PatientMeData": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "medical_record_no": {
+                        "type": "string"
+                    },
+                    "name": {
+                        "type": "string"
+                    },
+                    "gender": {
+                        "$ref": "#/components/schemas/GenderEnum"
+                    },
+                    "enrollment_age": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "phone": {
+                        "type": "string"
+                    },
+                    "notes": {
+                        "type": "string"
+                    },
+                    "primary_doctor": {
+                        "$ref": "#/components/schemas/PatientPrimaryDoctor"
+                    },
+                    "active_treatment_plan": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/TreatmentPlanRead"
+                            }
+                        ],
+                        "nullable": true
+                    },
+                    "treatment_progress": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/PatientTreatmentProgress"
+                            }
+                        ],
+                        "nullable": true
+                    },
+                    "singing_summary": {
+                        "$ref": "#/components/schemas/PatientSingingSummary"
+                    }
+                },
+                "required": [
+                    "active_treatment_plan",
+                    "enrollment_age",
+                    "gender",
+                    "id",
+                    "medical_record_no",
+                    "name",
+                    "notes",
+                    "phone",
+                    "primary_doctor",
+                    "singing_summary",
+                    "treatment_progress"
+                ]
+            },
+            "PatientMeEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/PatientMeData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "PatientMediaUploadGrantData": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "object_key": {
+                        "type": "string"
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "upload_url": {
+                        "type": "string"
+                    },
+                    "upload_token": {
+                        "type": "string"
+                    },
+                    "fields": {
+                        "type": "object",
+                        "additionalProperties": {}
+                    }
+                },
+                "required": [
+                    "asset_id",
+                    "expires_at",
+                    "fields",
+                    "object_key",
+                    "upload_token",
+                    "upload_url"
+                ]
+            },
+            "PatientMediaUploadGrantEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/PatientMediaUploadGrantData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "PatientMediaUploadGrantRequestRequest": {
+                "type": "object",
+                "properties": {
+                    "owner_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "media_type": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "mime": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "size": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "required": [
+                    "media_type",
+                    "mime",
+                    "owner_id",
+                    "size"
+                ]
+            },
+            "PatientPrimaryDoctor": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "name": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "id",
+                    "name"
+                ]
+            },
+            "PatientSingingSessionRead": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "readOnly": true
+                    },
+                    "patient": {
+                        "readOnly": true
+                    },
+                    "song": {
+                        "readOnly": true
+                    },
+                    "treatment_plan": {
+                        "readOnly": true
+                    },
+                    "status": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/SingingSessionStatus"
+                            }
+                        ],
+                        "readOnly": true
+                    },
+                    "score": {
+                        "type": "integer",
+                        "maximum": 32767,
+                        "minimum": 0,
+                        "nullable": true
+                    },
+                    "burp_count": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0,
+                        "nullable": true
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0,
+                        "nullable": true
+                    },
+                    "is_mock": {
+                        "type": "boolean"
+                    },
+                    "created_source": {
+                        "type": "string",
+                        "maxLength": 32
+                    },
+                    "analysis_generation": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0
+                    },
+                    "submitted_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                    },
+                    "completed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "readOnly": true
+                    },
+                    "updated_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "readOnly": true
+                    },
+                    "media": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/SessionMediaRead"
+                        },
+                        "readOnly": true
+                    },
+                    "analysis_task_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "readOnly": true
+                    },
+                    "analysis_results": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/SingingAnalysisResult"
+                        },
+                        "readOnly": true
+                    }
+                },
+                "required": [
+                    "analysis_results",
+                    "analysis_task_ids",
+                    "created_at",
+                    "id",
+                    "media",
+                    "patient",
+                    "song",
+                    "status",
+                    "treatment_plan",
+                    "updated_at"
+                ]
+            },
+            "PatientSingingSessionSummary": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "readOnly": true
+                    },
+                    "patient": {
+                        "readOnly": true
+                    },
+                    "song": {
+                        "readOnly": true
+                    },
+                    "treatment_plan": {
+                        "readOnly": true
+                    },
+                    "status": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/SingingSessionStatus"
+                            }
+                        ],
+                        "readOnly": true
+                    },
+                    "score": {
+                        "type": "integer",
+                        "maximum": 32767,
+                        "minimum": 0,
+                        "nullable": true
+                    },
+                    "burp_count": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0,
+                        "nullable": true
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0,
+                        "nullable": true
+                    },
+                    "is_mock": {
+                        "type": "boolean"
+                    },
+                    "created_source": {
+                        "type": "string",
+                        "maxLength": 32
+                    },
+                    "analysis_generation": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0
+                    },
+                    "submitted_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                    },
+                    "completed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "readOnly": true
+                    },
+                    "updated_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "readOnly": true
+                    }
+                },
+                "required": [
+                    "created_at",
+                    "id",
+                    "patient",
+                    "song",
+                    "status",
+                    "treatment_plan",
+                    "updated_at"
+                ]
+            },
+            "PatientSingingSummary": {
+                "type": "object",
+                "properties": {
+                    "completed_session_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "total_duration_seconds": {
+                        "type": "integer",
+                        "minimum": 0
+                    }
+                },
+                "required": [
+                    "completed_session_count",
+                    "total_duration_seconds"
+                ]
+            },
+            "PatientSongEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/PatientSongRead"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "PatientSongPageData": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/PatientSongRead"
+                        }
+                    }
+                },
+                "required": [
+                    "count",
+                    "page",
+                    "page_size",
+                    "results"
+                ]
+            },
+            "PatientSongPageEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/PatientSongPageData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "PatientSongRead": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "readOnly": true
+                    },
+                    "title": {
+                        "type": "string",
+                        "maxLength": 200
+                    },
+                    "artist": {
+                        "type": "string",
+                        "maxLength": 200
+                    },
+                    "genre": {
+                        "type": "string",
+                        "maxLength": 64
+                    },
+                    "language": {
+                        "type": "string",
+                        "maxLength": 64
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "maximum": 2147483647,
+                        "minimum": 0
+                    },
+                    "analysis_status": {
+                        "$ref": "#/components/schemas/AnalysisStatusEnum"
+                    },
+                    "publication_status": {
+                        "$ref": "#/components/schemas/PublicationStatusEnum"
+                    },
+                    "uploaded_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "readOnly": true
+                    }
+                },
+                "required": [
+                    "artist",
+                    "duration_seconds",
+                    "genre",
+                    "id",
+                    "language",
+                    "title",
+                    "uploaded_at"
+                ]
+            },
+            "PatientTreatmentProgress": {
+                "type": "object",
+                "properties": {
+                    "completed_session_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "target_session_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "progress_percent": {
+                        "type": "string",
+                        "format": "decimal",
+                        "pattern": "^-?\\d{0,3}(?:\\.\\d{0,2})?$",
+                        "nullable": true
+                    },
+                    "current_week": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "required": [
+                    "completed_session_count",
+                    "current_week",
+                    "progress_percent",
+                    "target_session_count"
+                ]
+            },
+            "PatientWriteRequest": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "gender": {
+                        "$ref": "#/components/schemas/GenderEnum"
+                    },
+                    "enrollment_age": {
+                        "type": "integer",
+                        "maximum": 150,
+                        "minimum": 0
+                    },
+                    "phone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32
+                    },
+                    "primary_doctor": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "format": "date",
+                        "writeOnly": true
+                    },
+                    "cycle_weeks": {
+                        "type": "integer",
+                        "maximum": 520,
+                        "minimum": 1,
+                        "writeOnly": true
+                    },
+                    "notes": {
+                        "type": "string"
+                    }
+                }
+            },
+            "PrivateUrlData": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string"
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    }
+                },
+                "required": [
+                    "expires_at",
+                    "url"
+                ]
+            },
+            "PrivateUrlEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/PrivateUrlData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "PublicationStatusEnum": {
+                "enum": [
+                    "draft",
+                    "published"
+                ],
+                "type": "string",
+                "description": "* `draft` - 未发布\n* `published` - 已发布"
+            },
+            "QiniuCallbackRequestRequest": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "hash": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "fsize": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "mimeType": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "required": [
+                    "fsize",
+                    "hash",
+                    "key",
+                    "mimeType"
+                ]
+            },
+            "ReanalyzeRequest": {
+                "type": "object",
+                "properties": {
+                    "task_type": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/ReanalyzeTaskTypeEnum"
+                            }
+                        ],
+                        "default": "vocal_separation"
+                    },
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                    }
+                }
+            },
+            "ReanalyzeTaskTypeEnum": {
+                "enum": [
+                    "vocal_separation",
+                    "accompaniment_generation",
+                    "lyrics_recognition"
+                ],
+                "type": "string",
+                "description": "* `vocal_separation` - vocal_separation\n* `accompaniment_generation` - accompaniment_generation\n* `lyrics_recognition` - lyrics_recognition"
+            },
+            "RefreshData": {
+                "type": "object",
+                "properties": {
+                    "access": {
+                        "type": "string"
+                    },
+                    "refresh": {
+                        "type": "string"
+                    },
+                    "refresh_expires_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "user": {
+                        "$ref": "#/components/schemas/AccountSnapshot"
+                    }
+                },
+                "required": [
+                    "access",
+                    "refresh_expires_at",
+                    "user"
+                ]
+            },
+            "RefreshEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/RefreshData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "RefreshRequest": {
+                "type": "object",
+                "properties": {
+                    "client_kind": {
+                        "$ref": "#/components/schemas/ClientKindEnum"
+                    },
+                    "refresh": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "required": [
+                    "client_kind"
+                ]
+            },
+            "RoleEnum": {
+                "enum": [
+                    "system_admin",
+                    "doctor",
+                    "patient"
+                ],
+                "type": "string",
+                "description": "* `system_admin` - 系统管理员\n* `doctor` - 医生\n* `patient` - 患者"
+            },
+            "SessionMediaRead": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "readOnly": true
+                    },
+                    "media_type": {
+                        "$ref": "#/components/schemas/SessionMediaReadMediaTypeEnum"
+                    },
+                    "status": {
+                        "type": "string",
+                        "readOnly": true
+                    },
+                    "mime": {
+                        "type": "string",
+                        "readOnly": true
+                    },
+                    "size": {
+                        "type": "integer",
+                        "readOnly": true
+                    },
+                    "confirmed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                    }
+                },
+                "required": [
+                    "asset_id",
+                    "media_type",
+                    "mime",
+                    "size",
+                    "status"
+                ]
+            },
+            "SessionMediaReadMediaTypeEnum": {
+                "enum": [
+                    "singing_audio",
+                    "singing_video"
+                ],
+                "type": "string",
+                "description": "* `singing_audio` - 演唱音频\n* `singing_video` - 演唱录像"
+            },
+            "SessionMutationData": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/SingingSessionStatus"
+                    },
+                    "analysis_task_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                },
+                "required": [
+                    "analysis_task_ids",
+                    "session_id",
+                    "status"
+                ]
+            },
+            "SessionMutationEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/SessionMutationData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "SessionUploadGrantData": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "asset_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "object_key": {
+                        "type": "string"
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "upload_url": {
+                        "type": "string"
+                    },
+                    "upload_token": {
+                        "type": "string"
+                    },
+                    "fields": {
+                        "type": "object",
+                        "additionalProperties": {}
+                    }
+                },
+                "required": [
+                    "asset_id",
+                    "expires_at",
+                    "fields",
+                    "object_key",
+                    "session_id",
+                    "upload_token",
+                    "upload_url"
+                ]
+            },
+            "SessionUploadGrantEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/SessionUploadGrantData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "SessionUploadGrantMediaTypeEnum": {
+                "enum": [
+                    "singing_audio",
+                    "singing_video"
+                ],
+                "type": "string",
+                "description": "* `singing_audio` - singing_audio\n* `singing_video` - singing_video"
+            },
+            "SessionUploadGrantRequest": {
+                "type": "object",
+                "properties": {
+                    "media_type": {
+                        "$ref": "#/components/schemas/SessionUploadGrantMediaTypeEnum"
+                    },
+                    "mime": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 127
+                    },
+                    "size": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "required": [
+                    "media_type",
+                    "mime",
+                    "size"
+                ]
+            },
+            "SingingAnalysisResult": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "task_type": {
+                        "$ref": "#/components/schemas/SingingAnalysisResultTaskTypeEnum"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/SingingAnalysisResultStatusEnum"
+                    },
+                    "generation": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "protocol_version": {
+                        "type": "string"
+                    },
+                    "is_mock": {
+                        "type": "boolean",
+                        "nullable": true
+                    },
+                    "payload": {
+                        "nullable": true
+                    },
+                    "time_series": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "$ref": "#/components/schemas/AnalysisTimeSeriesData"
+                        }
+                    },
+                    "error_code": {
+                        "type": "string"
+                    },
+                    "error_summary": {
+                        "type": "string"
+                    },
+                    "attempt": {
+                        "type": "integer",
+                        "minimum": 0
+                    }
+                },
+                "required": [
+                    "attempt",
+                    "error_code",
+                    "error_summary",
+                    "generation",
+                    "id",
+                    "is_mock",
+                    "payload",
+                    "protocol_version",
+                    "status",
+                    "task_type",
+                    "time_series"
+                ]
+            },
+            "SingingAnalysisResultStatusEnum": {
+                "enum": [
+                    "pending",
+                    "processing",
+                    "succeeded",
+                    "failed",
+                    "retrying",
+                    "superseded"
+                ],
+                "type": "string",
+                "description": "* `pending` - 待处理\n* `processing` - 处理中\n* `succeeded` - 成功\n* `failed` - 失败\n* `retrying` - 重试中\n* `superseded` - 已被新源替代"
+            },
+            "SingingAnalysisResultTaskTypeEnum": {
+                "enum": [
+                    "vocal_separation",
+                    "accompaniment_generation",
+                    "lyrics_recognition",
+                    "singing_audio_metrics",
+                    "face_landmarks"
+                ],
+                "type": "string",
+                "description": "* `vocal_separation` - 人声分离\n* `accompaniment_generation` - 伴奏生成\n* `lyrics_recognition` - 歌词识别\n* `singing_audio_metrics` - 演唱音频指标\n* `face_landmarks` - 面部关键点"
+            },
+            "SingingSessionEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/PatientSingingSessionRead"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "SingingSessionPageData": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/PatientSingingSessionSummary"
+                        }
+                    }
+                },
+                "required": [
+                    "count",
+                    "page",
+                    "page_size",
+                    "results"
+                ]
+            },
+            "SingingSessionPageEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/SingingSessionPageData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "SingingSessionStatus": {
+                "type": "string",
+                "enum": [
+                    "created",
+                    "awaiting_upload",
+                    "uploaded",
+                    "processing",
+                    "completed",
+                    "failed",
+                    "cancelled"
+                ]
+            },
+            "SongUploadGrantRequest": {
+                "type": "object",
+                "properties": {
+                    "mime": {
+                        "$ref": "#/components/schemas/MimeEnum"
+                    },
+                    "size": {
+                        "type": "integer",
+                        "maximum": 52428800,
+                        "minimum": 1
+                    },
+                    "song_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    }
+                },
+                "required": [
+                    "mime",
+                    "size"
+                ]
+            },
+            "SongWriteRequest": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    },
+                    "artist": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    },
+                    "genre": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "language": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "maximum": 86400,
+                        "minimum": 1
+                    },
+                    "source_asset": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "auto_analyze": {
+                        "type": "boolean",
+                        "writeOnly": true,
+                        "default": false
+                    }
+                },
+                "required": [
+                    "artist",
+                    "duration_seconds",
+                    "genre",
+                    "id",
+                    "language",
+                    "source_asset",
+                    "title"
+                ]
+            },
+            "TreatmentPlanRead": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "readOnly": true
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "format": "date"
+                    },
+                    "cycle_weeks": {
+                        "type": "integer",
+                        "maximum": 32767,
+                        "minimum": 0
+                    },
+                    "target_session_count": {
+                        "type": "integer",
+                        "maximum": 32767,
+                        "minimum": 0
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/TreatmentPlanReadStatusEnum"
+                    }
+                },
+                "required": [
+                    "cycle_weeks",
+                    "id",
+                    "start_date",
+                    "target_session_count"
+                ]
+            },
+            "TreatmentPlanReadStatusEnum": {
+                "enum": [
+                    "pending",
+                    "active",
+                    "completed",
+                    "cancelled"
+                ],
+                "type": "string",
+                "description": "* `pending` - 待开始\n* `active` - 进行中\n* `completed` - 已完成\n* `cancelled` - 已取消"
+            },
+            "TreatmentStatusEnum": {
+                "enum": [
+                    "active",
+                    "pending",
+                    "completed",
+                    "cancelled",
+                    "none"
+                ],
+                "type": "string",
+                "description": "* `active` - active\n* `pending` - pending\n* `completed` - completed\n* `cancelled` - cancelled\n* `none` - none"
+            }
+        },
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT"
+            },
+            "logoutBearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT"
+            }
+        }
+    }
+}

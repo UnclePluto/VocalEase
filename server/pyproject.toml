@@ -1,0 +1,27 @@
+[project]
+name = "vocaease-server"
+version = "0.1.0"
+description = "VocaEase server"
+requires-python = ">=3.13"
+dependencies = [
+    "gunicorn>=23,<24",
+    "celery[redis]>=5.5,<6",
+    "Django>=5.2,<5.3",
+    "djangorestframework>=3.17,<4",
+    "djangorestframework-simplejwt>=5.5,<6",
+    "drf-spectacular>=0.29,<0.30",
+    "openpyxl>=3.1,<4",
+    "psycopg[binary]>=3.2,<4",
+    "qiniu==7.18.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-django>=4.9,<5",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "vocaease.settings.test"
+python_files = ["test_*.py"]
+markers = ["postgresql: requires the real PostgreSQL database backend"]
