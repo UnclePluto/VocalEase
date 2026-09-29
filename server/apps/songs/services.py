@@ -156,10 +156,16 @@ def _require_bound_source(*, song_id: UUID, asset_id: UUID, require_intent: bool
     return validate_source_asset(song=None, song_id=song_id, asset=asset)
 
 
-def create_song(*, actor, request_id: str, song_id: UUID | None, source_asset: UUID | None, auto_analyze: bool = False, **values) -> Song:
+def create_song(*, actor, request_id: str, song_id: UUID | None, source_asset: UUID | None, auto_analyze: bool = False, ingestion_mode: str = "existing", vocal_asset=None, accompaniment_asset=None, lyrics_asset=None, **values) -> Song:
     if song_id is None or source_asset is None:
         raise SourceAssetInvalid("新建歌曲必须使用歌曲专属的已完成源媒体", code="song_upload_intent_required")
     with transaction.atomic():
+        from rest_framework.exceptions import ValidationError
+        from .resources import validate_song_resource
+        if ingestion_mode == "manual" and auto_analyze:
+            raise ValidationError({"auto_analyze": "人工上传不可自动分析"})
+        if ingestion_mode != "manual" and any((vocal_asset, accompaniment_asset, lyrics_asset)):
+            raise ValidationError({"ingestion_mode": "现有上传流程不可绑定人工资源"})
         if Song.objects.filter(pk=song_id).exists():
             raise SongStateConflict("歌曲标识已存在", code="song_id_exists")
         asset = _require_bound_source(song_id=song_id, asset_id=source_asset, require_intent=True)
@@ -175,6 +181,10 @@ def create_song(*, actor, request_id: str, song_id: UUID | None, source_asset: U
             source_verified_sha256=asset.sha256,
             source_verified_etag=asset.etag,
             source_verified_generation=asset.manifest_generation,
+            ingestion_mode=ingestion_mode,
+            vocal_asset=validate_song_resource(song_id=song_id, asset_id=vocal_asset, media_type="song_vocal") if vocal_asset else None,
+            accompaniment_asset=validate_song_resource(song_id=song_id, asset_id=accompaniment_asset, media_type="song_accompaniment") if accompaniment_asset else None,
+            lyrics_asset=validate_song_resource(song_id=song_id, asset_id=lyrics_asset, media_type="lyrics") if lyrics_asset else None,
             **values,
         )
         record(actor=actor, action="song.create", target=song, changes={"title": song.title, "artist": song.artist, "genre": song.genre, "language": song.language, "duration_seconds": song.duration_seconds, "source": _source_snapshot(asset)}, request_id=request_id)

@@ -4,7 +4,7 @@ from .models import Song
 
 
 def songs_for_admin(*, keyword: str = "", genre: str = "", language: str = "", analysis_status: str = "", publication_status: str = "", ordering: str = "-created_at"):
-    queryset = Song.objects.filter(deleted_at__isnull=True).select_related("source_asset")
+    queryset = Song.objects.filter(deleted_at__isnull=True).select_related("source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset")
     if keyword:
         queryset = queryset.filter(Q(title__icontains=keyword) | Q(artist__icontains=keyword))
     if genre:

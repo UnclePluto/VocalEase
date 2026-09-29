@@ -60,7 +60,12 @@ class SongUploadGrantView(APIView):
         serializer = SongUploadGrantSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
-        song_id, asset, grant = issue_song_upload_grant(actor=request.user, request_id=request.request_id, **values)
+        media_type = values.pop("media_type")
+        if media_type == "song_source":
+            song_id, asset, grant = issue_song_upload_grant(actor=request.user, request_id=request.request_id, **values)
+        else:
+            from .resources import issue_optional_song_upload_grant
+            song_id, asset, grant = issue_optional_song_upload_grant(actor=request.user, request_id=request.request_id, media_type=media_type, **values)
         data = {
             "song_id": str(song_id), "owner_id": str(song_id), "asset_id": str(asset.id),
             "object_key": grant.object_key, "expires_at": grant.expires_at.isoformat(),
@@ -104,6 +109,9 @@ class AdminSongDetailView(APIView):
 
     @extend_schema(request=SongWriteSerializer, responses={200: ApiEnvelopeSerializer})
     def patch(self, request, song_id):
+        if any(key in request.data for key in ("ingestion_mode", "vocal_asset", "accompaniment_asset", "lyrics_asset")):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"resources": "请使用歌曲资源管理接口修改资源"})
         serializer = SongWriteSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data.copy()

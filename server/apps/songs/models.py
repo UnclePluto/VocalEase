@@ -5,6 +5,10 @@ from common.models import UUIDSoftDeleteModel
 
 
 class Song(UUIDSoftDeleteModel):
+    class IngestionMode(models.TextChoices):
+        EXISTING = "existing", "现有上传"
+        MANUAL = "manual", "人工上传"
+
     class AnalysisStatus(models.TextChoices):
         PENDING = "pending", "待分析"
         PROCESSING = "processing", "分析中"
@@ -22,6 +26,10 @@ class Song(UUIDSoftDeleteModel):
     language = models.CharField(max_length=64)
     duration_seconds = models.PositiveIntegerField()
     source_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="source_songs")
+    vocal_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="vocal_songs")
+    accompaniment_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="accompaniment_songs")
+    lyrics_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="lyrics_songs")
+    ingestion_mode = models.CharField(max_length=16, choices=IngestionMode.choices, default=IngestionMode.EXISTING)
     source_available = models.BooleanField(default=False)
     source_verified_at = models.DateTimeField(null=True, blank=True)
     source_verified_asset_id = models.UUIDField(null=True, blank=True)
@@ -41,6 +49,7 @@ class Song(UUIDSoftDeleteModel):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
+            models.CheckConstraint(condition=Q(ingestion_mode__in=["existing", "manual"]), name="song_ingestion_mode_valid"),
             models.CheckConstraint(condition=Q(duration_seconds__gt=0), name="song_duration_positive"),
             models.CheckConstraint(condition=Q(analysis_status__in=["pending", "processing", "succeeded", "failed", "retrying"]), name="song_analysis_status_valid"),
             models.CheckConstraint(condition=Q(publication_status__in=["draft", "published"]), name="song_publication_status_valid"),
