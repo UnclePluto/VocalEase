@@ -117,6 +117,15 @@ def test_https_proxy_topology_preserves_edge_proto_without_public_backend_port()
     assert "覆盖客户端传入的 X-Forwarded-Proto" in readme
 
 
+def test_local_media_upload_proxy_limit_covers_configured_maximum(settings):
+    upload_location = "location ^~ /api/v1/media/local-upload/ {"
+    for config_path in ("deploy/nginx/default.conf", "deploy/openresty.vocaease.conf"):
+        config = (REPOSITORY_ROOT / config_path).read_text()
+        location_body = config.split(upload_location, 1)[1].split("}", 1)[0]
+        limit = next(line.strip().split()[1].removesuffix("m;") for line in location_body.splitlines() if "client_max_body_size" in line)
+        assert int(limit) * 1024 * 1024 >= settings.MEDIA_VIDEO_MAX_BYTES
+
+
 def test_compose_production_path_rejects_placeholder_secret_key():
     environment = os.environ.copy()
     environment.update(
