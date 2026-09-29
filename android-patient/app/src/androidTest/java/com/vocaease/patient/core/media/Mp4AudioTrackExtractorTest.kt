@@ -5,6 +5,8 @@ import android.media.MediaFormat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import java.io.RandomAccessFile
+import java.security.MessageDigest
 import java.nio.ByteBuffer
 import android.system.Os
 import android.system.OsConstants
@@ -31,6 +33,12 @@ class Mp4AudioTrackExtractorTest {
 
         assertEquals("video/mp4", result.videoContainerMimeType)
         assertEquals("audio/mp4", result.audioContainerMimeType)
+        RandomAccessFile(output, "r").use { file ->
+            file.seek(8)
+            val brand = ByteArray(4).also(file::readFully)
+            assertEquals("M4A ", String(brand, Charsets.US_ASCII))
+        }
+        assertEquals(audioSampleDigest(source), audioSampleDigest(output))
         assertEquals("video/avc", result.videoCodecMimeType)
         assertEquals("audio/mp4a-latm", result.audioCodecMimeType)
         assertEquals(1, outputTracks.size)
@@ -158,6 +166,29 @@ class Mp4AudioTrackExtractorTest {
                     if (!extractor.advance()) break
                 }
             }
+        } finally {
+            extractor.release()
+        }
+    }
+
+    private fun audioSampleDigest(file: File): String {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.absolutePath)
+            val track = (0 until extractor.trackCount).single {
+                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME).orEmpty().startsWith("audio/")
+            }
+            extractor.selectTrack(track)
+            val buffer = ByteBuffer.allocate(1024 * 1024)
+            val digest = MessageDigest.getInstance("SHA-256")
+            while (true) {
+                buffer.clear()
+                val size = extractor.readSampleData(buffer, 0)
+                if (size < 0) break
+                digest.update(buffer.array(), 0, size)
+                if (!extractor.advance()) break
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
         } finally {
             extractor.release()
         }

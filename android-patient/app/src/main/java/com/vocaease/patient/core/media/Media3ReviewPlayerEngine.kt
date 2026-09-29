@@ -110,6 +110,7 @@ class Media3ReviewPlayerEngine(
 
     override fun play() {
         check(storage.isLeaseActive()) { "当前账户回看已失效" }
+        if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
         player.play()
     }
 

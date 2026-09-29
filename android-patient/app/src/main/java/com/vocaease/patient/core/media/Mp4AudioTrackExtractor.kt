@@ -8,6 +8,7 @@ import android.media.MediaMuxer
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.util.Locale
 import kotlin.math.abs
@@ -103,6 +104,7 @@ class Mp4AudioTrackExtractor {
             muxer = null
             securePlaintext(outputAudio)
             val output = inspectAudioOnly(outputAudio)
+            markAudioOnlyContainer(outputAudio)
             val audioContainerMime = containerMime(outputAudio)
             if (audioContainerMime != AUDIO_CONTAINER_MIME) fail(outputAudio)
             if (abs(videoDurationUs - output.durationUs) > DURATION_TOLERANCE_US) fail(outputAudio)
@@ -129,6 +131,22 @@ class Mp4AudioTrackExtractor {
             if (muxerStarted) runCatching { muxer?.stop() }
             runCatching { muxer?.release() }
             if (outputAudio.exists() && outputAudio.length() == 0L) outputAudio.delete()
+        }
+    }
+
+    /**
+     * MediaMuxer 即使只有 AAC 音轨也写入通用 mp42 标识，七牛内容探测会将其判为 video/mp4。
+     * 仅在确认单 AAC 音轨后更新 ftyp 的主品牌为 M4A；不移动 box、不修改样本或兼容品牌。
+     */
+    private fun markAudioOnlyContainer(file: File) {
+        RandomAccessFile(file, "rw").use { output ->
+            val size = output.readInt().toLong() and 0xffffffffL
+            val type = ByteArray(4).also(output::readFully)
+            if (String(type, Charsets.US_ASCII) != "ftyp" || size < 16 ||
+                size > output.length() || (size - 16) % 4 != 0L
+            ) throw MediaValidationException()
+            output.write("M4A ".toByteArray(Charsets.US_ASCII))
+            output.fd.sync()
         }
     }
 

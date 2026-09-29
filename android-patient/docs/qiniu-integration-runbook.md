@@ -4,7 +4,7 @@
 
 仅使用隔离测试私有空间、测试患者、测试歌曲和 HTTPS callback。访问密钥、私钥、上传 token 与对象 URL 只放入本地环境或密钥系统，禁止写入命令历史、文档、截图和日志。记录标识时统一使用后 8 位。
 
-当前环境没有七牛凭据、bucket、upload host 或 callback 配置，以下项目全部待外部联调，本文不代表已通过。
+本文原有的隔离空间、大文件分片与恢复专项仍待完整验收。2026-09-29 已按用户明确授权，使用其指定的线上测试患者完成短录制上传验证，结果见文末；不据此标记全部专项通过。
 
 ## 隔离测试作用域
 
@@ -119,3 +119,83 @@ uv run --no-sync python manage.py qa_e2e \
 再确认 SDK recorder、明文 upload lease、本地草稿与密文均清空，最后撤销临时凭据并清理本地终端中的敏感输入。验收记录仅保留 job/session/asset 后 8 位、计数、时间和缺陷号；不要保存完整患者 UUID、对象前缀、确认令牌、object key 或 Kodo 响应正文。
 
 本仓库已用内存 Kodo 替身覆盖 dry-run 只列举不删除、不可伪造作用域、确认令牌双侧清单绑定、持久 grant/callback quiet gate、TTL/lease 等待、稳定窗口迟到写入、已知与孤儿对象删除/后验核验和数据库清理。当前环境没有真实七牛凭据，因此没有执行或声称完成实云清理；专用测试 bucket 的真实删除仍为外部待验收项。
+
+## AAC 模拟器配置与实际上传验收
+
+### 模拟器配置
+
+Pixel_7 的 Google Play 系统镜像不允许 `adb root`，其录像档位默认使用 AMR。
+使用已有的 Google APIs 可调试镜像，启动时开启前摄和临时可写系统：
+
+```sh
+emulator -avd VocaEase_API_37 -port 5556 -no-snapshot -writable-system \
+  -camera-front emulated -camera-back emulated -gpu swiftshader
+adb -s emulator-5556 root
+adb -s emulator-5556 pull /vendor/etc/media_profiles_V1_0.xml /tmp/media-profiles-original.xml
+```
+
+仅在副本中将 `EncoderProfile/Audio` 设置为 `codec="aac"`、`bitRate="96000"`、
+`sampleRate="48000"`、`channels="1"`，保存为 `/tmp/media-profiles-aac.xml`。
+保留其他配置。只对专用模拟器执行以下操作，勿对物理设备执行：
+
+```sh
+adb -s emulator-5556 remount
+adb -s emulator-5556 push /tmp/media-profiles-aac.xml /vendor/etc/vocaease_media_profiles_aac.xml
+adb -s emulator-5556 shell chmod 644 /vendor/etc/vocaease_media_profiles_aac.xml
+adb -s emulator-5556 shell restorecon /vendor/etc/vocaease_media_profiles_aac.xml
+adb -s emulator-5556 shell setprop media.settings.xml /vendor/etc/vocaease_media_profiles_aac.xml
+adb -s emulator-5556 shell stop
+adb -s emulator-5556 shell start
+```
+
+若 remount 要求重启，先重启、重新 root/remount，再写入配置。
+修改前保存 `adb shell getprop media.settings.xml` 的原值。Android 在框架启动时缓存媒体档位，
+只重启应用不会刷新。不要将配置放在 `/data/local/tmp`：框架进程可能无权读取该目录。
+
+恢复：将 `media.settings.xml` 设置回原值（原为空时使用 `adb shell 'setprop media.settings.xml ""'`），
+删除新增配置文件，再执行 stop/start。原始 `/vendor/etc/media_profiles_V1_0.xml` 始终不覆盖。
+
+### 必须验证的实际行为
+
+1. 手机号登录，无治疗计划也能选择原声、伴奏齐全的歌曲。
+2. 播放线上伴奏，实际 CameraX 录制至少 10 秒。
+3. 日志 `AudioConfigUtil` 的实际 MIME 为 `audio/mp4a-latm`，停止后进入本地回看并显示音视频检查通过。
+4. 视频与独立音频均可播放，播放结束后能重新播放。
+5. 从应用确认提交，音频和视频均收到七牛可信回执，最终会话处理完成。
+6. 通过私有下载读取实际上传文件，核对音轨、视频轨、编码和时长。
+
+### 已发现并修复的客户端问题
+
+- Android MediaMuxer 的纯音频输出仍带 `mp42` 主品牌。七牛内容探测识别为 `video/mp4`，
+  与 `audio/mp4` 上传策略不符，返回 403。抽取器在确认单 AAC 音轨后写入 `M4A ` 主品牌；
+  文件长度、box 偏移、兼容品牌和 AAC 样本数据均保持不变。服务端 MIME 限制不放宽。
+- 本地播放器在 `STATE_ENDED` 时单独调用 play 不会重播；开始播放前回到 0。
+- 已有回归测试使用实际 MediaExtractor/MediaMuxer 和加密文件 ExoPlayer，核对样本 SHA-256 与实际重播。
+
+来源：[MP4 注册品牌](https://mp4ra.org/registered-types/brands)、
+[七牛上传策略与 MIME 探测](https://developer-doc.qiniu.com/products/kodo/development-guidelines/security/1-put-policy)。
+
+模拟器配置仅用于验证 AAC 设备路径；未将应用升级为预发布 CameraX，也未将 AMR 转码为 AAC。
+真机麦克风、耳机、摄像头及真人演唱效果仍需实机验收。线上算法执行器如为 mock，不能作为评分质量证据。
+
+### 2026-09-29 验收证据
+
+- Android API 37 可调试模拟器，使用实际 CameraX 前摄和麦克风录制，线上《成都》伴奏。
+- 实际会话 `3960bee0` 无治疗计划，最终 `completed`。
+- 音频回执 `ready / audio/mp4 / 173315 bytes`，私有下载 HTTP 200；
+  ffprobe 确认只有 AAC 音轨、48000 Hz、13.887979 秒、M4A 主品牌。
+- 视频回执 `ready / video/mp4 / 1809944 bytes`，私有下载 HTTP 200；
+  ffprobe 确认 H.264 视频与 AAC 音频，13.895833 秒。
+- 安卓本地视频/独立音频可播放，演唱回顾页云端视频能加载实际画面并播放。
+- 修复前：重播设备测试失败；抽取测试的品牌断言收到 mp42；真实音频上传 HTTP 403。
+- 修复后：8 项相关设备测试通过；320 项 JVM 测试通过；Release lint、构建、签名和源码/APK 隐私扫描通过。
+- 临时诊断日志已从交付源码和 APK 移除。
+- 旧格式失败测试草稿已暂停，避免持续无效重试；新的录制使用修复后的格式。
+- 模拟算法结果仍为 `is_mock=true`，不代表真实评分质量。
+
+最终签名包复验：会话后 8 位 `56d411c2`，实际录制约 20 秒，视频播放结束后可从头重播；
+音频、视频均 `ready`，会话 `completed`，两份私有下载均 HTTP 200。音频 257224 bytes，
+视频 2471479 bytes。短文件上传过程中发生等待，最终自动完成；大文件分片和弱网专项仍按前文单独验收。
+
+交付 APK：`app/build/outputs/apk/online-test/vocaease-aac-online-test-20260929.apk`（本地测试签名）。
+SHA-256：`88155f6f98d80cbf6cf753bb6af1dd6d6c31b3346220c03a8e582311be67160a`。

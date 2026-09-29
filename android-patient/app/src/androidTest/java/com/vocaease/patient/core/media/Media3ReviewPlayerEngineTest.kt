@@ -12,10 +12,16 @@ import com.vocaease.patient.core.database.AuthenticatedAccountSession
 import com.vocaease.patient.core.database.StaleAccountScopeException
 import com.vocaease.patient.core.database.VocaEaseDatabase
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
+import com.vocaease.patient.feature.training.ReviewMediaSource
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,12 +40,50 @@ class Media3ReviewPlayerEngineTest {
         database = VocaEaseDatabase.inMemory(context, allowMainThreadQueries = true)
         root = File(context.filesDir, "review-engine-${System.nanoTime()}")
         session = CountingAccountSession()
+        ChunkedAesGcmFileStore(context, root).destroyAccountEncryption("patient-listener")
     }
 
     @After
     fun tearDown() {
+        ChunkedAesGcmFileStore(context, root).destroyAccountEncryption("patient-listener")
         database.close()
         root.deleteRecursively()
+    }
+
+    @Test
+    fun 真实加密视频播放结束后可以再次从头播放() = runBlocking {
+        val storage = AccountScopedDraftStorageProvider(
+            database, ChunkedAesGcmFileStore(context, root), session,
+        ).current()
+        val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("sample_avc_aac.mp4").use { it.readBytes() }
+        val encrypted = storage.encryptMedia(bytes.inputStream(), bytes.size.toLong())
+        val ended = CountDownLatch(1)
+        val replayStarted = CountDownLatch(1)
+        val replayRequested = AtomicBoolean(false)
+        lateinit var engine: Media3ReviewPlayerEngine
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            engine = Media3ReviewPlayerEngine(context, storage)
+            engine.setListener { event ->
+                if (event is ReviewEngineEvent.Ended) ended.countDown()
+                if (event is ReviewEngineEvent.Playing && event.isPlaying && replayRequested.get()) {
+                    replayStarted.countDown()
+                }
+            }
+            engine.load(
+                ReviewMediaSource("replay-test", "video/mp4", bytes.size.toLong(), encrypted.relativePath),
+                0, true,
+            )
+        }
+        try {
+            assertTrue("首次播放应正常结束", ended.await(10, TimeUnit.SECONDS))
+            replayRequested.set(true)
+            instrumentation.runOnMainSync { engine.play() }
+            assertTrue("结束后再次播放应重新启动", replayStarted.await(5, TimeUnit.SECONDS))
+        } finally {
+            instrumentation.runOnMainSync { engine.release() }
+        }
     }
 
     @Test
