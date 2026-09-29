@@ -193,10 +193,17 @@ textarea, select { font: inherit; }
 .song-upload-zone > .anticon { color: #1677ff; font-size: 28px; }
 .song-upload-zone small { color: #bfbfbf; font-size: 12px; }
 .song-table-surface { min-height: calc(100vh - 296px); }
-.songs-toolbar { grid-template-columns: 312px 1fr; padding-right: 0; }
+.songs-toolbar { grid-template-columns: minmax(0, 1fr) auto; padding-right: 0; }
 .songs-toolbar > .ant-select, .songs-toolbar > .ant-btn { display: none; }
+.songs-search-actions { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.songs-search-actions .management-search { width: 312px; max-width: 100%; }
 .song-count { align-self: center; justify-self: end; color: #8c8c8c; }
 .song-row-icon { color: #1677ff; }
+.song-resource-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 18px; margin-bottom: 16px; }
+.song-resource-field { display: grid; gap: 8px; }
+.song-resource-field label { font-weight: 500; }
+.song-resource-picker { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.song-resource-filename { min-width: 0; max-width: 100%; }
 .ant-modal audio { width: 100%; margin-top: 16px; }
 .patient-data-error, .media-playback-error { margin: 16px 0; }
 .patient-data-page { display: grid; gap: 16px; }
@@ -314,6 +321,8 @@ textarea, select { font: inherit; }
   .song-upload-card { height: 148px; padding: 16px; }
   .song-upload-zone { height: 116px; padding: 12px; text-align: center; }
   .songs-toolbar { grid-template-columns: 1fr; }
+  .songs-search-actions { flex-wrap: wrap; }
+  .song-resource-fields { grid-template-columns: 1fr; }
   .song-count { justify-self: start; }
   .analytics-cards { grid-template-columns: 1fr 1fr; gap: 10px; }
   .analytics-toolbar { grid-template-columns: 1fr; }
