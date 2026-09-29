@@ -51,6 +51,14 @@ fun RecordingScreen(
     onStop: () -> Unit,
     onClose: () -> Unit,
 ) {
+    val statusLabel = when (val recording = state.recordingState) {
+        is RecordingState.Countdown -> "准备录制 ${recording.remainingSeconds}"
+        RecordingState.Starting -> "正在启动录制"
+        is RecordingState.Recording -> "●  REC  ${formatTime(state.recordingDurationMillis)}"
+        RecordingState.Finalizing -> "正在保存录制…"
+        is RecordingState.Reviewable -> "录制已保存"
+        is RecordingState.Interrupted -> "录制已中断"
+    }
     val dark = Color(0xFF06100B)
     val panel = Color(0xFF0D1B14)
     val muted = Color(0xFF89A094)
@@ -122,21 +130,22 @@ fun RecordingScreen(
                 modifier = Modifier.align(Alignment.TopStart).padding(14.dp).clip(CircleShape)
                     .background(Color(0xCC07100C)).padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
-                Text("●  REC  ${formatTime(state.recordingDurationMillis)}", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text(statusLabel, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
             Box(
                 modifier = Modifier.align(Alignment.Center).size(width = 120.dp, height = 158.dp)
                     .border(1.dp, BrandGreen, RoundedCornerShape(60.dp)),
             )
             Text(
-                state.faceStatus,
+                state.errorMessage ?: state.faceStatus,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp).clip(CircleShape)
                     .background(Color(0xCC07100C)).padding(horizontal = 16.dp, vertical = 8.dp),
-                color = Color(0xFFD7E9DF),
+                color = if (state.errorMessage != null) AppError else Color(0xFFD7E9DF),
                 fontSize = 10.sp,
             )
             IconButton(
                 onClick = onStop,
+                enabled = state.recordingState is RecordingState.Recording,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).size(58.dp)
                     .background(Color(0xFFF6FAF7), CircleShape).semantics { contentDescription = "结束录制" },
             ) {

@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsEqualTo
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.assertWidthIsEqualTo
@@ -84,6 +85,37 @@ class RecordingScreenTest {
             .assertWidthIsAtLeast(48.dp)
             .assertHeightIsAtLeast(48.dp)
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    @Test
+    fun 保存失败显示错误并禁用重复结束录制() {
+        composeRule.setContent {
+            VocaEaseTheme {
+                RecordingScreen(
+                    RecordingUiState(
+                        recordingState = RecordingState.Interrupted(RecordingInterruption.VALIDATION),
+                        errorMessage = "录制文件校验失败，请重新录制",
+                    ), {}, {}, {},
+                )
+            }
+        }
+        composeRule.onNodeWithText("录制已中断").assertIsDisplayed()
+        composeRule.onNodeWithText("录制文件校验失败，请重新录制").assertIsDisplayed()
+        composeRule.onNodeWithText("REC", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("结束录制").assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("关闭并取消录制").assertIsDisplayed()
+    }
+
+    @Test
+    fun 保存中显示状态并禁用重复结束录制() {
+        composeRule.setContent {
+            VocaEaseTheme {
+                RecordingScreen(RecordingUiState(recordingState = RecordingState.Finalizing), {}, {}, {})
+            }
+        }
+        composeRule.onNodeWithText("正在保存录制…").assertIsDisplayed()
+        composeRule.onNodeWithText("REC", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("结束录制").assertIsNotEnabled()
     }
 
     @Test
