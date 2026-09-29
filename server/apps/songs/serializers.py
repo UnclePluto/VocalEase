@@ -62,6 +62,11 @@ class SongUploadGrantSerializer(serializers.Serializer):
     song_id = serializers.UUIDField(required=False)
     media_type = serializers.ChoiceField(choices=("song_source", "song_vocal", "song_accompaniment", "lyrics"), required=False, default="song_source")
 
+    def validate(self, attrs):
+        if attrs["media_type"] == "lyrics" and (attrs["mime"] != "text/plain" or attrs["size"] > 1024 * 1024):
+            raise serializers.ValidationError({"lyrics": "LRC 歌词须为 text/plain 且不能超过 1MB"})
+        return attrs
+
 
 class SongResourcesUpdateSerializer(serializers.Serializer):
     updates = serializers.DictField(child=serializers.UUIDField())

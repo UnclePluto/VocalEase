@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { expect, it, vi } from 'vitest'
 
@@ -33,4 +33,27 @@ it('要求原曲并按音轨类型上传资源后创建人工歌曲', async () =
   await waitFor(() => expect(done).toHaveBeenCalledWith(songId))
   expect(server.lastJson('/api/v1/admin/songs/')).toMatchObject({ ingestion_mode: 'manual', source_asset: sourceId, vocal_asset: vocalId })
   expect(server.calls('/api/v1/admin/songs/upload-grants/')).toHaveLength(2)
+})
+
+it('关闭弹窗后迟到的创建响应不再触发完成回调', async () => {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  server.use(
+    http.post('/api/v1/admin/songs/upload-grants/', () => HttpResponse.json(envelope({ song_id: songId, asset_id: sourceId, upload_url: `/api/v1/media/local-upload/${sourceId}/?signature=token`, upload_token: '', fields: {} }), { status: 201 })),
+    http.put(`/api/v1/media/local-upload/${sourceId}/`, () => new HttpResponse(null, { status: 204 })),
+    http.post(`/api/v1/admin/media/${sourceId}/complete/`, () => HttpResponse.json(envelope({ id: sourceId, status: 'ready' }))),
+    http.post('/api/v1/admin/songs/', async () => { await gate; return HttpResponse.json(envelope({ id: songId }), { status: 201 }) }),
+  )
+  const done = vi.fn()
+  const cancel = vi.fn()
+  const view = render(<SongManualUploadModal open onCancel={cancel} onDone={done} />)
+  fireEvent.change(screen.getByLabelText('原曲文件'), { target: { files: [new File(['source'], 'source.mp3', { type: 'audio/mpeg' })] } })
+  fireEvent.change(screen.getByLabelText('歌曲名称'), { target: { value: '歌' } })
+  fireEvent.change(screen.getByLabelText('歌手'), { target: { value: '歌手' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存人工歌曲' }))
+  await waitFor(() => expect(server.calls('/api/v1/admin/songs/')).toHaveLength(1))
+  fireEvent.click(screen.getByRole('button', { name: /取\s*消/ }))
+  view.rerender(<SongManualUploadModal open={false} onCancel={cancel} onDone={done} />)
+  await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+  expect(done).not.toHaveBeenCalled()
 })

@@ -14,18 +14,22 @@ export function SongManualUploadModal({ open, onCancel, onDone }: { open: boolea
   const resetUpload = upload.reset
   const [saving, setSaving] = useState(false)
   const submitting = useRef(false)
+  const generation = useRef(0)
   const wasOpen = useRef(open)
-  useEffect(() => { if (wasOpen.current && !open) { resetUpload(); form.resetFields() } wasOpen.current = open }, [open, form, resetUpload])
-  const close = () => { upload.reset(); form.resetFields(); onCancel() }
+  useEffect(() => { if (wasOpen.current && !open) { generation.current += 1; resetUpload(); form.resetFields(); submitting.current = false; setSaving(false) } wasOpen.current = open }, [open, form, resetUpload])
+  const close = () => { generation.current += 1; upload.reset(); form.resetFields(); submitting.current = false; setSaving(false); onCancel() }
   const submit = async (values: Values) => {
     if (submitting.current || !upload.slots.song_source?.file) return
     submitting.current = true; setSaving(true)
+    const run = ++generation.current
     try {
       const { songId, assets } = await upload.uploadSelected()
+      if (run !== generation.current) return
       const created = await createSongReliably({ ...values, id: songId, source_asset: assets.song_source!, ingestion_mode: 'manual', ...(assets.song_vocal ? { vocal_asset: assets.song_vocal } : {}), ...(assets.song_accompaniment ? { accompaniment_asset: assets.song_accompaniment } : {}), ...(assets.lyrics ? { lyrics_asset: assets.lyrics } : {}) })
+      if (run !== generation.current) return
       upload.reset(); form.resetFields(); onDone(created.id)
-    } catch (caught) { upload.setError(caught instanceof Error ? caught.message : '保存失败，请重试') }
-    finally { submitting.current = false; setSaving(false) }
+    } catch (caught) { if (run === generation.current) upload.setError(caught instanceof Error ? caught.message : '保存失败，请重试') }
+    finally { if (run === generation.current) { submitting.current = false; setSaving(false) } }
   }
   const busy = upload.busy || saving
   return <Modal title="人工上传歌曲" open={open} width={680} footer={null} onCancel={close} destroyOnHidden mask={{ closable: !busy }} keyboard={!busy}>

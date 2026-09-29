@@ -55,3 +55,16 @@ def test_optional_grant_requires_existing_song_or_intent():
     client.force_authenticate(admin)
     response = client.post("/api/v1/admin/songs/upload-grants/", {"mime": "audio/mpeg", "size": 5, "song_id": "c4e3d599-ad85-4b88-b0f9-d9414eaab09b", "media_type": "song_vocal"}, format="json")
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+@override_settings(MEDIA_BACKEND="local")
+def test_lyrics_grant_rejects_non_lrc_mime_and_over_one_megabyte(tmp_path, settings):
+    settings.MEDIA_LOCAL_ROOT = str(tmp_path)
+    admin = User.objects.create_user(login_id="manual-lyrics-rules", password="888888", role=Role.SYSTEM_ADMIN, must_change_password=False)
+    client = APIClient()
+    client.force_authenticate(admin)
+    source = client.post("/api/v1/admin/songs/upload-grants/", {"mime": "audio/mpeg", "size": 6}, format="json").json()["data"]
+    for mime, size in (("application/json", 20), ("text/plain", 1024 * 1024 + 1)):
+        response = client.post("/api/v1/admin/songs/upload-grants/", {"media_type": "lyrics", "song_id": source["song_id"], "mime": mime, "size": size}, format="json")
+        assert response.status_code == 400

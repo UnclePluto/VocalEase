@@ -17,14 +17,17 @@ export function SongResourcesModal({ song, open, onCancel, onDone }: { song: Son
   const resetUpload = upload.reset
   const [saving, setSaving] = useState(false)
   const submitting = useRef(false)
+  const generation = useRef(0)
   const wasOpen = useRef(open)
-  useEffect(() => { if (wasOpen.current && !open) resetUpload(); wasOpen.current = open }, [open, resetUpload])
-  const close = () => { upload.reset(); onCancel() }
+  useEffect(() => { if (wasOpen.current && !open) { generation.current += 1; resetUpload(); submitting.current = false; setSaving(false) } wasOpen.current = open }, [open, resetUpload])
+  const close = () => { generation.current += 1; upload.reset(); submitting.current = false; setSaving(false); onCancel() }
   const submit = async () => {
     if (submitting.current) return
     submitting.current = true; setSaving(true)
+    const run = ++generation.current
     try {
       const { assets } = await upload.uploadSelected()
+      if (run !== generation.current) return
       const updates: Partial<Record<SongResourceField, string>> = {}
       const expected: Partial<Record<SongResourceField, string | null>> = {}
       for (const field of fields) if (upload.slots[field.kind]?.file && assets[field.kind]) {
@@ -32,9 +35,10 @@ export function SongResourcesModal({ song, open, onCancel, onDone }: { song: Son
         expected[field.key] = song[field.key] ?? null
       }
       await updateSongResourcesReliably(song.id, { updates, expected })
+      if (run !== generation.current) return
       upload.reset(); onDone()
-    } catch (caught) { upload.setError(caught instanceof Error ? caught.message : '保存资源失败，请重试') }
-    finally { submitting.current = false; setSaving(false) }
+    } catch (caught) { if (run === generation.current) upload.setError(caught instanceof Error ? caught.message : '保存资源失败，请重试') }
+    finally { if (run === generation.current) { submitting.current = false; setSaving(false) } }
   }
   const busy = saving || upload.busy
   return <Modal title={`管理资源：${song.title}`} open={open} width={640} footer={null} onCancel={close} destroyOnHidden mask={{ closable: !busy }} keyboard={!busy}>
