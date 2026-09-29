@@ -78,6 +78,17 @@ def ready_song(tmp_path, settings, *, title="治疗歌曲"):
     )
     from apps.songs.services import validate_source_asset
     validate_source_asset(song=song, asset=asset)
+    accompaniment, accompaniment_grant = create_upload_grant(
+        owner_type="song", owner_id=song_id, media_type="song_accompaniment", mime="audio/mpeg", size=4,
+    )
+    nonce = claim_local_upload(asset=accompaniment)
+    prepared = backend.prepare_authorized_stream(
+        object_key=accompaniment.object_key, token=accompaniment_grant.upload_token,
+        stream=io.BytesIO(b"back"), mime="audio/mpeg", asset_id=accompaniment.id,
+    )
+    publish_local_upload(asset_id=accompaniment.id, nonce=nonce, prepared=prepared, backend=backend)
+    song.accompaniment_asset = complete_local_asset(asset=accompaniment)
+    song.save(update_fields=["accompaniment_asset"])
     return song
 
 

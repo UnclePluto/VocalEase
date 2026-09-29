@@ -109,15 +109,12 @@ def create_session(
             if existing.song_id != song_id:
                 raise SingingCreationConflict()
             return SessionCreationResult(session=existing, created=False)
-        try:
-            plan = TreatmentPlan.objects.select_for_update().get(
-                patient=patient, status=TreatmentPlan.Status.ACTIVE, deleted_at__isnull=True,
-            )
-        except TreatmentPlan.DoesNotExist as exc:
-            raise ValidationError({"treatment_plan": "当前没有进行中的治疗计划"}, code="active_treatment_plan_required") from exc
+        plan = TreatmentPlan.objects.select_for_update().filter(
+            patient=patient, status=TreatmentPlan.Status.ACTIVE, deleted_at__isnull=True,
+        ).first()
         try:
             song = Song.objects.select_for_update().get(
-                pk=song_id, deleted_at__isnull=True, publication_status=Song.PublicationStatus.PUBLISHED,
+                pk=song_id, deleted_at__isnull=True,
                 source_available=True,
             )
         except Song.DoesNotExist as exc:
@@ -132,6 +129,8 @@ def create_session(
             raise ValidationError({"song_id": "歌曲不存在或当前不可用"}, code="song_unavailable") from exc
         try:
             validate_source_asset(song=song, asset=source_asset)
+            from apps.songs.resources import validate_singing_accompaniment
+            validate_singing_accompaniment(song=song)
         except SourceVerificationTemporary:
             raise
         except SourceAssetInvalid:
@@ -146,7 +145,7 @@ def create_session(
                 treatment_plan_snapshot={
                     "id": str(plan.id), "start_date": plan.start_date.isoformat(),
                     "cycle_weeks": plan.cycle_weeks, "target_session_count": plan.target_session_count,
-                },
+                } if plan else None,
                 creation_idempotency_key=idempotency_key,
                 created_source=created_source,
             )

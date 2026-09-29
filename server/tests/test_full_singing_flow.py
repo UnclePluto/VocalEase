@@ -68,6 +68,9 @@ def _create_ready_song(*, tmp_path, settings):
         publication_status=Song.PublicationStatus.PUBLISHED,
     )
     validate_source_asset(song=song, asset=asset)
+    from apps.analysis.tests.test_task5_regressions import ready_song_source
+    song.accompaniment_asset = ready_song_source(song.id, b"back", media_type="song_accompaniment")
+    song.save(update_fields=["accompaniment_asset"])
     return song
 
 
@@ -113,7 +116,8 @@ def _upload_and_confirm(*, client, session_id, media_type, mime, body, key):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_patient_upload_analysis_to_admin_detail_flow(tmp_path, settings):
+@pytest.mark.parametrize("has_plan", [True, False])
+def test_patient_upload_analysis_to_admin_detail_flow(tmp_path, settings, has_plan):
     doctor = create_doctor(
         name="跨模块医生",
         gender="male",
@@ -125,6 +129,8 @@ def test_patient_upload_analysis_to_admin_detail_flow(tmp_path, settings):
     doctor.user.save(update_fields=["must_change_password"])
     patient = _create_active_patient(doctor=doctor, suffix=1)
     other_patient = _create_active_patient(doctor=doctor, suffix=2)
+    if not has_plan:
+        patient.treatment_plans.all().delete()
     song = _create_ready_song(tmp_path=tmp_path, settings=settings)
 
     patient_client = APIClient()
@@ -193,7 +199,10 @@ def test_patient_upload_analysis_to_admin_detail_flow(tmp_path, settings):
     own_data = own_detail.json()["data"]
     assert own_data["patient"]["medical_record_no"] == patient.medical_record_no
     assert own_data["song"]["title"] == "跨模块验收歌曲"
-    assert own_data["treatment_plan"]["id"] == str(patient.treatment_plans.get().id)
+    if has_plan:
+        assert own_data["treatment_plan"]["id"] == str(patient.treatment_plans.get().id)
+    else:
+        assert own_data["treatment_plan"] is None
     assert {row["generation"] for row in own_data["analysis_results"]} == {0}
     assert all(row["is_mock"] is True for row in own_data["analysis_results"])
 

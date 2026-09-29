@@ -68,7 +68,7 @@ class SessionMediaReadSerializer(serializers.ModelSerializer):
 class SingingSessionSummarySerializer(serializers.ModelSerializer):
     patient = serializers.JSONField(source="patient_snapshot", read_only=True)
     song = serializers.JSONField(source="song_snapshot", read_only=True)
-    treatment_plan = serializers.JSONField(source="treatment_plan_snapshot", read_only=True)
+    treatment_plan = serializers.JSONField(source="treatment_plan_snapshot", read_only=True, allow_null=True)
 
     class Meta:
         model = SingingSession

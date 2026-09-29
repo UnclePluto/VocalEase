@@ -30,6 +30,19 @@ import org.junit.Test
 
 class DtoDomainMappingTest {
     @Test
+    fun `自由演唱详情与历史允许没有治疗计划`() {
+        val detail = apiJson.decodeFromString<ApiEnvelope<SingingSessionDto>>(
+            fixture("fixtures/session.json"),
+        ).data.copy(treatmentPlan = null).toDomain()
+        assertEquals(null, detail.treatmentPlan)
+        val page = apiJson.decodeFromString<ApiEnvelope<SessionPageDto>>(
+            fixture("fixtures/sessions_page.json"),
+        ).data
+        val summary = page.results.single().copy(treatmentPlan = null).toDomain()
+        assertEquals(null, summary.treatmentPlan)
+    }
+
+    @Test
     fun `confirm request 接受合法单一或双标识并拒绝空值与坏 UUID`() {
         ConfirmSessionMediaRequestDto(assetId = ASSET_ID)
         ConfirmSessionMediaRequestDto(objectKey = "private/session/audio.m4a")
@@ -76,7 +89,7 @@ class DtoDomainMappingTest {
         val page = pageDto.toDomain()
         val summary = page.results.single()
         assertEquals(UUID.fromString(SESSION_ID), summary.id)
-        assertEquals(LocalDate.parse("2026-08-01"), summary.treatmentPlan.startDate)
+        assertEquals(LocalDate.parse("2026-08-01"), requireNotNull(summary.treatmentPlan).startDate)
         assertEquals(Instant.parse("2026-08-27T09:00:00Z"), summary.createdAt)
 
         val mutationDto = apiJson.decodeFromString<ApiEnvelope<SessionMutationDto>>(

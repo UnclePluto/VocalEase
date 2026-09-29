@@ -6,7 +6,7 @@ from django.db.models import Q
 
 class SingingSessionManager(models.Manager):
     def create_from_snapshots(self, *, patient, song, created_source="patient_android_api"):
-        plan = patient.treatment_plans.get(status="active", deleted_at__isnull=True)
+        plan = patient.treatment_plans.filter(status="active", deleted_at__isnull=True).first()
         return self.create(
             patient=patient,
             song=song,
@@ -27,7 +27,7 @@ class SingingSessionManager(models.Manager):
                 "start_date": plan.start_date.isoformat(),
                 "cycle_weeks": plan.cycle_weeks,
                 "target_session_count": plan.target_session_count,
-            },
+            } if plan else None,
             created_source=created_source,
         )
 
@@ -45,10 +45,10 @@ class SingingSession(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     patient = models.ForeignKey("patients.PatientProfile", on_delete=models.PROTECT, related_name="singing_sessions")
     song = models.ForeignKey("songs.Song", on_delete=models.PROTECT, related_name="singing_sessions")
-    treatment_plan = models.ForeignKey("patients.TreatmentPlan", on_delete=models.PROTECT, related_name="singing_sessions")
+    treatment_plan = models.ForeignKey("patients.TreatmentPlan", on_delete=models.PROTECT, related_name="singing_sessions", null=True, blank=True)
     patient_snapshot = models.JSONField()
     song_snapshot = models.JSONField()
-    treatment_plan_snapshot = models.JSONField()
+    treatment_plan_snapshot = models.JSONField(null=True, blank=True)
     status = models.CharField(max_length=24, choices=Status.choices, default=Status.CREATED)
     creation_idempotency_key = models.CharField(max_length=128, blank=True)
     submission_idempotency_key = models.CharField(max_length=128, blank=True)

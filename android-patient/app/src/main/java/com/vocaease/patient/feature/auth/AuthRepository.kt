@@ -180,7 +180,7 @@ class AuthRepository(
 
     suspend fun login(loginId: String, password: String) {
         if (loginId.isBlank() || password.isBlank()) {
-            mutableOperation.value = AuthOperationState.Error("请输入病历号和密码")
+            mutableOperation.value = AuthOperationState.Error("请输入手机号和密码")
             return
         }
         mutableOperation.value = AuthOperationState.Loading
@@ -623,7 +623,7 @@ class AuthRepository(
     private fun Throwable.userMessage(endpoint: ApiEndpoint): String = when (this) {
         is SessionChangedException -> "登录账号已变更，请重新操作"
         is HttpException, is IOException, is SerializationException -> when (val failure = ApiErrorMapper.map(this, endpoint)) {
-            is ApiFailure.Unauthorized -> if (endpoint == ApiEndpoint.AUTH_LOGIN) "病历号或密码错误" else failure.userMessage
+            is ApiFailure.Unauthorized -> if (endpoint == ApiEndpoint.AUTH_LOGIN) "手机号或密码错误" else failure.userMessage
             else -> failure.userMessage
         }
         is AuthContractException, is NetworkContractException -> "服务返回的登录信息不完整，请稍后重试"

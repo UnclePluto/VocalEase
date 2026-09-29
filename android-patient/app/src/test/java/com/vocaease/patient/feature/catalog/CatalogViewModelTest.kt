@@ -93,7 +93,7 @@ class CatalogViewModelTest {
     }
 
     @Test
-    fun `无活动计划时首页禁用歌曲训练`() = runBlocking {
+    fun `无活动计划时首页允许自由演唱`() = runBlocking {
         val viewModel = viewModel(
             FakePatientRemote(profile(activePlan = false)),
             FakeSongRemote(mutableMapOf(1 to songPage(1, 1, song("晴天")))),
@@ -103,7 +103,7 @@ class CatalogViewModelTest {
 
         assertFalse(viewModel.state.value.hasActiveTreatmentPlan)
         assertNull(viewModel.state.value.treatmentProgress)
-        assertFalse(viewModel.state.value.canStartTraining)
+        assertTrue(viewModel.state.value.canStartTraining)
     }
 
     @Test

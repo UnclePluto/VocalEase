@@ -19,8 +19,13 @@ def songs_for_admin(*, keyword: str = "", genre: str = "", language: str = "", a
 
 
 def songs_for_patient(*, keyword: str = "", ordering: str = "-created_at"):
-    queryset = songs_for_admin(keyword=keyword, publication_status=Song.PublicationStatus.PUBLISHED, ordering=ordering)
+    queryset = songs_for_admin(keyword=keyword, ordering=ordering)
     queryset = queryset.filter(
+        accompaniment_asset__status="ready",
+        accompaniment_asset__deleted_at__isnull=True,
+        accompaniment_asset__owner_type="song",
+        accompaniment_asset__owner_id=F("id"),
+        accompaniment_asset__media_type="song_accompaniment",
         source_available=True,
         source_verified_asset_id=F("source_asset_id"),
         source_receipt_fingerprint__gt="",

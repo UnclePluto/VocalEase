@@ -52,10 +52,10 @@ fun LoginScreen(
         OutlinedTextField(
             value = loginId,
             onValueChange = { loginId = it },
-            label = { Text("病历号") },
+            label = { Text("手机号") },
             singleLine = true,
             enabled = !loading,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("login-id"),

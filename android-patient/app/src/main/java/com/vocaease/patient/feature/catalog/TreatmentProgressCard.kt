@@ -87,7 +87,7 @@ fun TreatmentProgressCard(
                         }
                     }
                     PatientUiStatus.CONTENT -> Text(
-                        "暂无进行中的治疗计划，请联系医生",
+                        "自由演唱，选择喜欢的歌曲开始吧",
                         color = Color(0xFFF2FBF6),
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,

@@ -31,6 +31,7 @@ import com.vocaease.patient.core.media.PreviewState
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingCapture
 import com.vocaease.patient.core.network.NetworkModule
+import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import com.vocaease.patient.core.database.DraftState
 import com.vocaease.patient.core.database.MediaType
 import com.vocaease.patient.feature.auth.AuthState
@@ -123,6 +124,8 @@ class PatientClosedLoopTest {
         installedApplicationContainer = application.container
         testRoot = File(targetContext.cacheDir, "closed-loop-container-${System.nanoTime()}").apply { mkdirs() }
         context = IsolatedAppContext(targetContext, testRoot)
+        // 文件目录每轮隔离，但 AndroidKeyStore 按固定测试患者共享，必须同步清理。
+        ChunkedAesGcmFileStore(context).destroyAccountEncryption(PATIENT_ID)
     }
 
     @After
@@ -134,6 +137,7 @@ class PatientClosedLoopTest {
         DailyDraftCleanupScheduler(application).replaceFor(
             runCatching { installedApplicationContainer.draftStorage.current() }.getOrNull(),
         )
+        ChunkedAesGcmFileStore(context).destroyAccountEncryption(PATIENT_ID)
         testRoot.deleteRecursively()
         server.shutdown()
         previewServer.shutdown()
@@ -455,6 +459,7 @@ private class ClosedLoopBackend(
             path == "/api/v1/patient/songs/$SONG_ID/preview/" -> {
                 expect(
                     request,
+                    query = mapOf("track" to "accompaniment"),
                     method = "POST",
                     authenticated = true,
                     idempotencyKey = null,
@@ -749,7 +754,7 @@ private const val SONG_ID = "44444444-4444-4444-8444-444444444444"
 private const val SESSION_ID = "55555555-5555-4555-8555-555555555555"
 private const val AUDIO_ASSET_ID = "66666666-6666-4666-8666-666666666666"
 private const val VIDEO_ASSET_ID = "77777777-7777-4777-8777-777777777777"
-private const val DRAFT_ID = "closed-loop-draft"
+private val DRAFT_ID = "closed-loop-${java.util.UUID.randomUUID()}"
 private const val FIXED_NOW = 1_777_777_777_000L
 private const val FIXED_NANOS = 9_000_000_000L
 

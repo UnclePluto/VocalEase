@@ -9,7 +9,20 @@ from .models import User
 from .tokens import TokenPair, issue_token_pair, revoke_user_refresh_tokens
 
 
-def authenticate_login(*, login_id: str, password: str) -> User:
+def authenticate_login(*, login_id: str, password: str, client_kind: str = "android") -> User:
+    from apps.patients.models import PatientProfile
+    from common.privacy import normalize_phone
+
+    phone = normalize_phone(login_id)
+    if client_kind == "android" and phone.isascii() and phone.isdigit():
+        matches = list(PatientProfile.objects.filter(
+            phone=phone, deleted_at__isnull=True, user__deleted_at__isnull=True,
+            user__is_active=True, user__role="patient",
+        ).values_list("user__login_id", flat=True)[:2])
+        if len(matches) > 1:
+            raise AuthenticationFailed("登录凭据无效", code="authentication_failed")
+        if matches:
+            login_id = matches[0]
     user = authenticate(username=login_id, password=password)
     if user is None or user.deleted_at is not None:
         raise AuthenticationFailed("登录凭据无效", code="authentication_failed")
@@ -19,7 +32,7 @@ def authenticate_login(*, login_id: str, password: str) -> User:
 def login(
     *, login_id: str, password: str, client_kind: str, remember_me: bool = False
 ) -> tuple[User, TokenPair]:
-    user = authenticate_login(login_id=login_id, password=password)
+    user = authenticate_login(login_id=login_id, password=password, client_kind=client_kind)
     if client_kind == "web" and user.role == "patient":
         raise PermissionDenied(
             "患者账号不能登录医生后台", code="admin_access_denied"

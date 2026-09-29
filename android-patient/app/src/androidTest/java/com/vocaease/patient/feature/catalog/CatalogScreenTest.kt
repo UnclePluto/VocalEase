@@ -5,6 +5,7 @@ import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
@@ -65,7 +66,7 @@ class CatalogScreenTest {
     }
 
     @Test
-    fun 无治疗计划显示联系医生且歌曲不可点击() {
+    fun 无治疗计划可点击歌曲自由演唱() {
         var clickCount = 0
         composeRule.setContent {
             VocaEaseTheme {
@@ -73,7 +74,7 @@ class CatalogScreenTest {
                     state = catalogState().copy(
                         hasActiveTreatmentPlan = false,
                         treatmentProgress = null,
-                        canStartTraining = false,
+                        canStartTraining = true,
                     ),
                     onSearch = {},
                     onPatientRetry = {},
@@ -84,11 +85,11 @@ class CatalogScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("暂无进行中的治疗计划，请联系医生").assertIsDisplayed()
+        composeRule.onNodeWithText("自由演唱，选择喜欢的歌曲开始吧").assertIsDisplayed()
         composeRule.onNodeWithTag("song-card-10000000-0000-0000-0000-000000000001")
-            .assertIsNotEnabled()
+            .assertIsEnabled()
             .performClick()
-        composeRule.runOnIdle { assertEquals(0, clickCount) }
+        composeRule.runOnIdle { assertEquals(1, clickCount) }
     }
 
     @Test
@@ -112,7 +113,7 @@ class CatalogScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("暂无进行中的治疗计划，请联系医生").assertDoesNotExist()
+        composeRule.onNodeWithText("自由演唱，选择喜欢的歌曲开始吧").assertDoesNotExist()
         composeRule.onNodeWithText("患者信息加载失败，请重试").assertIsDisplayed()
         composeRule.onNodeWithText("重试")
             .assertHeightIsAtLeast(48.dp)

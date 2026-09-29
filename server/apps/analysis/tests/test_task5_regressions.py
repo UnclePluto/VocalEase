@@ -25,9 +25,9 @@ from apps.songs.services import (SourceAssetInvalid, SourceVerificationTemporary
                                  create_song, publish_song, update_song)
 
 
-def ready_song_source(song_id, content=b"source"):
+def ready_song_source(song_id, content=b"source", media_type="song_source"):
     asset, grant = create_upload_grant(
-        owner_type="song", owner_id=song_id, media_type="song_source",
+        owner_type="song", owner_id=song_id, media_type=media_type,
         mime="audio/mpeg", size=len(content),
     )
     backend = get_storage_backend()
@@ -47,6 +47,8 @@ def song_with_source():
         id=song_id, title="隔离测试", artist="测试", genre="流行",
         language="中文", duration_seconds=60, source_asset=asset,
     )
+    song.accompaniment_asset = ready_song_source(song.id, b"back", media_type="song_accompaniment")
+    song.save(update_fields=["accompaniment_asset"])
     return song, asset
 
 

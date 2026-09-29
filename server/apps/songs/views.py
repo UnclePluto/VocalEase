@@ -2,7 +2,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import BasePermission
@@ -30,7 +30,7 @@ from .serializers import (PatientSongListQuerySerializer, PatientSongReadSeriali
                           ReanalyzeSerializer, SongListQuerySerializer,
                           SongReadSerializer, SongUploadGrantSerializer,
                           SongWriteSerializer, SongPreviewSerializer)
-from .services import (SourceAssetInvalid, issue_song_upload_grant, preview_source,
+from .services import (SourceAssetInvalid, issue_song_upload_grant,
                        publish_song, soft_delete_song, update_song, create_song,
                        validate_source_asset)
 
@@ -207,7 +207,7 @@ class PatientSongDetailView(APIView):
     def get_object(self, song_id):
         # 详情以实时存储复核为准，并可修复 Beat 尚未回填的可信快照；列表仍只查索引。
         song = get_object_or_404(
-            songs_for_admin(publication_status=Song.PublicationStatus.PUBLISHED),
+            songs_for_admin(),
             pk=song_id,
         )
         if not song.source_asset_id:
@@ -215,6 +215,8 @@ class PatientSongDetailView(APIView):
             raise Http404
         try:
             validate_source_asset(song=song, asset=song.source_asset)
+            from .resources import validate_singing_accompaniment
+            validate_singing_accompaniment(song=song)
         except SourceAssetInvalid:
             from django.http import Http404
             raise Http404
@@ -228,7 +230,20 @@ class PatientSongDetailView(APIView):
 class PatientSongPreviewView(APIView):
     permission_classes = [PatientCatalogPermission, MustChangePasswordPermission]
 
-    @extend_schema(request=None, responses={200: PrivateUrlEnvelopeSerializer})
+    @extend_schema(
+        request=None, responses={200: PrivateUrlEnvelopeSerializer},
+        parameters=[OpenApiParameter("track", str, enum=["source", "accompaniment"], default="source")],
+    )
     def post(self, request, song_id):
-        private_url = preview_source(actor=request.user, request_id=request.request_id, song=PatientSongDetailView().get_object(song_id))
+        from .resources import preview_song_resource
+        track = request.query_params.get("track", "source")
+        if track not in {"source", "accompaniment"}:
+            raise ValidationError({"track": "不支持的音轨"})
+        serializer = SongPreviewSerializer(data={"track": track})
+        serializer.is_valid(raise_exception=True)
+        private_url = preview_song_resource(
+            actor=request.user, request_id=request.request_id,
+            song=PatientSongDetailView().get_object(song_id),
+            track=serializer.validated_data["track"],
+        )
         return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)

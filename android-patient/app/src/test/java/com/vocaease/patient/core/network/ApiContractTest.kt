@@ -301,7 +301,7 @@ class ApiContractTest {
         assertTrue(api.previewSong(SONG_ID).data.url.startsWith("https://private.example/"))
             server.takeRequest().also { request ->
                 assertEquals("POST", request.method)
-                assertEquals("/api/v1/patient/songs/$SONG_ID/preview/", request.path)
+                assertEquals("/api/v1/patient/songs/$SONG_ID/preview/?track=accompaniment", request.path)
                 assertNull(request.getHeader("Idempotency-Key"))
                 assertEquals(0L, request.bodySize)
             }

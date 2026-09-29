@@ -163,7 +163,7 @@ class AuthFlowTest {
     }
 
     @Test
-    fun 登录页只有病历号密码登录且无注册入口() {
+    fun 登录页只有手机号密码登录且无注册入口() {
         composeRule.setContent {
             LoginScreen(
                 operation = AuthOperationState.Idle,
@@ -171,7 +171,7 @@ class AuthFlowTest {
             )
         }
 
-        composeRule.onNodeWithText("病历号").assertExists()
+        composeRule.onNodeWithText("手机号").assertExists()
         composeRule.onNodeWithText("密码").assertExists()
         composeRule.onNodeWithTag("login-submit").assertExists()
         composeRule.onNodeWithText("账号由医生创建，如需帮助请联系医生").assertExists()

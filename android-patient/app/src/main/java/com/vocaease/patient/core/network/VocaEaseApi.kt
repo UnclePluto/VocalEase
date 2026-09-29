@@ -64,6 +64,7 @@ internal interface VocaEaseApi {
     suspend fun previewSong(
         @Path("song_id") songId: String,
         @Tag authContext: AuthRequestContext = AuthRequestContext.Current,
+        @Query("track") track: String = "accompaniment",
     ): ApiEnvelope<PrivateUrlDto>
 
     @GET("api/v1/patient/singing-sessions/")

@@ -126,7 +126,7 @@ class CatalogViewModel(
             songs = catalog.songs.map(Song::toUi),
             totalSongCount = catalog.totalCount,
             canLoadMore = catalog.nextPage != null,
-            canStartTraining = hasPlan,
+            canStartTraining = profile != null,
             errorMessage = catalog.errorMessage,
             isLoading = patientState is PatientLoadState.Loading || catalog.isLoading,
             isLoadingMore = catalog.isLoadingMore,

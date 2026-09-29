@@ -48,6 +48,15 @@ def _validated_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) 
     return asset, None
 
 
+def validate_singing_accompaniment(*, song: Song) -> MediaAsset:
+    if not song.accompaniment_asset_id:
+        raise SourceAssetInvalid("歌曲缺少可用伴奏", code="song_resource_invalid")
+    return validate_song_resource(
+        song_id=song.id, asset_id=song.accompaniment_asset_id,
+        media_type="song_accompaniment",
+    )
+
+
 def validate_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) -> MediaAsset:
     return _validated_song_resource(song_id=song_id, asset_id=asset_id, media_type=media_type)[0]
 
