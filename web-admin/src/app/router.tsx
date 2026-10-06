@@ -18,10 +18,6 @@ function Suspended({ children }: { children: ReactNode }) {
   return <Suspense fallback={<div className="route-loading" role="status">页面加载中</div>}>{children}</Suspense>
 }
 
-function Placeholder({ title }: { title: string }) {
-  return <section className="route-placeholder"><h1>{title}</h1></section>
-}
-
 export const appRoutes: RouteObject[] = [
   {
     element: <AnonymousOnly />,

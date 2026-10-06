@@ -100,7 +100,7 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
       {mediaRequested && urls.accompaniment.isError ? <Alert type="warning" title={messageFor(urls.accompaniment.error,'伴奏授权失败，患者人声仍可播放')} action={<Button onClick={()=>void urls.accompaniment.refetch()}>重试伴奏授权</Button>}/> : null}
       {mediaRequested && urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
       {mediaRequested && urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
-      {(!hasMediaBindings || (mediaRequested && !urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending))) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} onRefreshMedia={refreshMedia} onTime={setSeconds}><MetricPanel seconds={seconds} result={source} /></WaveformPlayer> : null}
+      {(!hasMediaBindings || (mediaRequested && !urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending))) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} analysisResult={source} onRefreshMedia={refreshMedia} onTime={setSeconds}><MetricPanel seconds={seconds} result={source} /></WaveformPlayer> : null}
     </div>
   </section>
 }

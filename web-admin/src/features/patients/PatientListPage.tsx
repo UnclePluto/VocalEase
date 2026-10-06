@@ -24,7 +24,7 @@ import {
 } from './api'
 import { PatientFormModal } from './PatientFormModal'
 import { readQuery, uiParams } from './patientListQuery'
-import type { Patient, PatientDetail, PatientListQuery, PatientWrite, TreatmentStatus } from './types'
+import type { Patient, PatientDetail, PatientListQuery, PatientWrite } from './types'
 
 export function PatientListPage() {
   const [params, setParams] = useSearchParams()

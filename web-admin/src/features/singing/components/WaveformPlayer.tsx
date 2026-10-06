@@ -9,7 +9,9 @@ import type { ReactNode } from 'react'
 
 import { ApiError } from '../../../api/errors'
 import { createPlaybackClock, type PlaybackClock } from '../PlaybackClock'
-import type { PlaybackMetadata } from '../types'
+import type { AnalysisResult, PlaybackMetadata } from '../types'
+import { LiveVoiceBoard } from './LiveVoiceBoard'
+import type { PatientAudioFrame } from './PatientAudioAnalyser'
 import { createVisualizerAdapter, type VisualizerAdapter } from './VisualizerAdapter'
 
 export type Track = { assetId: string; url: string }
@@ -29,11 +31,14 @@ function failureOf(asset: Track, error: unknown): MediaFailure {
   return { asset, message: apiError?.message ?? source?.message ?? '媒体播放或授权失败，请重试', requestId: apiError?.requestId ?? (source as (Error & { requestId?: string }) | null)?.requestId }
 }
 
-export function WaveformPlayer({ media, events, waveFactory, visualizerFactory = createVisualizerAdapter, onRefreshMedia, onTime, children }: {
-  media: PlayerMedia; events: number[]; waveFactory?: (container: HTMLElement) => WaveHandle; visualizerFactory?: () => VisualizerAdapter; onRefreshMedia?: (assetId: string) => Promise<string>; onTime?: (seconds: number) => void; children?: ReactNode
+export function WaveformPlayer({ media, events, waveFactory, visualizerFactory = createVisualizerAdapter, onRefreshMedia, onTime, children, analysisResult }: {
+  media: PlayerMedia; events: number[]; waveFactory?: (container: HTMLElement) => WaveHandle; visualizerFactory?: () => VisualizerAdapter; onRefreshMedia?: (assetId: string) => Promise<string>; onTime?: (seconds: number) => void; children?: ReactNode; analysisResult?:AnalysisResult
 }) {
   const container = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
+  const polar = useRef<HTMLCanvasElement>(null)
+  const [audioFrame,setAudioFrame]=useState<PatientAudioFrame|null>(null)
+  const [seconds,setSeconds]=useState(0)
   const visualizer = useRef<VisualizerAdapter | null>(null)
   const audio = useRef<HTMLAudioElement>(null)
   const video = useRef<HTMLVideoElement>(null)
@@ -67,6 +72,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
 
   useEffect(() => {
     if (!container.current || !selectedAssetId || !audio.current) return
+    const patientElement=audio.current
     if (resumeAt.current > 0) audio.current.currentTime = resumeAt.current
     const factory = waveFactory ?? ((element: HTMLElement) => {
       const regions = RegionsPlugin.create()
@@ -84,9 +90,9 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     const unsubscribeWaveError = created.onError?.(() => audio.current?.dispatchEvent(new Event('error')))
     clock.current = createPlaybackClock(audio.current, video.current, backing.current, media.metadata)
     clock.current.setMode(modeRef.current)
-    const unsubscribe = clock.current.subscribe(onTime ?? (() => undefined))
+    const unsubscribe = clock.current.subscribe((seconds)=>{setSeconds(seconds);onTime?.(seconds)})
     return () => {
-      resumeAt.current = audio.current?.currentTime ?? 0
+      resumeAt.current = patientElement.currentTime
       unsubscribeWaveError?.()
       unsubscribe(); visualizer.current?.destroy(); visualizer.current = null
       clock.current?.destroy(); clock.current = null
@@ -132,7 +138,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
       await clock.current?.play()
       if (audio.current && canvas.current) {
         visualizer.current ??= visualizerFactory()
-        await visualizer.current.start(audio.current, canvas.current)
+        try { await visualizer.current.start(audio.current, canvas.current, polar.current,setAudioFrame) } catch { setAudioFrame({timeDomain:new Float32Array(0),frequency:new Uint8Array(0),rmsDbfs:null,pitchHz:null,status:'unavailable'}) }
       }
       setPlaying(true)
     } catch (error) {
@@ -160,9 +166,8 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
           <Button type="primary" shape="circle" aria-label={playing ? '暂停' : '播放'} icon={playing ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => {
             if (playing) { clock.current?.pause(); visualizer.current?.stop(); setPlaying(false) } else void play()
           }} />
-          {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds) }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
+          {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds); visualizer.current?.reset?.() }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
         </Space>
-        <canvas ref={canvas} width="520" height="80" aria-label="播放可视化" />
         <div role="tablist" aria-label="音轨选择">
           <button role="tab" aria-selected={activeTrack === 'combined'} disabled={!media.accompaniment || !media.metadata} onClick={() => selectTrack('combined')}>人声 + 伴奏</button>
           <button role="tab" aria-selected={activeTrack === 'patient'} onClick={() => selectTrack('patient')}>人声</button>
@@ -170,6 +175,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
         {(!media.accompaniment || !media.metadata) ? <p>缺少可信伴奏同步数据，当前可播放患者人声。</p> : null}
         <div className="waveform-scroll"><div ref={container} className="waveform" /></div>
       </div>
+      <LiveVoiceBoard frame={audioFrame} result={analysisResult} seconds={seconds} playing={playing} waveRef={canvas} polarRef={polar}/>
       {children}
     </div>
     <aside className="video-card">
