@@ -34,6 +34,9 @@ interface PatientApi {
     suspend fun songs(page: Int? = null, pageSize: Int? = null, keyword: String? = null, sort: String? = null): ApiEnvelope<SongPageDto>
     suspend fun song(songId: String): ApiEnvelope<SongDto>
     suspend fun previewSong(songId: String): ApiEnvelope<PrivateUrlDto>
+    suspend fun previewSong(songId: String, track: String): ApiEnvelope<PrivateUrlDto> = previewSong(songId)
+    suspend fun sessionSongPlayback(sessionId: String, track: String): ApiEnvelope<com.vocaease.patient.core.network.dto.SongPlaybackGrantDto> = error("会话播放未实现")
+    suspend fun referencePitch(songId: String, version: String?): ApiEnvelope<com.vocaease.patient.core.network.dto.ReferencePitchDto> = error("参考音高未实现")
     suspend fun sessions(
         page: Int? = null,
         pageSize: Int? = null,
@@ -76,6 +79,9 @@ internal class RefreshingPatientApi(
     override suspend fun songs(page: Int?, pageSize: Int?, keyword: String?, sort: String?) =
         protectedCall { authContext -> songs(page, pageSize, keyword, sort, authContext) }
     override suspend fun song(songId: String) = protectedCall { authContext -> song(songId, authContext) }
+    override suspend fun previewSong(songId: String, track: String) = protectedCall { context -> previewSong(songId, context, track) }
+    override suspend fun sessionSongPlayback(sessionId: String, track: String) = protectedCall { context -> sessionSongPlayback(sessionId, track, context) }
+    override suspend fun referencePitch(songId: String, version: String?) = protectedCall { context -> referencePitch(songId, version, context) }
     override suspend fun previewSong(songId: String) =
         protectedCall { authContext -> previewSong(songId, authContext) }
     override suspend fun sessions(

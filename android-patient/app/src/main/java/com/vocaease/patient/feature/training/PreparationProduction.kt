@@ -39,8 +39,14 @@ class VocaEasePreparationSongSource(
 class VocaEasePreviewGrantSource(
     private val api: PatientApi,
 ) : PreviewGrantSource {
-    override suspend fun fetch(songId: String): PreviewGrant = api.previewSong(songId).data.toDomain().let {
-        PreviewGrant(it.url, it.expiresAt)
+    override suspend fun fetch(songId: String): PreviewGrant = fetch(songId, com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL, null)
+    override suspend fun fetch(songId: String, mode: com.vocaease.patient.core.media.SongPlaybackMode, sessionId: String?): PreviewGrant {
+        if (sessionId == null) return api.previewSong(songId, mode.wire).data.toDomain().let { PreviewGrant(it.url, it.expiresAt) }
+        val binding = api.session(sessionId).data.playback ?: error("会话缺少媒体快照")
+        val grant = api.sessionSongPlayback(sessionId, mode.wire).data
+        val expected = if (mode == com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL) binding.sourceAssetId else binding.accompanimentAssetId
+        require(grant.assetId.isNotBlank() && grant.assetId == expected) { "会话媒体版本不一致" }
+        return PreviewGrant(grant.url, java.time.Instant.parse(grant.expiresAt), grant.assetId)
     }
 }
 

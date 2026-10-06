@@ -22,6 +22,92 @@ import org.junit.Test
 
 class PreviewPlayerTest {
     @Test
+    fun lastSwitchWinsAndFailureRestoresOldTrack() = runBlocking {
+        val engine = FakePreviewEngine()
+        val first = CompletableDeferred<PreviewGrant>()
+        val second = CompletableDeferred<PreviewGrant>()
+        val count = AtomicInteger()
+        val source = object : PreviewGrantSource {
+            override suspend fun fetch(songId: String) = PreviewGrant("https://private.invalid/original", Instant.MAX)
+            override suspend fun fetch(songId: String, mode: SongPlaybackMode, sessionId: String?): PreviewGrant =
+                when (count.incrementAndGet()) {
+                    1 -> fetch(songId)
+                    2 -> withContext(NonCancellable) { first.await() }
+                    3 -> second.await()
+                    else -> throw java.io.IOException("授权失败")
+                }
+        }
+        val player=PreviewPlayer(engine, source)
+        player.prepare(SONG_ID);engine.emit(PreviewEngineEvent.Ready)
+        withTimeout(2000) { while (player.state.value !is PreviewState.Buffered) yield() }
+        engine.position=56_000
+        val stale=async { player.switchMode(SongPlaybackMode.ACCOMPANIMENT) }
+        withTimeout(2000) { while (count.get()<2) yield() }
+        val latest=async { player.switchMode(SongPlaybackMode.ORIGINAL) }
+        withTimeout(2000) { while (count.get()<3) yield() }
+        second.complete(PreviewGrant("https://private.invalid/latest",Instant.MAX))
+        withTimeout(2000) { while (engine.loadedUrls.size<2) yield() }
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(latest.await());assertFalse(stale.await())
+        first.complete(PreviewGrant("https://private.invalid/stale",Instant.MAX))
+        assertFalse(withTimeout(2000) { player.switchMode(SongPlaybackMode.ACCOMPANIMENT) })
+        assertEquals(SongPlaybackMode.ORIGINAL,player.activeMode.value)
+        assertEquals(56_000L,player.currentPositionMillis)
+        assertFalse(engine.loadedUrls.contains("https://private.invalid/stale"))
+        player.release();player.awaitReleased()
+    }
+
+    @Test
+    fun handoffAlwaysStartsAccompanimentAtZero() = runBlocking {
+        val engine=FakePreviewEngine()
+        val sessions=CopyOnWriteArrayList<String?>()
+        val source=object : PreviewGrantSource {
+            override suspend fun fetch(songId: String)=PreviewGrant("https://private.invalid/preview",Instant.MAX)
+            override suspend fun fetch(songId: String,mode:SongPlaybackMode,sessionId:String?):PreviewGrant {
+                sessions+=sessionId
+                return PreviewGrant("https://private.invalid/${mode.wire}",Instant.MAX,"bound-asset")
+            }
+        }
+        val player=PreviewPlayer(engine,source)
+        player.prepare(SONG_ID);engine.emit(PreviewEngineEvent.Ready)
+        withTimeout(2000) { while (player.state.value !is PreviewState.Buffered) yield() }
+        engine.position=56_000
+        val bind=async { player.bindSession("session-bound") }
+        withTimeout(2000) { while (engine.loadedUrls.size<2) yield() }
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(bind.await());assertEquals(0L,player.currentPositionMillis)
+        assertEquals(SongPlaybackMode.ACCOMPANIMENT,player.activeMode.value)
+        assertEquals("session-bound",sessions.last())
+        player.release();player.awaitReleased()
+    }
+
+    @Test
+    fun previewDefaultsToOriginalAndSwitchKeepsPosition() = runBlocking {
+        val engine = FakePreviewEngine()
+        val requested = CopyOnWriteArrayList<SongPlaybackMode>()
+        val source = object : PreviewGrantSource {
+            override suspend fun fetch(songId: String) = PreviewGrant("https://private.invalid/original", Instant.MAX)
+            override suspend fun fetch(songId: String, mode: SongPlaybackMode, sessionId: String?): PreviewGrant {
+                requested += mode
+                return PreviewGrant("https://private.invalid/${mode.wire}", Instant.MAX, "asset")
+            }
+        }
+        val player = PreviewPlayer(engine, source)
+        player.prepare(SONG_ID); engine.emit(PreviewEngineEvent.Ready)
+        while (player.state.value !is PreviewState.Buffered) yield()
+        assertEquals(SongPlaybackMode.ORIGINAL, player.activeMode.value)
+        player.play(); engine.position = 56_000
+        val switched = async { player.switchMode(SongPlaybackMode.ACCOMPANIMENT) }
+        withTimeout(2000) { while (engine.loadedUrls.size < 2) yield() }
+        engine.emit(PreviewEngineEvent.Ready)
+        assertTrue(withTimeout(2000) { switched.await() })
+        assertEquals(56_000L, player.currentPositionMillis)
+        assertEquals(SongPlaybackMode.ACCOMPANIMENT, player.activeMode.value)
+        assertTrue(player.state.value is PreviewState.Playing)
+        player.release(); player.awaitReleased()
+    }
+
+    @Test
     fun `release立即返回且底层资源仍按actor顺序最终释放`() = runBlocking {
         val engine = FakePreviewEngine().apply { blockRelease = true }
         val player = PreviewPlayer(

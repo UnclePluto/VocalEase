@@ -246,6 +246,8 @@ class PreparationViewModel(
                     draft = requireNotNull(store.find(draft.draftId))
                 }
                 val sessionId = draft.serverSessionId ?: throw SessionBindingMismatchException()
+                if (!kotlinx.coroutines.withTimeout(20_000) { preview.bindSession(sessionId) }) throw IllegalStateException("演唱伴奏准备失败")
+                checkOperation(operation)
                 if (draft.status != PreparationDraftStatus.HANDOFF_PENDING) {
                     for (second in 3 downTo 1) {
                         checkOperation(operation)
@@ -300,6 +302,8 @@ class PreparationViewModel(
             }
         }
     }
+
+    suspend fun switchPreviewMode(mode: com.vocaease.patient.core.media.SongPlaybackMode): Boolean = preview.switchMode(mode)
 
     suspend fun togglePreview(): Boolean {
         if (currentState().isCreatingSession) return false

@@ -179,6 +179,7 @@ class SingingAnalysisResultDto(
 
 @Serializable
 data class SingingSessionDto(
+    val playback: PlaybackBindingDto? = null,
     val id: String,
     val patient: PatientSnapshotDto,
     val song: SongSnapshotDto,
@@ -356,6 +357,7 @@ data class SingingSession(
     val media: List<SessionMedia>,
     val analysisTaskIds: List<UUID>,
     val analysisResults: List<SingingAnalysisResult>,
+    val playback: PlaybackBindingDto? = null,
 )
 
 data class SingingSessionSummary(
@@ -405,6 +407,7 @@ data class PrivateUrl(
 )
 
 fun SingingSessionDto.toDomain(): SingingSession = SingingSession(
+    playback = playback,
     id = id.asUuid("session.id"),
     patient = patient.toDomain(),
     song = song.toDomain(),

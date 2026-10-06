@@ -67,6 +67,9 @@ private class PreviewSessionRecordingPlayback(
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     @Volatile private var endedListener: (() -> Unit)? = null
     override val currentPositionMillis: Long get() = session.currentPositionMillis
+    override val activeMode get() = session.activeMode
+    override val playbackState get() = session.state
+    override suspend fun switchMode(mode: SongPlaybackMode) = !stopped.get() && session.switchMode(mode)
 
     init {
         scope.launch {

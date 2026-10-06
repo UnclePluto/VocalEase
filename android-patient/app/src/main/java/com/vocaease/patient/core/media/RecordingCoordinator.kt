@@ -38,6 +38,9 @@ interface RecordingCapture {
 }
 
 interface RecordingPlayback {
+    val activeMode: kotlinx.coroutines.flow.StateFlow<SongPlaybackMode> get() = kotlinx.coroutines.flow.MutableStateFlow(SongPlaybackMode.ACCOMPANIMENT)
+    val playbackState: kotlinx.coroutines.flow.StateFlow<PreviewState> get() = kotlinx.coroutines.flow.MutableStateFlow(PreviewState.Playing)
+    suspend fun switchMode(mode: SongPlaybackMode): Boolean = false
     val currentPositionMillis: Long
     fun play()
     fun stop()
