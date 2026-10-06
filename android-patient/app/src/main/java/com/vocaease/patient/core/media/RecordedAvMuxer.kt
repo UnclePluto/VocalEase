@@ -23,7 +23,7 @@ class RecordedAvMuxer : RecordingMuxer {
             val vf=video.getTrackFormat(videos.single());val af=audio.getTrackFormat(audios.single())
             val offsetUs=(audioStartNanos-videoStartNanos)/1000
             // 复制视频必须保留首个关键帧，音频起点迟到超过预算时拒绝发布。
-            check(offsetUs in 0..100_000) { "采音起点超出同步预算" }
+            check(offsetUs in -5_000_000..100_000) { "采音起点超出同步预算" }
             val durationUs=minOf(vf.getLong(MediaFormat.KEY_DURATION),offsetUs+af.getLong(MediaFormat.KEY_DURATION))
             check(durationUs>offsetUs)
             muxer=MediaMuxer(output.absolutePath,MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -46,6 +46,7 @@ class RecordedAvMuxer : RecordingMuxer {
         while(source.sampleTime>=0) {
             val time=source.sampleTime+offset
             if(time>=end) break
+            if(time<0) { if(!source.advance()) break;continue }
             buffer.clear();val size=source.readSampleData(buffer,0);check(size in 0..capacity)
             if(size==0) break
             info.set(0,size,time,codecSampleFlags(source.sampleFlags));target.writeSampleData(track,buffer,info);count++

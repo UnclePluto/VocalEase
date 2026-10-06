@@ -51,6 +51,7 @@ class SingingSession(models.Model):
     playback_source_fingerprint = models.CharField(max_length=64, blank=True)
     playback_accompaniment_fingerprint = models.CharField(max_length=64, blank=True)
     reference_version = models.ForeignKey('songs.SongReferencePitch', on_delete=models.PROTECT, null=True, blank=True)
+    playback_alignment = models.JSONField(null=True, blank=True)
     playback_metadata = models.JSONField(null=True, blank=True)
     submission_body_digest = models.CharField(max_length=64, blank=True)
     patient_snapshot = models.JSONField()

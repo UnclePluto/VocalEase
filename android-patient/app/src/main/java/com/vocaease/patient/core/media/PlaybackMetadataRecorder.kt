@@ -14,8 +14,19 @@ class PlaybackMetadataRecorder(private var sampleRate:Int,private val sourceAsse
     @Synchronized fun snapshot():PlaybackMetadata=PlaybackMetadata(sampleRate=sampleRate,sourceAssetId=sourceAssetId,accompanimentAssetId=accompanimentAssetId,referenceVersion=referenceVersion,anchors=anchors.toList(),modeChanges=changes.toList())
     @Synchronized fun finish(durationMs:Long,actualSampleRate:Int,effectiveStartOffsetMs:Long=0):PlaybackMetadata {
         sampleRate=actualSampleRate
-        val effective=anchors.filter { it.recordingMs in effectiveStartOffsetMs..(effectiveStartOffsetMs+durationMs) }.map { it.copy(recordingMs=it.recordingMs-effectiveStartOffsetMs) }
-        require(effective.isNotEmpty())
-        return snapshot().copy(anchors=effective,modeChanges=changes.filter { it.recordingMs in effectiveStartOffsetMs..(effectiveStartOffsetMs+durationMs) }.map { it.copy(recordingMs=it.recordingMs-effectiveStartOffsetMs) })
+        require(durationMs>=0 && effectiveStartOffsetMs>=0 && anchors.isNotEmpty())
+        val end=effectiveStartOffsetMs+durationMs
+        fun boundary(ms:Long):PlaybackAnchor {
+            val index=anchors.indexOfLast { it.recordingMs<=ms }.coerceAtLeast(0)
+            val prior=anchors[index];val next=anchors.getOrNull(index+1)
+            if(prior.recordingMs==ms) return prior
+            val rate=if(!prior.playing) 0.0 else if(next!=null && next.segment==prior.segment)
+                (next.songMs-prior.songMs).toDouble()/(next.recordingMs-prior.recordingMs) else 1.0
+            return prior.copy(recordingMs=ms,songMs=(prior.songMs+(ms-prior.recordingMs)*rate).toLong().coerceAtLeast(0))
+        }
+        // 边界也属于有效时间轴，不能因最后一个停止锚点晚于成片几毫秒而丢掉整段尾音。
+        val clipped=(listOf(boundary(effectiveStartOffsetMs))+anchors.filter { it.recordingMs>effectiveStartOffsetMs && it.recordingMs<end }+listOf(boundary(end)))
+            .distinctBy { it.recordingMs }.map { it.copy(recordingMs=it.recordingMs-effectiveStartOffsetMs) }
+        return snapshot().copy(anchors=clipped,modeChanges=changes.filter { it.recordingMs in effectiveStartOffsetMs..end }.map { it.copy(recordingMs=it.recordingMs-effectiveStartOffsetMs) })
     }
 }

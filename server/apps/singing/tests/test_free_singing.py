@@ -9,12 +9,16 @@ from .test_patient_api import doctor, patient, other_patient, ready_song  # noqa
 
 @pytest.mark.django_db
 @pytest.mark.parametrize('plan_status', ['pending', 'completed', 'cancelled', None])
-def test_free_singing_with_complete_tracks_does_not_require_plan_or_publication(patient, tmp_path, settings, plan_status):
+def test_free_singing_with_complete_tracks_does_not_require_plan_or_publication(patient, doctor, tmp_path, settings, plan_status):
     if plan_status is None:
         patient.treatment_plans.all().delete()
     else:
         patient.treatment_plans.update(status=plan_status)
     song = ready_song(tmp_path, settings)
+    from apps.songs.alignment import verify_track_alignment
+    from apps.songs.reference_pitch_services import asset_fingerprint
+    doctor.user.must_change_password=False;doctor.user.save(update_fields=['must_change_password'])
+    verify_track_alignment(actor=doctor.user,song_id=song.id,source_marker_ms=0,accompaniment_marker_ms=0,evidence='合同夹具同起点标记',expected_source_fingerprint=asset_fingerprint(song.source_asset),expected_accompaniment_fingerprint=asset_fingerprint(song.accompaniment_asset))
     Song.objects.filter(pk=song.pk).update(publication_status='draft')
     client = APIClient()
     client.force_authenticate(patient.user)

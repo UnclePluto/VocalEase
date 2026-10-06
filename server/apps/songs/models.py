@@ -29,6 +29,7 @@ class Song(UUIDSoftDeleteModel):
     vocal_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="vocal_songs")
     accompaniment_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="accompaniment_songs")
     lyrics_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="lyrics_songs")
+    playback_alignment = models.JSONField(null=True, blank=True)
     ingestion_mode = models.CharField(max_length=16, choices=IngestionMode.choices, default=IngestionMode.EXISTING)
     source_available = models.BooleanField(default=False)
     source_verified_at = models.DateTimeField(null=True, blank=True)

@@ -196,11 +196,53 @@ describe('WaveformPlayer', () => {
     const waveFactory=()=>({addRegion:vi.fn(),destroy:vi.fn()}),events:number[]=[]
     const patient={assetId:'patient',url:'/patient.wav'},backing={assetId:'backing',url:'/backing.wav'}
     const view=render(<WaveformPlayer media={{patientAudio:patient,metadata}} events={events} waveFactory={waveFactory}/>)
-    expect(screen.getByRole('tab',{name:'人声',exact:true})).toHaveAttribute('aria-selected','true')
+    expect(screen.getByRole('tab',{name:'人声'})).toHaveAttribute('aria-selected','true')
     view.rerender(<WaveformPlayer media={{patientAudio:patient,accompaniment:backing,metadata}} events={events} waveFactory={waveFactory}/>)
     expect(screen.getByRole('tab',{name:'人声 + 伴奏'})).toHaveAttribute('aria-selected','true')
-    fireEvent.click(screen.getByRole('tab',{name:'人声',exact:true}))
+    fireEvent.click(screen.getByRole('tab',{name:'人声'}))
     view.rerender(<WaveformPlayer media={{patientAudio:patient,accompaniment:backing,metadata}} events={events} waveFactory={waveFactory}/>)
-    expect(screen.getByRole('tab',{name:'人声',exact:true})).toHaveAttribute('aria-selected','true')
+    expect(screen.getByRole('tab',{name:'人声'})).toHaveAttribute('aria-selected','true')
   })
+  it('跟随授权迟到与刷新不暂停患者节点或重建分析器',async()=>{
+    vi.spyOn(HTMLMediaElement.prototype,'play').mockResolvedValue(undefined)
+    const events:number[]=[],waveFactory=()=>({addRegion:vi.fn(),destroy:vi.fn()})
+    const visualizer={start:vi.fn(),stop:vi.fn(),destroy:vi.fn()}
+    const patient={assetId:'patient',url:'/patient.wav'}
+    const view=render(<WaveformPlayer media={{patientAudio:patient,metadata}} events={events} waveFactory={waveFactory} visualizerFactory={()=>visualizer}/>)
+    const first=view.container.querySelector('audio')!,pause=vi.fn()
+    Object.defineProperty(first,'play',{value:vi.fn().mockResolvedValue(undefined)})
+    Object.defineProperty(first,'pause',{value:pause})
+    first.currentTime=12
+    fireEvent.click(screen.getByRole('button',{name:'播放'}))
+    await screen.findByRole('button',{name:'暂停'})
+    for(const url of ['/video.mp4','/fresh-video.mp4']) {
+      view.rerender(<WaveformPlayer media={{patientAudio:patient,metadata,video:{assetId:'video',url},accompaniment:{assetId:'backing',url:'/backing.wav'}}} events={events} waveFactory={waveFactory} visualizerFactory={()=>visualizer}/>)
+      expect(view.container.querySelector('audio')).toBe(first)
+      expect(pause).not.toHaveBeenCalled()
+      expect(visualizer.destroy).not.toHaveBeenCalled()
+      expect(screen.getByRole('button',{name:'暂停'})).toBeInTheDocument()
+    }
+  })
+
+  it('患者授权刷新在新节点加载后恢复进度和主动选择的人声模式',async()=>{
+    const play=vi.spyOn(HTMLMediaElement.prototype,'play').mockResolvedValue(undefined)
+    const events:number[]=[],waveFactory=()=>({addRegion:vi.fn(),destroy:vi.fn()})
+    const visualizer={start:vi.fn(),stop:vi.fn(),destroy:vi.fn()}
+    const refresh=vi.fn().mockResolvedValue('/patient-new.wav')
+    const view=render(<WaveformPlayer media={{patientAudio:{assetId:'patient',url:'/patient.wav'},metadata,accompaniment:{assetId:'backing',url:'/backing.wav'}}} events={events} waveFactory={waveFactory} visualizerFactory={()=>visualizer} onRefreshMedia={refresh}/>)
+    const first=view.container.querySelector('audio')!
+    first.currentTime=12
+    fireEvent.click(screen.getByRole('tab',{name:'人声'}))
+    fireEvent.click(screen.getByRole('button',{name:'播放'}));await screen.findByRole('button',{name:'暂停'})
+    play.mockClear();fireEvent.error(first)
+    await waitFor(()=>expect(view.container.querySelector('audio')).not.toBe(first))
+    const renewed=view.container.querySelector('audio')!
+    fireEvent.loadedMetadata(renewed)
+    await waitFor(()=>expect(visualizer.start).toHaveBeenCalledTimes(2))
+    expect(renewed.currentTime).toBe(12)
+    expect(play).toHaveBeenCalled()
+    expect(screen.getByRole('tab',{name:'人声'})).toHaveAttribute('aria-selected','true')
+    expect(screen.getByRole('button',{name:'暂停'})).toBeInTheDocument()
+  })
+
 })

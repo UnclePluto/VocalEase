@@ -41,3 +41,13 @@ describe('PlaybackClock', () => {
  expect(backing.currentTime).toBe(57);expect(backing.pause).toHaveBeenCalled()
  clock.setMode('patient');expect(audio.currentTime).toBe(2);clock.destroy()
  })
+
+it('verifiedBackingOffsetMapsCanonicalSongClock',async()=>{
+  const audio=document.createElement('audio'),backing=document.createElement('audio')
+  for(const node of [audio,backing]) Object.defineProperty(node,'play',{value:vi.fn().mockResolvedValue(undefined)})
+  const metadata={schema_version:1 as const,sample_rate:48000,source_asset_id:'s',accompaniment_asset_id:'a',reference_version:null,mode_changes:[],anchors:[{recording_ms:0,song_ms:1000,track:'source' as const,playing:true,segment:0},{recording_ms:1000,song_ms:2000,track:'source' as const,playing:false,segment:0}]}
+  const clock=createPlaybackClock(audio,null,backing,metadata,2000)
+  clock.setMode('combined');await clock.play()
+  expect(backing.currentTime).toBe(3)
+  clock.destroy()
+})

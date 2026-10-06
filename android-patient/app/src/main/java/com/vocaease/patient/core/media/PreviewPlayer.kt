@@ -33,6 +33,7 @@ data class PreviewGrant(
     val expiresAt: Instant,
     val assetId: String? = null,
     val binding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null,
+    val timelineOffsetMillis:Long=0,
 )
 
 fun interface PreviewGrantSource {
@@ -111,7 +112,7 @@ class PreviewPlayer internal constructor(
     private val actorJob: Job
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Idle)
     override val state: StateFlow<PreviewState> = mutableState.asStateFlow()
-    override val currentPositionMillis: Long get() = engine.currentPositionMillis.coerceAtLeast(0)
+    override val currentPositionMillis: Long get() = (engine.currentPositionMillis-(currentGrant?.timelineOffsetMillis ?: 0)).coerceAtLeast(0)
     private val modeState = MutableStateFlow(SongPlaybackMode.ORIGINAL)
     override val activeMode = modeState.asStateFlow()
     private var requestedMode = SongPlaybackMode.ORIGINAL
@@ -253,7 +254,7 @@ class PreviewPlayer internal constructor(
         generation += 1
         val token = PreparationToken(); activePreparationToken?.cancel(); activePreparationToken = token
         bindListener(generation, token)
-        backup.grant?.let { currentGrant = it; engine.load(it.url); engine.seekTo(backup.position); mediaLoaded = true }
+        backup.grant?.let { currentGrant = it; engine.load(it.url); engine.seekTo((backup.position+it.timelineOffsetMillis).coerceAtLeast(0)); mediaLoaded = true }
         resumeAfterReady = backup.playing
         mutableState.value = PreviewState.Buffering
         return true
@@ -305,7 +306,7 @@ class PreviewPlayer internal constructor(
                 playbackBinding = grant.binding ?: playbackBinding
                 currentGrant = grant
                 engine.load(grant.url)
-                command.positionMillis?.let { engine.seekTo(it) }
+                if(command.positionMillis!=null || grant.timelineOffsetMillis!=0L) engine.seekTo(((command.positionMillis ?: 0L)+grant.timelineOffsetMillis).coerceAtLeast(0))
                 mediaLoaded = true
                 pendingPreparation?.complete(Result.success(Unit))
                 pendingPreparation = null
@@ -377,7 +378,7 @@ class PreviewPlayer internal constructor(
         }
         refreshUsed = true
         resumeAfterReady = mutableState.value is PreviewState.Playing
-        val position = engine.currentPositionMillis.coerceAtLeast(0)
+        val position = currentPositionMillis
         generation += 1
         currentGrant = null
         mediaLoaded = false
@@ -414,7 +415,7 @@ class PreviewPlayer internal constructor(
             return
         }
         if (mutableState.value is PreviewState.Playing) engine.pause()
-        engine.seekTo(0)
+        engine.seekTo((currentGrant?.timelineOffsetMillis ?: 0L).coerceAtLeast(0))
         mutableState.value = PreviewState.Buffered
         command.completion.complete(true)
     }

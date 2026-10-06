@@ -113,6 +113,7 @@ def test_openapi_schema_and_docs_are_publicly_available():
     document = schema.json()
     paths = document["paths"]
     write_contract = {
+        ("/api/v1/admin/songs/{song_id}/track-alignment/", "post"): (True, {"200"}),
         ("/api/v1/admin/songs/{song_id}/reference-pitch/", "post"): (True, {"200"}),
         ("/api/v1/admin/songs/{song_id}/reference-pitch/generate/", "post"): (True, {"202"}),
         ("/api/v1/patient/singing-sessions/{session_id}/song-playback/", "post"): (False, {"200"}),

@@ -38,8 +38,13 @@
 
 ## 演唱媒体与参考音高升级
 
-Django/Celery 镜像安装 FFmpeg，两个进程必须使用相同镜像。部署后执行迁移（songs 0006/0007、singing 0007、media 0010），再更新患者与后台。新增字段允许旧客户端省略播放元数据；旧会话不补造歌曲绑定。`media.0010` 是最上层禁止回退屏障，防止先撤销依赖迁移才遇到旧媒体屏障；数据库回退须按备份恢复流程执行。
+Django/Celery 镜像安装 FFmpeg，两个进程必须使用相同镜像。部署后执行迁移（songs 0006–0008、singing 0007/0008、media 0010），再更新患者与后台。新增字段允许旧客户端省略播放元数据；旧会话不补造歌曲绑定。`media.0010` 是最上层禁止回退屏障，防止先撤销依赖迁移才遇到旧媒体屏障；数据库回退须按备份恢复流程执行。
 
 对验收歌曲执行 `python manage.py check_reference_pitch_readiness --song-id <UUID>`。自动生成只能使用通过回执校验的 song_vocal；原曲和伴奏不可冒充参考输入。租约60秒、10秒心跳、最多3次尝试；采集/上传保留会话媒体版本，即使曲库换轨也不可改播新文件。
 
 私有媒体须保留签名校验、HTTP Range 与正确 MIME；七牛媒体域名须允许后台来源的匿名 CORS 读取，Web Audio 的 crossOrigin 在 src 前设置。不要建立公开代理绕过鉴权。生产FFmpeg解码、七牛回执/CORS和同一真实病例回放尚需按本次验收报告执行，本地浏览器通过不代表生产发布验收。
+
+
+原唱/伴奏同步须先核验同一音乐标记：管理员读取歌曲详情的 `alignment_source_fingerprint`、`alignment_accompaniment_fingerprint`，向 `POST /api/v1/admin/songs/<UUID>/track-alignment/` 提交 `source_marker_ms`、`accompaniment_marker_ms`、至少5字的 `evidence` 及两个 `expected_*_fingerprint`。例如标记位于原曲1000ms、伴奏3000ms，固定偏移为2000ms。应试听核对首尾标记并记录出处；不自动假定分轨具有相同起点。资源回执更换会使当前歌曲核验失效，新会话固定新的核验快照，已有会话不改播新资产。未经核验的会话仅开放患者人声回放，安卓伴奏切换/接管也会明确失败；旧会话不自动补造核验记录。伴奏缺少源曲开头区间（负偏移）须先补齐静音再核验，避免切换时跳过原曲区间。
+
+安卓 `RecorderTimeBridge` 直接读取 CameraX 1.6.1 已写首个视频关键帧的单调PTS，随后以该原点裁切患者AAC；不使用Started回调处理时钟。此适配有编译期包访问，升级CameraX须复核内部字段语义，并重跑CameraXFrameTimeTest及真机首尾同步验收。

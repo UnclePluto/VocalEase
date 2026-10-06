@@ -226,6 +226,9 @@ def test_patient_recording_playback_contract(tmp_path, settings):
     doctor.user.must_change_password=False;doctor.user.save(update_fields=["must_change_password"])
     patient=_create_active_patient(doctor=doctor,suffix=3)
     song=_create_ready_song(tmp_path=tmp_path,settings=settings)
+    from apps.songs.alignment import verify_track_alignment
+    from apps.songs.reference_pitch_services import asset_fingerprint
+    verify_track_alignment(actor=doctor.user,song_id=song.id,source_marker_ms=0,accompaniment_marker_ms=0,evidence='授权验收同起点合同夹具',expected_source_fingerprint=asset_fingerprint(song.source_asset),expected_accompaniment_fingerprint=asset_fingerprint(song.accompaniment_asset))
     # 来自明确校验标注，不能使用占位参考。歌曲轨道存储绑定沿用上面的合同夹具。
     reference=import_reference_pitch(actor=doctor.user,song_id=song.id,expected_fingerprint=song.source_receipt_fingerprint,document={"schema_version":1,"origin":{"type":"annotation","citation":"授权验收标注 MIDI57"},"notes":[{"start_ms":0,"end_ms":1000,"midi_note":57,"confidence":1}]})
     client=APIClient();client.force_authenticate(patient.user)

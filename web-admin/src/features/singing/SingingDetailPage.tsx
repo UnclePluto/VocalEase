@@ -61,6 +61,7 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
     videoExpected: Boolean(urls.videoBinding),
     accompaniment: urls.accompaniment.data ? {assetId:urls.accompaniment.data.asset_id,url:urls.accompaniment.data.url}:undefined,
     metadata: session.playback?.metadata,
+    accompanimentOffsetMillis:session.playback?.accompaniment_offset_ms ?? 0,
 
   }
   const refreshMedia = async (assetId: string) => {

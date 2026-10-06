@@ -108,8 +108,18 @@ class DefaultRecordingCoordinator(
     }
     private suspend fun recordAnchor() {
         metadataRecorder?.let { recorder ->
-            recorder.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
-            persistMetadata(requireNotNull(draftId),recorder.snapshot())
+            try {
+                recorder.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
+                persistMetadata(requireNotNull(draftId),recorder.snapshot())
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                publicationAllowed.set(false)
+                metadataJob?.cancel()
+                issueStopOnce()
+                capture.release()
+                interruptInternal(if (generateSequence<Throwable>(failure) { it.cause }.any { it is StaleAccountScopeException }) RecordingInterruption.ACCOUNT_CHANGED else RecordingInterruption.STORAGE)
+            }
         }
     }
     private val callbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

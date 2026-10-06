@@ -9,6 +9,6 @@ def reject_reverse(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [
         ("media", "0009_irreversible_schema_barrier"),
-        ("singing", "0007_session_playback"),
+        ("singing", "0008_singingsession_playback_alignment"),
     ]
     operations = [migrations.RunPython(migrations.RunPython.noop, reject_reverse)]

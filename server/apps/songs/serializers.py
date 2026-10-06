@@ -21,6 +21,14 @@ class SongWriteSerializer(serializers.Serializer):
 
 
 class SongReadSerializer(serializers.ModelSerializer):
+    alignment_source_fingerprint = serializers.SerializerMethodField()
+    alignment_accompaniment_fingerprint = serializers.SerializerMethodField()
+    def get_alignment_source_fingerprint(self,obj):
+        from .reference_pitch_services import asset_fingerprint
+        return asset_fingerprint(obj.source_asset)
+    def get_alignment_accompaniment_fingerprint(self,obj):
+        from .reference_pitch_services import asset_fingerprint
+        return asset_fingerprint(obj.accompaniment_asset)
     source_asset = serializers.UUIDField(source="source_asset_id", allow_null=True, read_only=True)
     uploaded_at = serializers.DateTimeField(source="created_at", read_only=True)
     vocal_asset = serializers.UUIDField(source="vocal_asset_id", allow_null=True, read_only=True)
@@ -39,7 +47,7 @@ class SongReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Song
-        fields = ("id", "title", "artist", "genre", "language", "duration_seconds", "source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset", "ingestion_mode", "artifacts", "source_receipt_fingerprint", "vocal_fingerprint", "analysis_status", "publication_status", "uploaded_at")
+        fields = ("id", "title", "artist", "genre", "language", "duration_seconds", "source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset", "ingestion_mode", "artifacts", "source_receipt_fingerprint", "vocal_fingerprint", "playback_alignment", "alignment_source_fingerprint", "alignment_accompaniment_fingerprint", "analysis_status", "publication_status", "uploaded_at")
 
 
 class PatientSongReadSerializer(SongReadSerializer):

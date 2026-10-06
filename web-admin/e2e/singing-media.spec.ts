@@ -1,3 +1,8 @@
+import {execFileSync} from 'node:child_process'
+import {mkdtempSync,readFileSync,rmSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
+import {fileURLToPath} from 'node:url'
 import {expect,test,type Page} from '@playwright/test'
 function wav(frequency:number){
  const rate=48000,length=rate*10,body=Buffer.alloc(44+length*2)
@@ -7,13 +12,13 @@ function wav(frequency:number){
 }
 const envelope=(data:unknown)=>({code:'ok',message:'',request_id:'media-browser',data})
 const session={id:'s1',status:'completed',duration_seconds:10,score:80,burp_count:1,is_mock:true,patient:{name:'测试患者',medical_record_no:'P001'},song:{title:'音轨验证'},media:[{asset_id:'patient',media_type:'singing_audio',status:'ready',mime:'audio/wav',size:960044}],analysis_results:[{task_type:'singing_audio_metrics',status:'completed',is_mock:true,payload:{burp_events:[3]},time_series:{snr_db:{sample_interval_ms:1000,values:[32]}}}],playback:{source_asset_id:'source',accompaniment_asset_id:'backing',reference_version:null,combined_available:true,metadata:{schema_version:1,sample_rate:48000,source_asset_id:'source',accompaniment_asset_id:'backing',reference_version:null,mode_changes:[],anchors:[{recording_ms:0,song_ms:0,track:'accompaniment',playing:true,segment:0},{recording_ms:10000,song_ms:10000,track:'accompaniment',playing:false,segment:0}]}}}
-async function prepare(page:Page,frequency=220,denied=false,initial='/singing/s1',prepareMedia=true){
+async function prepare(page:Page,frequency=220,denied=false,initial='/singing/s1',prepareMedia=true,withVideo=false,videoGate?:Promise<void>){
  await page.route('**/api/**',async route=>{
   const path=new URL(route.request().url()).pathname
     if(!path.startsWith('/api/')){await route.continue();return}
   let data:unknown={}
   if(path.endsWith('/auth/refresh/'))data={access:'browser-test-token',refresh_expires_at:'2099-01-01',user:{login_id:'DTEST',role:'doctor',must_change_password:false}}
-  else if(path.endsWith('/singing-sessions/s1/'))data=session
+  else if(path.endsWith('/singing-sessions/s1/'))data=withVideo?{...session,media:[...session.media,{asset_id:'video',media_type:'singing_video',status:'ready',mime:'video/mp4',size:10000}]}:session
   else if(path.endsWith('/admin/patients/'))data={count:21,page:2,page_size:20,results:[{id:'30000000-0000-0000-0000-000000000001',user_id:'u',name:'张患者',medical_record_no:'P001',gender:'male',phone:'13900000000',enrollment_age:30,primary_doctor:null,treatment_plan:null}]}
   else if(path.endsWith('/admin/patients/30000000-0000-0000-0000-000000000001/'))data={id:'30000000-0000-0000-0000-000000000001',name:'张患者',medical_record_no:'P001',gender:'male',phone:'13900000000',enrollment_age:30,primary_doctor:null,treatment_plan:null}
   else if(path.endsWith('/admin/singing-sessions/'))data={count:1,page:1,page_size:10,results:[session]}
@@ -22,7 +27,8 @@ async function prepare(page:Page,frequency=220,denied=false,initial='/singing/s1
   else if(path.endsWith('/patient/private-url/')){
    if(denied){await route.fulfill({status:403,json:{code:'denied',message:'患者录音授权拒绝',request_id:'denied',data:{}}});return}
    data={url:'/fixture/patient.wav',expires_at:'2099-01-01'}
-  }else if(path.endsWith('/playback-accompaniment/'))data={asset_id:'backing',url:'/fixture/backing.wav',expires_at:'2099-01-01'}
+  }else if(path.endsWith('/video/private-url/')){await videoGate;data={url:'/fixture/video.mp4',expires_at:'2099-01-01'}}
+  else if(path.endsWith('/playback-accompaniment/'))data={asset_id:'backing',url:'/fixture/backing.wav',expires_at:'2099-01-01'}
   await route.fulfill({json:envelope(data)})
  })
  await page.route('**/fixture/*.wav',route=>{
@@ -31,6 +37,21 @@ async function prepare(page:Page,frequency=220,denied=false,initial='/singing/s1
    if(match){const start=Number(match[1]),end=match[2]?Math.min(Number(match[2]),body.length-1):body.length-1;return route.fulfill({status:206,contentType:'audio/wav',headers:{'Accept-Ranges':'bytes','Content-Range':`bytes ${start}-${end}/${body.length}`},body:body.subarray(start,end+1)})}
    return route.fulfill({contentType:'audio/wav',headers:{'Accept-Ranges':'bytes'},body})
  })
+ if(withVideo){
+   const temp=mkdtempSync(join(tmpdir(),'vocaease-browser-video-'))
+   let video:Buffer
+   try {
+     const source=fileURLToPath(new URL('../../android-patient/app/src/androidTest/assets/sample_avc_only.mp4',import.meta.url))
+     const output=join(temp,'video.mp4')
+     execFileSync(process.env.VOCAEASE_FFMPEG_BIN ?? 'ffmpeg',['-nostdin','-v','error','-stream_loop','-1','-i',source,'-t','10','-an','-c:v','copy','-movflags','+faststart',output])
+     video=readFileSync(output)
+   } finally {rmSync(temp,{recursive:true,force:true})}
+   await page.route('**/fixture/video.mp4',route=>{
+     const match=route.request().headers().range?.match(/^bytes=(\d+)-(\d*)$/)
+     if(match){const start=Number(match[1]),end=match[2]?Math.min(Number(match[2]),video.length-1):video.length-1;return route.fulfill({status:206,contentType:'video/mp4',headers:{'Accept-Ranges':'bytes','Content-Range':`bytes ${start}-${end}/${video.length}`},body:video.subarray(start,end+1)})}
+     return route.fulfill({contentType:'video/mp4',headers:{'Accept-Ranges':'bytes'},body:video})
+   })
+ }
  await page.goto(initial);if(prepareMedia)await page.getByRole('button',{name:'准备回放'}).click()
 }
 test('真实PCM驱动双图，暂停恢复和模式切换保持同一个患者音源',async({page})=>{
@@ -76,4 +97,23 @@ test('患者列表筛选经过详情与演唱明细两次返回仍保留',async(
  expect(new URL(page.url()).searchParams.get('page')).toBe('2')
  expect(new URL(page.url()).searchParams.get('search')).toBe('张')
  await expect(page.getByLabel('搜索患者')).toHaveValue('张')
+})
+
+test('录像授权迟到时真实MP4静音跟随且患者播放连续',async({page})=>{
+ let releaseVideo!:()=>void
+ const gate=new Promise<void>(resolve=>{releaseVideo=resolve})
+ await prepare(page,220,false,'/singing/s1',true,true,gate)
+ await page.getByRole('button',{name:'播放',exact:true}).click()
+ await expect(page.locator('.voice-pitch')).toHaveText('220 Hz')
+ const patient=page.locator('audio').first()
+ await patient.evaluate(node=>{node.setAttribute('data-original-patient','true')})
+ const before=await patient.evaluate(node=>(node as HTMLAudioElement).currentTime)
+ releaseVideo()
+ await expect(page.locator('video')).toBeVisible()
+ await expect.poll(()=>page.locator('video').evaluate(node=>(node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2)
+ await expect(patient).toHaveAttribute('data-original-patient','true')
+ await expect.poll(()=>patient.evaluate(node=>(node as HTMLAudioElement).currentTime)).toBeGreaterThan(before+.1)
+ await expect.poll(()=>page.evaluate(()=>Math.abs(document.querySelector('video')!.currentTime-document.querySelector('audio')!.currentTime))).toBeLessThanOrEqual(.1)
+ expect(await page.locator('video').evaluate(node=>({muted:(node as HTMLVideoElement).muted,controls:(node as HTMLVideoElement).controls}))).toEqual({muted:true,controls:false})
+ await expect(page.locator('.voice-pitch')).toHaveText('220 Hz')
 })

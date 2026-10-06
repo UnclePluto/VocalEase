@@ -259,6 +259,8 @@ data class SessionMutationDto(
 data class PrivateUrlDto(
     val url: String,
     @SerialName("expires_at") val expiresAt: String,
+    @SerialName("alignment_verified") val alignmentVerified:Boolean=false,
+    @SerialName("accompaniment_offset_ms") val accompanimentOffsetMs:Long?=null,
 )
 
 data class PatientSnapshot(

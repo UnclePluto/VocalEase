@@ -21,6 +21,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreviewPlayerTest {
+    @Test fun verifiedOffsetKeepsCanonicalSongPositionAcrossSwitchAndRewind()=runBlocking {
+        val engine=FakePreviewEngine()
+        val source=object:PreviewGrantSource {
+            override suspend fun fetch(songId:String)=PreviewGrant("https://private.invalid/source",Instant.MAX)
+            override suspend fun fetch(songId:String,mode:SongPlaybackMode,sessionId:String?)=PreviewGrant("https://private.invalid/${mode.wire}",Instant.MAX,timelineOffsetMillis=if(mode==SongPlaybackMode.ACCOMPANIMENT) 2000 else 0)
+        }
+        val player=PreviewPlayer(engine,source)
+        try {
+            player.prepare(SONG_ID);engine.emit(PreviewEngineEvent.Ready)
+            withTimeout(2000){while(player.state.value !is PreviewState.Buffered) yield()}
+            engine.position=1000
+            val switched=async { player.switchMode(SongPlaybackMode.ACCOMPANIMENT) }
+            withTimeout(2000){while(engine.loadedUrls.size<2) yield()}
+            engine.emit(PreviewEngineEvent.Ready);assertTrue(switched.await())
+            assertEquals(3000L,engine.position);assertEquals(1000L,player.currentPositionMillis)
+            player.rewindToStart();assertEquals(2000L,engine.position);assertEquals(0L,player.currentPositionMillis)
+        } finally { player.release();player.awaitReleased() }
+    }
+
     @Test
     fun lastSwitchWinsAndFailureRestoresOldTrack() = runBlocking {
         val engine = FakePreviewEngine()

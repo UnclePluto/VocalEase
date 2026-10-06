@@ -15,7 +15,7 @@ import type { PatientAudioFrame } from './PatientAudioAnalyser'
 import { createVisualizerAdapter, type VisualizerAdapter } from './VisualizerAdapter'
 
 export type Track = { assetId: string; url: string }
-export type PlayerMedia = { patientAudio?: Track; mixed?: Track; video?: Track; videoExpected?: boolean; accompaniment?: Track; metadata?: PlaybackMetadata | null }
+export type PlayerMedia = { patientAudio?: Track; mixed?: Track; video?: Track; videoExpected?: boolean; accompaniment?: Track; metadata?: PlaybackMetadata | null; accompanimentOffsetMillis?:number }
 export type WaveHandle = {
   addRegion(region: { start: number; end: number; color?: string }): unknown
   destroy(): void
@@ -46,7 +46,8 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const handle = useRef<WaveHandle | null>(null)
   const backing = useRef<HTMLAudioElement>(null)
   const modeRef = useRef<TrackKey>('patient')
-  const resumeAt = useRef(0)
+  const resumeAt = useRef({assetId:'',seconds:0,wanted:false})
+  const wanted = useRef(false)
   const activeAssetIds = useRef(new Set<string>())
   const refreshed = useRef(new Set<string>())
   const refreshGenerations = useRef(new Map<string, number>())
@@ -65,44 +66,70 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const videoTrack = videoFailed ? undefined : media.video
   const selectedUrl = selectedTrack ? overrides[selectedTrack.assetId] ?? selectedTrack.url : ''
   const videoUrl = videoTrack ? overrides[videoTrack.assetId] ?? videoTrack.url : ''
+  const backingUrl = media.accompaniment ? overrides[media.accompaniment.assetId] ?? media.accompaniment.url : ''
 
   useEffect(() => {
     activeAssetIds.current = new Set([mixedAssetId, videoAssetId, accompanimentAssetId].filter((assetId): assetId is string => Boolean(assetId)))
     return () => { activeAssetIds.current = new Set() }
   }, [accompanimentAssetId, mixedAssetId, videoAssetId])
 
+  // 只有患者资产/授权 URL 更换才重建主时钟；跟随音轨变化不能销毁患者采样链。
+  useEffect(() => {
+    const patient=audio.current
+    if(!patient || !selectedAssetId) return
+    const created=createPlaybackClock(patient)
+    clock.current=created
+    const resume=resumeAt.current
+    const resetVisuals=()=>visualizer.current?.reset?.()
+    patient.addEventListener('seeked',resetVisuals)
+    const restore=async()=>{
+      if(clock.current!==created || resume.assetId!==selectedAssetId) return
+      patient.currentTime=resume.seconds
+      if(!resume.wanted) return
+      try {
+        await created.play()
+        if(clock.current!==created) return
+        setPlaying(true)
+        if(canvas.current){
+          visualizer.current ??= visualizerFactory()
+          try { await visualizer.current.start(patient,canvas.current,polar.current,setAudioFrame) }
+          catch { setAudioFrame({timeDomain:new Float32Array(0),frequency:new Uint8Array(0),rmsDbfs:null,pitchHz:null,status:'unavailable'}) }
+        }
+      } catch { if(clock.current===created) setPlaying(false) }
+    }
+    patient.addEventListener('loadedmetadata',restore)
+    if(patient.readyState>=1) void restore()
+    return()=>{
+      resumeAt.current={assetId:selectedAssetId,seconds:patient.currentTime,wanted:wanted.current}
+      patient.removeEventListener('loadedmetadata',restore);patient.removeEventListener('seeked',resetVisuals)
+      visualizer.current?.destroy();visualizer.current=null
+      created.destroy();if(clock.current===created) clock.current=null
+    }
+    // 工厂只在用户播放/新授权创建采样器时使用，不属于主音频身份。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[selectedAssetId,selectedUrl])
+
+  useEffect(()=>clock.current?.subscribe(value=>{setSeconds(value);onTime?.(value)}),[onTime,selectedAssetId,selectedUrl])
+
+  useEffect(()=>{
+    clock.current?.setFollowers(video.current,backing.current,media.metadata,media.accompanimentOffsetMillis)
+    clock.current?.setMode(modeRef.current)
+  },[selectedAssetId,selectedUrl,videoTrack?.assetId,videoUrl,backingUrl,media.metadata,media.accompanimentOffsetMillis])
+
   useEffect(() => {
     if (!container.current || !selectedAssetId || !audio.current) return
-    const patientElement=audio.current
-    const resetVisuals=()=>visualizer.current?.reset?.()
-    patientElement.addEventListener('seeked',resetVisuals)
-    if (resumeAt.current > 0) audio.current.currentTime = resumeAt.current
+    const patient=audio.current
     const factory = waveFactory ?? ((element: HTMLElement) => {
       const regions = RegionsPlugin.create()
-      const wave = WaveSurfer.create({ container: element, media: audio.current ?? undefined, height: 96, waveColor: '#a9c7ff', progressColor: '#3478f6', plugins: [regions, TimelinePlugin.create(), HoverPlugin.create()] })
-      return {
-        addRegion: (region) => regions.addRegion(region),
-        destroy: () => wave.destroy(),
-        seek: (seconds) => wave.setTime(seconds),
-        onError: (listener) => wave.on('error', listener),
-      }
+      const wave = WaveSurfer.create({ container: element, media: patient, height: 96, waveColor: '#a9c7ff', progressColor: '#3478f6', plugins: [regions, TimelinePlugin.create(), HoverPlugin.create()] })
+      return {addRegion: (region) => regions.addRegion(region),destroy: () => wave.destroy(),seek: (seconds) => wave.setTime(seconds),onError: (listener) => wave.on('error', listener)}
     })
     const created = factory(container.current)
-    handle.current = created
-    events.forEach((seconds) => created.addRegion({ start: seconds, end: seconds + 0.15, color: 'rgba(255,77,79,.55)' }))
-    const unsubscribeWaveError = created.onError?.(() => audio.current?.dispatchEvent(new Event('error')))
-    clock.current = createPlaybackClock(audio.current, video.current, backing.current, media.metadata)
-    clock.current.setMode(modeRef.current)
-    const unsubscribe = clock.current.subscribe((seconds)=>{setSeconds(seconds);onTime?.(seconds)})
-    return () => {
-      patientElement.removeEventListener('seeked',resetVisuals)
-      resumeAt.current = patientElement.currentTime
-      unsubscribeWaveError?.()
-      unsubscribe(); visualizer.current?.destroy(); visualizer.current = null
-      clock.current?.destroy(); clock.current = null
-      created.destroy(); handle.current = null
-    }
-  }, [events, onTime, selectedAssetId, selectedUrl, videoTrack?.assetId, videoUrl, waveFactory, media.metadata, media.accompaniment?.url, accompanimentAssetId])
+    handle.current=created
+    events.forEach(seconds=>created.addRegion({start:seconds,end:seconds+.15,color:'rgba(255,77,79,.55)'}))
+    const unsubscribe=created.onError?.(()=>patient.dispatchEvent(new Event('error')))
+    return()=>{unsubscribe?.();created.destroy();if(handle.current===created) handle.current=null}
+  },[events,selectedAssetId,selectedUrl,waveFactory])
 
   useEffect(() => {
     modeRef.current = activeTrack
@@ -139,6 +166,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const play = async () => {
     setFailure(null)
     try {
+      wanted.current=true
       await clock.current?.play()
       if (audio.current && canvas.current) {
         visualizer.current ??= visualizerFactory()
@@ -146,6 +174,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
       }
       setPlaying(true)
     } catch (error) {
+      wanted.current=false
       setPlaying(false)
       setFailure({ asset: selectedTrack ?? mixed, message: error instanceof DOMException && error.name === 'NotAllowedError' ? '浏览器阻止自动播放，请再次点击播放按钮。' : failureOf(selectedTrack ?? mixed, error).message, requestId: failureOf(selectedTrack ?? mixed, error).requestId })
     }
@@ -163,12 +192,12 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     <div className="audio-workspace">
       <div className="spectrum-card">
         <h2>声音波形</h2>
-        <audio key={`${selectedTrack?.assetId}:${selectedUrl}`} ref={audio} crossOrigin="anonymous" src={selectedUrl} onPause={() => { setPlaying(false); visualizer.current?.stop() }} onEnded={() => { setPlaying(false); visualizer.current?.stop() }} onError={() => selectedTrack && void refresh(selectedTrack)} />
-        {media.accompaniment ? <audio ref={backing} crossOrigin="anonymous" src={overrides[media.accompaniment.assetId] ?? media.accompaniment.url} onError={() => { selectTrack('patient'); void refresh(media.accompaniment!) }} /> : null}
+        <audio key={`${selectedTrack?.assetId}:${selectedUrl}`} ref={audio} crossOrigin="anonymous" src={selectedUrl} onPause={(event) => { if(audio.current===event.currentTarget){wanted.current=false;setPlaying(false); visualizer.current?.stop()} }} onEnded={() => { wanted.current=false;setPlaying(false); visualizer.current?.stop() }} onError={() => selectedTrack && void refresh(selectedTrack)} />
+        {media.accompaniment ? <audio ref={backing} crossOrigin="anonymous" src={backingUrl} onError={() => { selectTrack('patient'); void refresh(media.accompaniment!) }} /> : null}
         {failure ? <Alert className="media-playback-error" type="error" showIcon title={failure.message} description={failure.requestId ? `请求编号：${failure.requestId}` : undefined} action={<Button aria-label="重试媒体授权" onClick={() => void refresh(failure.asset, true)}>重试</Button>} /> : null}
         <Space>
           <Button type="primary" shape="circle" aria-label={playing ? '暂停' : '播放'} icon={playing ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => {
-            if (playing) { clock.current?.pause(); visualizer.current?.stop(); setPlaying(false) } else void play()
+            if (playing) { wanted.current=false;clock.current?.pause(); visualizer.current?.stop(); setPlaying(false) } else void play()
           }} />
           {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds); visualizer.current?.reset?.() }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
         </Space>

@@ -42,6 +42,7 @@ internal sealed interface CameraXBackendEvent {
 }
 
 internal interface CameraXBackend {
+    val captureStartNanos:Long? get()=null
     suspend fun bind(selector: CameraSelector)
     fun start(output: File, audioEnabled: Boolean, callback: (CameraXBackendEvent) -> Unit)
     fun stop()
@@ -65,6 +66,7 @@ class CameraXRecordingCapture internal constructor(
     private val events = Channel<CaptureEvent>(Channel.UNLIMITED)
     private val released = AtomicBoolean()
     override var listener: suspend (CaptureEvent) -> Unit = {}
+    override val captureStartNanos get()=backend.captureStartNanos
 
     init {
         scope.launch {
@@ -117,6 +119,8 @@ private class AndroidCameraXBackend(
     private var cameraProvider: ProcessCameraProvider? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
+    private val frameOrigin=java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
+    override val captureStartNanos get()=frameOrigin.get().takeUnless { it==Long.MIN_VALUE }
 
     override suspend fun bind(selector: CameraSelector) {
         val provider = awaitCameraProvider()
@@ -155,9 +159,14 @@ private class AndroidCameraXBackend(
                     callback(CameraXBackendEvent.Failed(RecordingInterruption.AUDIO))
                     return@execute
                 }
-                activeRecording = pending.start(executor) { event ->
+                frameOrigin.set(Long.MIN_VALUE)
+                // 直接在 Recorder 顺序执行器上取首帧 PTS，随后业务事件仍经队列串行投递。
+                activeRecording = pending.start(Executor { it.run() }) { event ->
                     when (event) {
-                        is VideoRecordEvent.Start -> callback(CameraXBackendEvent.Started)
+                        is VideoRecordEvent.Status -> if(event.recordingStats.numBytesRecorded>0 && frameOrigin.get()==Long.MIN_VALUE) {
+                            val origin=androidx.camera.video.RecorderTimeBridge.firstFrameTimeNanos(capture.output)
+                            if(frameOrigin.compareAndSet(Long.MIN_VALUE,origin)) callback(CameraXBackendEvent.Started)
+                        }
                         is VideoRecordEvent.Finalize -> {
                             activeRecording = null
                             val durationMillis = event.recordingStats.recordedDurationNanos / 1_000_000L

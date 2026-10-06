@@ -41,12 +41,24 @@ class VocaEasePreviewGrantSource(
 ) : PreviewGrantSource {
     override suspend fun fetch(songId: String): PreviewGrant = fetch(songId, com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL, null)
     override suspend fun fetch(songId: String, mode: com.vocaease.patient.core.media.SongPlaybackMode, sessionId: String?): PreviewGrant {
-        if (sessionId == null) return api.previewSong(songId, mode.wire).data.toDomain().let { PreviewGrant(it.url, it.expiresAt) }
+        if (sessionId == null) {
+            val grant=api.previewSong(songId,mode.wire).data
+            val offset=if(mode==com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT) {
+                if(!grant.alignmentVerified || grant.accompanimentOffsetMs==null) throw java.io.IOException("伴奏起点尚未核验")
+                grant.accompanimentOffsetMs
+            } else 0L
+            val url=grant.toDomain()
+            return PreviewGrant(url.url,url.expiresAt,timelineOffsetMillis=offset)
+        }
         val binding = api.session(sessionId).data.playback ?: error("会话缺少媒体快照")
         val grant = api.sessionSongPlayback(sessionId, mode.wire).data
         val expected = if (mode == com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL) binding.sourceAssetId else binding.accompanimentAssetId
         require(grant.assetId.isNotBlank() && grant.assetId == expected) { "会话媒体版本不一致" }
-        return PreviewGrant(grant.url, java.time.Instant.parse(grant.expiresAt), grant.assetId, binding)
+        val offset=if(mode==com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT) {
+            if(!binding.alignmentVerified || binding.accompanimentOffsetMs==null) throw java.io.IOException("会话伴奏起点尚未核验")
+            binding.accompanimentOffsetMs
+        } else 0L
+        return PreviewGrant(grant.url, java.time.Instant.parse(grant.expiresAt), grant.assetId, binding,offset)
     }
 }
 

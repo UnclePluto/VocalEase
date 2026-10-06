@@ -12,8 +12,9 @@ from .models import SingingSession
 
 
 def snapshot_playback(song):
+    from apps.songs.alignment import current_alignment
     reference = read_reference_pitch(song_id=song.id)
-    return dict(playback_source_asset=song.source_asset, playback_accompaniment_asset=song.accompaniment_asset, playback_source_fingerprint=asset_fingerprint(song.source_asset), playback_accompaniment_fingerprint=asset_fingerprint(song.accompaniment_asset), reference_version_id=reference['version'] if reference['status']=='ready' else None)
+    return dict(playback_alignment=current_alignment(song), playback_source_asset=song.source_asset, playback_accompaniment_asset=song.accompaniment_asset, playback_source_fingerprint=asset_fingerprint(song.source_asset), playback_accompaniment_fingerprint=asset_fingerprint(song.accompaniment_asset), reference_version_id=reference['version'] if reference['status']=='ready' else None)
 
 
 def validate_playback_metadata(value: object, *, session: SingingSession) -> dict | None:
@@ -52,8 +53,18 @@ def validate_playback_metadata(value: object, *, session: SingingSession) -> dic
     return value
 
 
+def bound_alignment(session):
+    value=session.playback_alignment
+    if not isinstance(value,dict) or type(value.get('offset_ms')) is not int:
+        return None
+    if any(value.get(key)!=expected for key,expected in [('source_asset_id',str(session.playback_source_asset_id)),('accompaniment_asset_id',str(session.playback_accompaniment_asset_id)),('source_fingerprint',session.playback_source_fingerprint),('accompaniment_fingerprint',session.playback_accompaniment_fingerprint)]):
+        return None
+    return value
+
+
 def playback_description(session):
-    return {'source_asset_id':str(session.playback_source_asset_id) if session.playback_source_asset_id else None,'accompaniment_asset_id':str(session.playback_accompaniment_asset_id) if session.playback_accompaniment_asset_id else None,'reference_version':str(session.reference_version_id) if session.reference_version_id else None,'combined_available':bool(session.playback_accompaniment_asset_id and session.playback_metadata and session.playback_metadata.get('anchors')),'metadata':session.playback_metadata}
+    alignment=bound_alignment(session)
+    return {'alignment_verified':bool(alignment),'accompaniment_offset_ms':alignment['offset_ms'] if alignment else None,'source_asset_id':str(session.playback_source_asset_id) if session.playback_source_asset_id else None,'accompaniment_asset_id':str(session.playback_accompaniment_asset_id) if session.playback_accompaniment_asset_id else None,'reference_version':str(session.reference_version_id) if session.reference_version_id else None,'combined_available':bool(alignment and session.playback_accompaniment_asset_id and session.playback_metadata and session.playback_metadata.get('anchors')),'metadata':session.playback_metadata}
 
 
 def authorize_session_song(*, actor, session_id, track, request_id):
@@ -64,6 +75,8 @@ def authorize_session_song(*, actor, session_id, track, request_id):
         raise PermissionDenied()
     if actor.role == Role.PATIENT and session.patient.user_id != actor.id:
         raise PermissionDenied()
+    if track=='accompaniment' and bound_alignment(session) is None:
+        raise SongStateConflict('会话伴奏起点尚未核验')
     asset=getattr(session, f'playback_{track}_asset')
     if not asset:
         raise SongStateConflict('此会话缺少可信歌曲音轨绑定')

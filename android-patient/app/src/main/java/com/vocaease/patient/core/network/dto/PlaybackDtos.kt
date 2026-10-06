@@ -11,6 +11,8 @@ data class PlaybackBindingDto(
     @SerialName("reference_version") val referenceVersion: String? = null,
     @SerialName("combined_available") val combinedAvailable: Boolean = false,
     val metadata: PlaybackMetadata? = null,
+    @SerialName("alignment_verified") val alignmentVerified:Boolean=false,
+    @SerialName("accompaniment_offset_ms") val accompanimentOffsetMs:Long?=null,
 )
 
 @Serializable

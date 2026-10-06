@@ -351,6 +351,28 @@ class RecordingCoordinatorTest {
         assertEquals(0L, starting.recordingDurationMillis)
     }
 
+    @Test fun `元数据写入失败停止采集并禁止发布`() = runBlocking {
+        for (failureAt in listOf(1,2)) for (failure in listOf(java.io.IOException("磁盘已满"), StaleAccountScopeException())) {
+            val now=java.util.concurrent.atomic.AtomicLong(1_000_000_000L);var writes=0
+            val capture = FakeCapture(); val playback = FakePlayback()
+            val bound = object : RecordingPlayback by playback {
+                override val playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto("00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002")
+            }
+            val files = FakeTempFiles(); val publisher = FakePublisher()
+            val coordinator = DefaultRecordingCoordinator(capture, bound, now::get, files, publisher) { _, _ -> if(++writes==failureAt) throw failure else now.addAndGet(5_000_000_000L) }
+            try {
+                coordinator.takeOver("draft-1"); coordinator.onCountdownFinished(); capture.emit(CaptureEvent.Started)
+                kotlinx.coroutines.withTimeout(2000) {
+                    while (coordinator.state.value !is RecordingState.Interrupted) kotlinx.coroutines.delay(10)
+                }
+                val reason = if (failure is StaleAccountScopeException) RecordingInterruption.ACCOUNT_CHANGED else RecordingInterruption.STORAGE
+                assertEquals(RecordingState.Interrupted(reason), coordinator.state.value)
+                assertEquals(1, capture.stopCount); assertTrue(files.cleaned)
+                capture.emit(CaptureEvent.Finalized(1000)); assertEquals(0, publisher.calls)
+            } finally { coordinator.close() }
+        }
+    }
+
     private fun coordinator(capture: FakeCapture) = DefaultRecordingCoordinator(
         capture, FakePlayback(), { 1L }, FakeTempFiles(), FakePublisher(),
     )

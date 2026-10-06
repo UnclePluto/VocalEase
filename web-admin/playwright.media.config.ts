@@ -1,2 +1,2 @@
 import {defineConfig} from '@playwright/test'
-export default defineConfig({testDir:'./e2e',testMatch:'singing-media.spec.ts',workers:1,retries:0,outputDir:'/tmp/vocaease-media-browser',reporter:'list',use:{baseURL:'http://127.0.0.1:3107',viewport:{width:1440,height:1000},screenshot:'only-on-failure'},webServer:{command:'pnpm dev --port 3107',url:'http://127.0.0.1:3107',reuseExistingServer:false}})
+export default defineConfig({testDir:'./e2e',testMatch:'singing-media.spec.ts',workers:1,retries:0,outputDir:'/tmp/vocaease-media-browser',reporter:'list',use:{channel:'chrome',baseURL:'http://127.0.0.1:3107',viewport:{width:1440,height:1000},screenshot:'only-on-failure'},webServer:{command:'pnpm dev --port 3107',url:'http://127.0.0.1:3107',reuseExistingServer:false}})
