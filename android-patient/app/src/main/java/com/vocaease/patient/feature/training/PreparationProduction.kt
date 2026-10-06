@@ -46,7 +46,7 @@ class VocaEasePreviewGrantSource(
         val grant = api.sessionSongPlayback(sessionId, mode.wire).data
         val expected = if (mode == com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL) binding.sourceAssetId else binding.accompanimentAssetId
         require(grant.assetId.isNotBlank() && grant.assetId == expected) { "会话媒体版本不一致" }
-        return PreviewGrant(grant.url, java.time.Instant.parse(grant.expiresAt), grant.assetId)
+        return PreviewGrant(grant.url, java.time.Instant.parse(grant.expiresAt), grant.assetId, binding)
     }
 }
 

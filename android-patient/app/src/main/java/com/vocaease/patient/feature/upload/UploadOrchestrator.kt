@@ -302,7 +302,7 @@ class UploadOrchestrator(
     private suspend fun submit(current: UploadRecord) {
         val result = withExpectedOperation(current) {
             if (!current.audioConfirmed || !current.videoConfirmed) throw UploadContractViolation("媒体尚未确认")
-            remote.submit(current.sessionId, current.submitKey)
+            remote.submit(current.sessionId, current.submitKey, store.loadPlaybackMetadata())
         }
         when (result) {
             is UploadSubmitResult.Accepted -> {

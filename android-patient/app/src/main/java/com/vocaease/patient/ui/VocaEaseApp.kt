@@ -779,6 +779,7 @@ private fun RecordingRoute(
             clockNanos = container.monotonicClock::nowNanoseconds,
             tempFiles = tempFiles,
             publisher = AccountScopedRecordingArtifactPublisher(storage),
+            persistMetadata = storage::savePlaybackMetadata,
         )
     }
     val factory = remember(draftId, coordinator, storage) {

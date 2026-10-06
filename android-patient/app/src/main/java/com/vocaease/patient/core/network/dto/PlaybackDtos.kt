@@ -25,3 +25,7 @@ data class ReferenceNoteDto(@SerialName("start_ms") val startMs: Long, @SerialNa
 
 @Serializable
 data class ReferencePitchDto(val status: String, val version: String?, @SerialName("schema_version") val schemaVersion: Int = 1, val notes: List<ReferenceNoteDto> = emptyList())
+
+
+@Serializable
+data class SubmitSessionRequestDto(@SerialName("playback_metadata") val playbackMetadata: PlaybackMetadata? = null)

@@ -65,9 +65,10 @@ class VocaEaseUploadRemote(
         }
     }
 
-    override suspend fun submit(sessionId: String, idempotencyKey: String): UploadSubmitResult {
+    override suspend fun submit(sessionId:String,idempotencyKey:String):UploadSubmitResult = submit(sessionId,idempotencyKey,null)
+    override suspend fun submit(sessionId: String, idempotencyKey: String, metadata:com.vocaease.patient.core.media.PlaybackMetadata?): UploadSubmitResult {
         return try {
-            val mutation = api.submitSession(sessionId, idempotencyKey).data
+            val mutation = api.submitSession(sessionId, idempotencyKey, metadata).data
             if (mutation.sessionId != sessionId || mutation.status !in setOf(SessionStatus.PROCESSING, SessionStatus.COMPLETED)) {
                 throw UploadContractViolation("提交响应不匹配")
             }

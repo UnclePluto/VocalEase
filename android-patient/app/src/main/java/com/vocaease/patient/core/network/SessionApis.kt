@@ -54,6 +54,7 @@ interface PatientApi {
     suspend fun patientMediaUploadGrant(request: PatientMediaUploadGrantRequestDto): ApiEnvelope<PatientMediaUploadGrantDto>
     suspend fun confirmSessionMedia(sessionId: String, request: ConfirmSessionMediaRequestDto): ApiEnvelope<SingingSessionDto>
     suspend fun submitSession(sessionId: String, idempotencyKey: String): ApiEnvelope<SessionMutationDto>
+    suspend fun submitSession(sessionId:String,idempotencyKey:String,metadata:com.vocaease.patient.core.media.PlaybackMetadata?):ApiEnvelope<SessionMutationDto> = submitSession(sessionId,idempotencyKey)
     suspend fun cancelSession(sessionId: String): ApiEnvelope<SingingSessionDto>
     suspend fun retrySession(sessionId: String, idempotencyKey: String): ApiEnvelope<SessionMutationDto>
     suspend fun patientMediaPrivateUrl(assetId: String): ApiEnvelope<PrivateUrlDto>
@@ -103,6 +104,7 @@ internal class RefreshingPatientApi(
         protectedCall { authContext -> patientMediaUploadGrant(request, authContext) }
     override suspend fun confirmSessionMedia(sessionId: String, request: ConfirmSessionMediaRequestDto) =
         protectedCall { authContext -> confirmSessionMedia(sessionId, request, authContext) }
+    override suspend fun submitSession(sessionId:String,idempotencyKey:String,metadata:com.vocaease.patient.core.media.PlaybackMetadata?) = protectedCall { context -> submitSession(sessionId,idempotencyKey,context,com.vocaease.patient.core.network.dto.SubmitSessionRequestDto(metadata)) }
     override suspend fun submitSession(sessionId: String, idempotencyKey: String) =
         protectedCall { authContext -> submitSession(sessionId, idempotencyKey, authContext) }
     override suspend fun cancelSession(sessionId: String) =

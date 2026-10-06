@@ -1,0 +1,793 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 11,
+    "identityHash": "16fe8292ae92020870b29ce71311ce15",
+    "entities": [
+      {
+        "tableName": "drafts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `song_id` TEXT NOT NULL, `session_id` TEXT NOT NULL, `creation_key` TEXT NOT NULL, `state` TEXT NOT NULL, `duration_ms` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `expires_at` INTEGER NOT NULL, `interruption_reason` TEXT, `playback_metadata_path` TEXT, `playback_metadata_version` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`account_scope`, `draft_id`))",
+        "fields": [
+          {
+            "fieldPath": "accountScope",
+            "columnName": "account_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftId",
+            "columnName": "draft_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "songId",
+            "columnName": "song_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "creationKey",
+            "columnName": "creation_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "duration_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expires_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "interruptionReason",
+            "columnName": "interruption_reason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "playbackMetadataPath",
+            "columnName": "playback_metadata_path",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "playbackMetadataVersion",
+            "columnName": "playback_metadata_version",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope",
+            "draft_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_drafts_account_scope_creation_key",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "creation_key"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_drafts_account_scope_creation_key` ON `${TABLE_NAME}` (`account_scope`, `creation_key`)"
+          },
+          {
+            "name": "index_drafts_account_scope_session_id",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "session_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_drafts_account_scope_session_id` ON `${TABLE_NAME}` (`account_scope`, `session_id`)"
+          },
+          {
+            "name": "index_drafts_account_scope_expires_at",
+            "unique": false,
+            "columnNames": [
+              "account_scope",
+              "expires_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_drafts_account_scope_expires_at` ON `${TABLE_NAME}` (`account_scope`, `expires_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "media",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `type` TEXT NOT NULL, `encrypted_relative_path` TEXT NOT NULL, `mime_type` TEXT NOT NULL, `size_bytes` INTEGER NOT NULL, `sha256` TEXT NOT NULL, `validation_state` TEXT NOT NULL, PRIMARY KEY(`account_scope`, `draft_id`, `type`), FOREIGN KEY(`account_scope`, `draft_id`) REFERENCES `drafts`(`account_scope`, `draft_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountScope",
+            "columnName": "account_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftId",
+            "columnName": "draft_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encryptedRelativePath",
+            "columnName": "encrypted_relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mime_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "size_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validationState",
+            "columnName": "validation_state",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope",
+            "draft_id",
+            "type"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_media_account_scope_draft_id",
+            "unique": false,
+            "columnNames": [
+              "account_scope",
+              "draft_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_account_scope_draft_id` ON `${TABLE_NAME}` (`account_scope`, `draft_id`)"
+          },
+          {
+            "name": "index_media_account_scope_encrypted_relative_path",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "encrypted_relative_path"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_media_account_scope_encrypted_relative_path` ON `${TABLE_NAME}` (`account_scope`, `encrypted_relative_path`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "drafts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "account_scope",
+              "draft_id"
+            ],
+            "referencedColumns": [
+              "account_scope",
+              "draft_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "upload_jobs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `overall_state` TEXT NOT NULL, `pipeline_stage` TEXT NOT NULL, `audio_grant_state` TEXT NOT NULL, `video_grant_state` TEXT NOT NULL, `audio_upload_state` TEXT NOT NULL, `video_upload_state` TEXT NOT NULL, `audio_receipt_state` TEXT NOT NULL, `video_receipt_state` TEXT NOT NULL, `audio_confirm_state` TEXT NOT NULL, `video_confirm_state` TEXT NOT NULL, `submit_state` TEXT NOT NULL, `audio_grant_key` TEXT NOT NULL, `video_grant_key` TEXT NOT NULL, `submit_key` TEXT NOT NULL, `audio_asset_key` TEXT, `video_asset_key` TEXT, `audio_object_key` TEXT, `video_object_key` TEXT, `audio_receipt` TEXT, `video_receipt` TEXT, `audio_confirmed_at` INTEGER, `video_confirmed_at` INTEGER, `attempt_count` INTEGER NOT NULL, `next_retry_at` INTEGER, `last_safe_error` TEXT, `progress_percent` INTEGER NOT NULL, `receipt_wait_attempt` INTEGER NOT NULL, `resume_pipeline_stage` TEXT, `operation_version` INTEGER NOT NULL, PRIMARY KEY(`account_scope`, `draft_id`), FOREIGN KEY(`account_scope`, `draft_id`) REFERENCES `drafts`(`account_scope`, `draft_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountScope",
+            "columnName": "account_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftId",
+            "columnName": "draft_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "overallState",
+            "columnName": "overall_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pipelineStage",
+            "columnName": "pipeline_stage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioGrantState",
+            "columnName": "audio_grant_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoGrantState",
+            "columnName": "video_grant_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioUploadState",
+            "columnName": "audio_upload_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoUploadState",
+            "columnName": "video_upload_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioReceiptState",
+            "columnName": "audio_receipt_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoReceiptState",
+            "columnName": "video_receipt_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioConfirmState",
+            "columnName": "audio_confirm_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoConfirmState",
+            "columnName": "video_confirm_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "submitState",
+            "columnName": "submit_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioGrantKey",
+            "columnName": "audio_grant_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoGrantKey",
+            "columnName": "video_grant_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "submitKey",
+            "columnName": "submit_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioAssetKey",
+            "columnName": "audio_asset_key",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "videoAssetKey",
+            "columnName": "video_asset_key",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioObjectKey",
+            "columnName": "audio_object_key",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "videoObjectKey",
+            "columnName": "video_object_key",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioReceipt",
+            "columnName": "audio_receipt",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "videoReceipt",
+            "columnName": "video_receipt",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioConfirmedAt",
+            "columnName": "audio_confirmed_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "videoConfirmedAt",
+            "columnName": "video_confirmed_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attempt_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextRetryAt",
+            "columnName": "next_retry_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSafeError",
+            "columnName": "last_safe_error",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "progressPercent",
+            "columnName": "progress_percent",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receiptWaitAttempt",
+            "columnName": "receipt_wait_attempt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resumePipelineStage",
+            "columnName": "resume_pipeline_stage",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "operationVersion",
+            "columnName": "operation_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope",
+            "draft_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_upload_jobs_account_scope_draft_id",
+            "unique": false,
+            "columnNames": [
+              "account_scope",
+              "draft_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_upload_jobs_account_scope_draft_id` ON `${TABLE_NAME}` (`account_scope`, `draft_id`)"
+          },
+          {
+            "name": "index_upload_jobs_account_scope_next_retry_at",
+            "unique": false,
+            "columnNames": [
+              "account_scope",
+              "next_retry_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_upload_jobs_account_scope_next_retry_at` ON `${TABLE_NAME}` (`account_scope`, `next_retry_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "drafts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "account_scope",
+              "draft_id"
+            ],
+            "referencedColumns": [
+              "account_scope",
+              "draft_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "preparation_drafts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `song_id` TEXT NOT NULL, `song_title` TEXT NOT NULL, `song_artist` TEXT NOT NULL, `song_duration_seconds` INTEGER NOT NULL, `server_session_id` TEXT, `creation_key` TEXT NOT NULL, `status` TEXT NOT NULL, `active_song_id` TEXT, `created_at` INTEGER NOT NULL, `expires_at` INTEGER NOT NULL, PRIMARY KEY(`account_scope`, `draft_id`))",
+        "fields": [
+          {
+            "fieldPath": "accountScope",
+            "columnName": "account_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftId",
+            "columnName": "draft_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "songId",
+            "columnName": "song_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "songTitle",
+            "columnName": "song_title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "songArtist",
+            "columnName": "song_artist",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "songDurationSeconds",
+            "columnName": "song_duration_seconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "serverSessionId",
+            "columnName": "server_session_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "creationKey",
+            "columnName": "creation_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeSongId",
+            "columnName": "active_song_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expires_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope",
+            "draft_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_preparation_drafts_account_scope_creation_key",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "creation_key"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_creation_key` ON `${TABLE_NAME}` (`account_scope`, `creation_key`)"
+          },
+          {
+            "name": "index_preparation_drafts_account_scope_server_session_id",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "server_session_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_server_session_id` ON `${TABLE_NAME}` (`account_scope`, `server_session_id`)"
+          },
+          {
+            "name": "index_preparation_drafts_account_scope_active_song_id",
+            "unique": true,
+            "columnNames": [
+              "account_scope",
+              "active_song_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_active_song_id` ON `${TABLE_NAME}` (`account_scope`, `active_song_id`)"
+          },
+          {
+            "name": "index_preparation_drafts_account_scope_expires_at",
+            "unique": false,
+            "columnNames": [
+              "account_scope",
+              "expires_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_preparation_drafts_account_scope_expires_at` ON `${TABLE_NAME}` (`account_scope`, `expires_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "upload_local_actions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `draft_id` TEXT NOT NULL, `action` TEXT NOT NULL, `stage` TEXT NOT NULL, `audio_encrypted_relative_path` TEXT NOT NULL, `video_encrypted_relative_path` TEXT NOT NULL, PRIMARY KEY(`account_scope`, `draft_id`), FOREIGN KEY(`account_scope`, `draft_id`) REFERENCES `drafts`(`account_scope`, `draft_id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountScope",
+            "columnName": "account_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftId",
+            "columnName": "draft_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioEncryptedRelativePath",
+            "columnName": "audio_encrypted_relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoEncryptedRelativePath",
+            "columnName": "video_encrypted_relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope",
+            "draft_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_upload_local_actions_account_scope_draft_id",
+            "unique": false,
+            "columnNames": [
+              "account_scope",
+              "draft_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_upload_local_actions_account_scope_draft_id` ON `${TABLE_NAME}` (`account_scope`, `draft_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "drafts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "account_scope",
+              "draft_id"
+            ],
+            "referencedColumns": [
+              "account_scope",
+              "draft_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "analysis_checkpoints",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope_hash` TEXT NOT NULL, `session_id` TEXT NOT NULL, `incarnation_proof` TEXT NOT NULL, `status` TEXT NOT NULL, `analysis_generation` INTEGER NOT NULL, `poll_step` INTEGER NOT NULL, `next_deadline_at` INTEGER NOT NULL, `operation_version` INTEGER NOT NULL, PRIMARY KEY(`account_scope_hash`, `session_id`))",
+        "fields": [
+          {
+            "fieldPath": "accountScopeHash",
+            "columnName": "account_scope_hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "incarnationProof",
+            "columnName": "incarnation_proof",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "analysisGeneration",
+            "columnName": "analysis_generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pollStep",
+            "columnName": "poll_step",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextDeadlineAt",
+            "columnName": "next_deadline_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationVersion",
+            "columnName": "operation_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope_hash",
+            "session_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_analysis_checkpoints_account_scope_hash_next_deadline_at",
+            "unique": false,
+            "columnNames": [
+              "account_scope_hash",
+              "next_deadline_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_checkpoints_account_scope_hash_next_deadline_at` ON `${TABLE_NAME}` (`account_scope_hash`, `next_deadline_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "account_exit_intents",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`account_scope` TEXT NOT NULL, `account_scope_hash` TEXT NOT NULL, `incarnation_proof` TEXT NOT NULL, `session_epoch` INTEGER NOT NULL, `operation_id` TEXT NOT NULL, `operation_kind` TEXT NOT NULL, `choice` TEXT NOT NULL, `stage` TEXT NOT NULL, `operation_version` INTEGER NOT NULL, PRIMARY KEY(`account_scope`))",
+        "fields": [
+          {
+            "fieldPath": "accountScope",
+            "columnName": "account_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountScopeHash",
+            "columnName": "account_scope_hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "incarnationProof",
+            "columnName": "incarnation_proof",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionEpoch",
+            "columnName": "session_epoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operation_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationKind",
+            "columnName": "operation_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "choice",
+            "columnName": "choice",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationVersion",
+            "columnName": "operation_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "account_scope"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '16fe8292ae92020870b29ce71311ce15')"
+    ]
+  }
+}

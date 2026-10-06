@@ -97,6 +97,7 @@ data class UploadRecord(
 }
 
 interface UploadStore {
+    suspend fun loadPlaybackMetadata():com.vocaease.patient.core.media.PlaybackMetadata? = null
     suspend fun load(): UploadRecord
     suspend fun checkpoint(expected: UploadRecord, next: UploadRecord): UploadRecord
     suspend fun checkpointProgress(expected: UploadRecord, progressPercent: Int): UploadRecord
@@ -150,6 +151,7 @@ interface UploadRemote {
     suspend fun grant(request: UploadGrantRequest): UploadGrant
     suspend fun confirm(request: UploadConfirmRequest): UploadConfirmResult
     suspend fun submit(sessionId: String, idempotencyKey: String): UploadSubmitResult
+    suspend fun submit(sessionId:String,idempotencyKey:String,metadata:com.vocaease.patient.core.media.PlaybackMetadata?):UploadSubmitResult = submit(sessionId,idempotencyKey)
     suspend fun sessionDetail(sessionId: String): UploadSessionDetail
 }
 

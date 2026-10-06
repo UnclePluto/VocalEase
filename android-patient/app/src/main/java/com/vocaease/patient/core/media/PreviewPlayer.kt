@@ -32,6 +32,7 @@ data class PreviewGrant(
     val url: String,
     val expiresAt: Instant,
     val assetId: String? = null,
+    val binding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null,
 )
 
 fun interface PreviewGrantSource {
@@ -69,6 +70,7 @@ interface PreviewEngine {
 }
 
 interface PreviewSession {
+    val playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? get() = null
     val state: StateFlow<PreviewState>
     val activeMode: StateFlow<SongPlaybackMode> get() = MutableStateFlow(SongPlaybackMode.ORIGINAL)
     suspend fun switchMode(mode: SongPlaybackMode): Boolean = true
@@ -117,6 +119,7 @@ class PreviewPlayer internal constructor(
     private var pendingSwitch: CompletableDeferred<Boolean>? = null
     private var switchBackup: SwitchBackup? = null
     private data class SwitchBackup(val grant: PreviewGrant?, val mode: SongPlaybackMode, val position: Long, val playing: Boolean)
+    override var playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null; private set
     private var acceptingCommands = true
     private var generation = 0L
     private var songId: String? = null
@@ -299,6 +302,7 @@ class PreviewPlayer internal constructor(
                     pendingPreparation = null
                     return@fold
                 }
+                playbackBinding = grant.binding ?: playbackBinding
                 currentGrant = grant
                 engine.load(grant.url)
                 command.positionMillis?.let { engine.seekTo(it) }

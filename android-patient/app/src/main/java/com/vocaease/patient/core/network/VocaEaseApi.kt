@@ -124,6 +124,7 @@ internal interface VocaEaseApi {
         @Path("session_id") sessionId: String,
         @Header("Idempotency-Key") idempotencyKey: String,
         @Tag authContext: AuthRequestContext = AuthRequestContext.Current,
+        @Body request: com.vocaease.patient.core.network.dto.SubmitSessionRequestDto = com.vocaease.patient.core.network.dto.SubmitSessionRequestDto(),
     ): ApiEnvelope<SessionMutationDto>
 
     @POST("api/v1/patient/singing-sessions/{session_id}/cancel/")

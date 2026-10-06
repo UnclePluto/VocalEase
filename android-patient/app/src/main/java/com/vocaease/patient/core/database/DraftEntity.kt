@@ -34,6 +34,8 @@ data class DraftEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "expires_at") val expiresAt: Long,
     @ColumnInfo(name = "interruption_reason") val interruptionReason: String?,
+    @ColumnInfo(name = "playback_metadata_path") val playbackMetadataPath: String? = null,
+    @ColumnInfo(name = "playback_metadata_version", defaultValue = "0") val playbackMetadataVersion: Int = 0,
 ) {
     init {
         require(accountScope.isNotBlank())

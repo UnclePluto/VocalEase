@@ -41,6 +41,7 @@ interface RecordingCapture {
 }
 
 interface RecordingPlayback {
+    val playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? get() = null
     val activeMode: kotlinx.coroutines.flow.StateFlow<SongPlaybackMode> get() = kotlinx.coroutines.flow.MutableStateFlow(SongPlaybackMode.ACCOMPANIMENT)
     val playbackState: kotlinx.coroutines.flow.StateFlow<PreviewState> get() = kotlinx.coroutines.flow.MutableStateFlow(PreviewState.Playing)
     suspend fun switchMode(mode: SongPlaybackMode): Boolean = false
@@ -69,6 +70,11 @@ fun interface RecordingArtifactPublisher {
 }
 
 interface RecordingCoordinator : AutoCloseable {
+    val pitch: StateFlow<PitchSample> get() = MutableStateFlow(PitchSample(0,null,0f))
+    val activeMode: StateFlow<SongPlaybackMode> get() = MutableStateFlow(SongPlaybackMode.ACCOMPANIMENT)
+    val playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? get() = null
+    val anchors: List<PlaybackAnchor> get() = emptyList()
+    suspend fun switchMode(mode: SongPlaybackMode): Boolean = false
     val state: StateFlow<RecordingState>
     val playbackPositionMillis: Long get() = 0
     val recordingDurationMillis: Long get() = 0
@@ -87,7 +93,25 @@ class DefaultRecordingCoordinator(
     private val clockNanos: () -> Long,
     private val tempFiles: RecordingTempFiles,
     private val publisher: RecordingArtifactPublisher,
+    private val persistMetadata: suspend (String, PlaybackMetadata) -> Unit = { _, _ -> },
 ) : RecordingCoordinator {
+    override val pitch get() = capture.pitch
+    override val activeMode get() = playback.activeMode
+    override val playbackBinding get() = playback.playbackBinding
+    private var metadataRecorder: PlaybackMetadataRecorder? = null
+    override val anchors get() = metadataRecorder?.snapshot()?.anchors ?: emptyList()
+    private var metadataJob: kotlinx.coroutines.Job? = null
+    override suspend fun switchMode(mode: SongPlaybackMode): Boolean {
+        val result = playback.switchMode(mode)
+        if(result) mutex.withLock { recordAnchor() }
+        return result
+    }
+    private suspend fun recordAnchor() {
+        metadataRecorder?.let { recorder ->
+            recorder.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
+            persistMetadata(requireNotNull(draftId),recorder.snapshot())
+        }
+    }
     private val callbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val machine = RecordingStateMachine()
     private val mutex = Mutex()
@@ -216,6 +240,25 @@ class DefaultRecordingCoordinator(
                         update(RecordingEvent.CaptureStarted(now, offset))
                         acceptedStartedGeneration = generation
                         playback.play()
+                        playbackBinding?.let { binding ->
+                            if(binding.sourceAssetId != null && binding.accompanimentAssetId != null) {
+                                metadataRecorder=PlaybackMetadataRecorder(48000,binding.sourceAssetId,binding.accompanimentAssetId,binding.referenceVersion)
+                                metadataRecorder!!.record(0,offset,activeMode.value,false)
+                                metadataJob=callbackScope.launch {
+                                    var lastPlaying: Boolean? = null;var lastCalibration=0L
+                                    while(!closed.get()) {
+                                        kotlinx.coroutines.delay(50)
+                                        mutex.withLock {
+                                            if(machine.state is RecordingState.Recording) {
+                                                val playing=playback.playbackState.value is PreviewState.Playing
+                                                val now=recordingDurationMillis
+                                                if(lastPlaying != playing || now-lastCalibration>=5000) { recordAnchor();lastPlaying=playing;lastCalibration=now }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -235,6 +278,10 @@ class DefaultRecordingCoordinator(
                 val currentVideo = video ?: return@withLock interruptInternal(RecordingInterruption.FINALIZE)
                 val currentAudio = tempFiles.createAudio().also { audio = it }
                 try {
+                    metadataJob?.cancel()
+                    metadataRecorder?.let { recorder ->
+                        persistMetadata(requireNotNull(draftId),recorder.finish(event.durationMillis,event.encoded?.sampleRate ?: 48000,event.encoded?.effectiveStartOffsetMillis ?: 0))
+                    }
                     publisher.publish(
                         requireNotNull(draftId),
                         currentVideo,
@@ -264,6 +311,7 @@ class DefaultRecordingCoordinator(
     }
 
     private fun requestStop(playbackEnded: Boolean = false) {
+        metadataRecorder?.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
         if (machine.state !is RecordingState.Recording && machine.state !== RecordingState.Finalizing) return
         snapshotRecordingDuration()
         update(if (playbackEnded) RecordingEvent.PlaybackEnded else RecordingEvent.StopRequested)
