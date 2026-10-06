@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { EditOutlined, UserOutlined } from '@ant-design/icons'
 import { Alert, Button, Empty, Input, Table, Tag } from 'antd'
 import { useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useLocation } from 'react-router-dom'
 
 import { ApiError } from '../../api/errors'
 import { useRemoteDoctorOptions } from '../doctors/useRemoteDoctorOptions'
@@ -33,6 +33,8 @@ function PatientEditor({ patientId, patient, onClose, onSaved }: { patientId: st
 export function PatientDataPage() {
   const { patientId = '' } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  const backTo = typeof location.state?.backTo === 'string' && /^\/(patient-data|patients)(\?|$)/.test(location.state.backTo) ? location.state.backTo : '/patients' 
   const [page, setPage] = useState(1)
   const [dates, setDates] = useState<[string?, string?]>([])
   const [editing, setEditing] = useState(false)
@@ -63,6 +65,7 @@ export function PatientDataPage() {
   return (
     <section className="management-page patient-data-page" aria-labelledby="patient-data-title">
       <div className="management-heading">
+        <Button onClick={() => navigate(backTo)}>返回患者列表</Button>
         <div><h1 id="patient-data-title">患者数据</h1><p>患者资料与历史演唱记录</p></div>
       </div>
       <div className="patient-profile-card">
@@ -122,7 +125,7 @@ export function PatientDataPage() {
               { title: '得分', dataIndex: 'score', width: 150 },
               { title: '演唱时长', dataIndex: 'duration_seconds', width: 120, render: (value) => typeof value === 'number' ? `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}` : '—' },
               { title: '嗳气次数', dataIndex: 'burp_count', width: 110 },
-              { title: '操作', width: 180, render: (_value, row) => <Button type="link" onClick={() => navigate(`/singing/${row.id}`)}>查看明细</Button> },
+              { title: '操作', width: 180, render: (_value, row) => <Button type="link" onClick={() => navigate(`/singing/${row.id}`, { state: { backTo: location.pathname + location.search, patientDataBackTo: backTo } })}>查看明细</Button> },
             ]}
           />
         </div>
