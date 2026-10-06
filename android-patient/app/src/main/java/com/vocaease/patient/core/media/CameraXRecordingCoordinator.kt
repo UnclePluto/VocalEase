@@ -48,7 +48,7 @@ internal interface CameraXBackend {
     fun release()
 }
 
-/** CameraX 是唯一录音链路；适配层固定前摄并只传一个 audioEnabled=true。 */
+/** CameraX 固定前摄，只录制视频；麦克风由 MicrophonePcmCapture 独占。 */
 class CameraXRecordingCapture internal constructor(
     private val backend: CameraXBackend,
     callbackDispatcher: CoroutineDispatcher = Dispatchers.Default,
@@ -79,7 +79,7 @@ class CameraXRecordingCapture internal constructor(
     override fun start(output: File) {
         check(!released.get())
         try {
-            backend.start(output, audioEnabled = true) { event ->
+            backend.start(output, audioEnabled = false) { event ->
                 val mapped = when (event) {
                     CameraXBackendEvent.Started -> CaptureEvent.Started
                     is CameraXBackendEvent.Finalized -> CaptureEvent.Finalized(
@@ -142,12 +142,12 @@ private class AndroidCameraXBackend(
                 check(activeRecording == null)
                 val capture = checkNotNull(videoCapture) { "前置摄像头尚未绑定" }
                 val pending = capture.output.prepareRecording(appContext, FileOutputOptions.Builder(output).build())
-                check(audioEnabled) { "CameraX音频必须启用" }
+                check(!audioEnabled) { "CameraX仅采集视频" }
                 if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     callback(CameraXBackendEvent.Failed(RecordingInterruption.AUDIO))
                     return@execute
                 }
-                activeRecording = pending.withAudioEnabled().start(executor) { event ->
+                activeRecording = pending.start(executor) { event ->
                     when (event) {
                         is VideoRecordEvent.Start -> callback(CameraXBackendEvent.Started)
                         is VideoRecordEvent.Finalize -> {

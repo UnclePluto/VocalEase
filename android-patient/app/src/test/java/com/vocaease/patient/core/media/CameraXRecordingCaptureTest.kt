@@ -14,7 +14,7 @@ import org.junit.Test
 
 class CameraXRecordingCaptureTest {
     @Test
-    fun `生产适配层固定前摄且唯一CameraX录制链启用音频`() = runBlocking {
+    fun `生产适配层固定前摄且CameraX仅采集视频`() = runBlocking {
         val backend = FakeCameraXBackend()
         val capture = CameraXRecordingCapture(backend, kotlinx.coroutines.Dispatchers.Unconfined)
         val events = mutableListOf<CaptureEvent>()
@@ -25,7 +25,7 @@ class CameraXRecordingCaptureTest {
         backend.emit(CameraXBackendEvent.Started)
 
         assertSame(CameraSelector.DEFAULT_FRONT_CAMERA, backend.selector)
-        assertTrue(backend.audioEnabled)
+        org.junit.Assert.assertFalse(backend.audioEnabled)
         assertEquals(listOf(CaptureEvent.Started), events)
     }
 

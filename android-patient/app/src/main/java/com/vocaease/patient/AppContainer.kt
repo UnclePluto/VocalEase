@@ -93,7 +93,7 @@ data class AndroidAppDependencies(
     val monotonicClock: AppMonotonicClock = AppMonotonicClock(System::nanoTime),
     val connectivityFactory: (Context) -> AppConnectivity = ::AndroidAppConnectivity,
     val recordingCaptureFactory: RecordingCaptureFactory = RecordingCaptureFactory { context, owner, surface ->
-        CameraXRecordingCapture(context, owner, surface)
+        com.vocaease.patient.core.media.PatientRecordingCapture(CameraXRecordingCapture(context, owner, surface))
     },
     val qiniuUploaderFactory: QiniuUploaderFactory = QiniuUploaderFactory(::QiniuV2Uploader),
 )

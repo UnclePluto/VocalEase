@@ -76,6 +76,17 @@ class RecordingStagingRecovery internal constructor(
 
             val audio = files.createAudio()
             try {
+                val patientAudio = java.io.File(entry.video.parentFile, entry.video.name + ".patient-audio")
+                val timing = java.io.File(entry.video.parentFile, entry.video.name + ".timing")
+                if (patientAudio.isFile && timing.isFile) {
+                    val times = java.io.DataInputStream(timing.inputStream()).use { it.readLong() to it.readLong() }
+                    val merged = java.io.File(entry.video.parentFile, entry.video.name + ".merged")
+                    try {
+                        RecordedAvMuxer().merge(entry.video, patientAudio, merged, times.first, times.second)
+                        if (!storage.isLeaseActive()) throw StaleAccountScopeException()
+                        check(merged.renameTo(entry.video))
+                    } finally { merged.delete() }
+                }
                 val track = extractor.extract(entry.video, audio)
                 beforePublish()
                 if (!storage.isLeaseActive()) throw StaleAccountScopeException()

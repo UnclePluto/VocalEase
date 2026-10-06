@@ -25,11 +25,14 @@ sealed interface CaptureEvent {
     data class Finalized(
         val durationMillis: Long,
         val interruption: RecordingInterruption? = null,
+        val encoded: EncodedRecording? = null,
     ) : CaptureEvent
     data class Failure(val reason: RecordingInterruption) : CaptureEvent
 }
 
 interface RecordingCapture {
+    val pitch: StateFlow<PitchSample> get() = MutableStateFlow(PitchSample(0, null, 0f))
+    val captureStartNanos: Long? get() = null
     var listener: suspend (CaptureEvent) -> Unit
     suspend fun bindFrontCamera()
     fun start(output: File)
@@ -208,7 +211,7 @@ class DefaultRecordingCoordinator(
                             capture.stop()
                         }
                     } else {
-                        val now = clockNanos()
+                        val now = capture.captureStartNanos ?: clockNanos()
                         val offset = playback.currentPositionMillis.coerceAtLeast(0)
                         update(RecordingEvent.CaptureStarted(now, offset))
                         acceptedStartedGeneration = generation
