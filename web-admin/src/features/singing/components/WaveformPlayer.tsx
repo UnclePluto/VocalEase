@@ -9,10 +9,11 @@ import type { ReactNode } from 'react'
 
 import { ApiError } from '../../../api/errors'
 import { createPlaybackClock, type PlaybackClock } from '../PlaybackClock'
+import type { PlaybackMetadata } from '../types'
 import { createVisualizerAdapter, type VisualizerAdapter } from './VisualizerAdapter'
 
 export type Track = { assetId: string; url: string }
-export type PlayerMedia = { mixed?: Track; video?: Track; videoExpected?: boolean; vocal?: Track; accompaniment?: Track }
+export type PlayerMedia = { patientAudio?: Track; mixed?: Track; video?: Track; videoExpected?: boolean; accompaniment?: Track; metadata?: PlaybackMetadata | null }
 export type WaveHandle = {
   addRegion(region: { start: number; end: number; color?: string }): unknown
   destroy(): void
@@ -20,7 +21,7 @@ export type WaveHandle = {
   onError?(listener: (error?: unknown) => void): () => void
 }
 type MediaFailure = { asset: Track; message: string; requestId?: string }
-type TrackKey = 'mixed' | 'vocal' | 'accompaniment'
+type TrackKey = 'combined' | 'patient'
 
 function failureOf(asset: Track, error: unknown): MediaFailure {
   const apiError = error instanceof ApiError ? error : null
@@ -38,30 +39,31 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const video = useRef<HTMLVideoElement>(null)
   const clock = useRef<PlaybackClock | null>(null)
   const handle = useRef<WaveHandle | null>(null)
+  const backing = useRef<HTMLAudioElement>(null)
+  const modeRef = useRef<TrackKey>('patient')
   const resumeAt = useRef(0)
   const activeAssetIds = useRef(new Set<string>())
   const refreshed = useRef(new Set<string>())
   const refreshGenerations = useRef(new Map<string, number>())
   const [playing, setPlaying] = useState(false)
-  const [activeTrack, setActiveTrack] = useState<TrackKey>('mixed')
+  const [activeTrack, setActiveTrack] = useState<TrackKey>(media.accompaniment && media.metadata ? 'combined' : 'patient')
   const [videoFailed, setVideoFailed] = useState(false)
   const [overrides, setOverrides] = useState<Record<string, string>>({})
   const [failure, setFailure] = useState<MediaFailure | null>(null)
-  const mixed = media.mixed
-  const mixedAssetId = media.mixed?.assetId
+  const mixed = media.patientAudio ?? media.mixed
+  const mixedAssetId = mixed?.assetId
   const videoAssetId = media.video?.assetId
-  const vocalAssetId = media.vocal?.assetId
   const accompanimentAssetId = media.accompaniment?.assetId
-  const selectedTrack = media[activeTrack] ?? mixed
+  const selectedTrack = mixed
   const selectedAssetId = selectedTrack?.assetId
   const videoTrack = videoFailed ? undefined : media.video
   const selectedUrl = selectedTrack ? overrides[selectedTrack.assetId] ?? selectedTrack.url : ''
   const videoUrl = videoTrack ? overrides[videoTrack.assetId] ?? videoTrack.url : ''
 
   useEffect(() => {
-    activeAssetIds.current = new Set([mixedAssetId, videoAssetId, vocalAssetId, accompanimentAssetId].filter((assetId): assetId is string => Boolean(assetId)))
+    activeAssetIds.current = new Set([mixedAssetId, videoAssetId, accompanimentAssetId].filter((assetId): assetId is string => Boolean(assetId)))
     return () => { activeAssetIds.current = new Set() }
-  }, [accompanimentAssetId, mixedAssetId, videoAssetId, vocalAssetId])
+  }, [accompanimentAssetId, mixedAssetId, videoAssetId])
 
   useEffect(() => {
     if (!container.current || !selectedAssetId || !audio.current) return
@@ -80,15 +82,22 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     handle.current = created
     events.forEach((seconds) => created.addRegion({ start: seconds, end: seconds + 0.15, color: 'rgba(255,77,79,.55)' }))
     const unsubscribeWaveError = created.onError?.(() => audio.current?.dispatchEvent(new Event('error')))
-    clock.current = createPlaybackClock(audio.current, video.current)
+    clock.current = createPlaybackClock(audio.current, video.current, backing.current, media.metadata)
+    clock.current.setMode(modeRef.current)
     const unsubscribe = clock.current.subscribe(onTime ?? (() => undefined))
     return () => {
+      resumeAt.current = audio.current?.currentTime ?? 0
       unsubscribeWaveError?.()
       unsubscribe(); visualizer.current?.destroy(); visualizer.current = null
       clock.current?.destroy(); clock.current = null
       created.destroy(); handle.current = null
     }
-  }, [events, onTime, selectedAssetId, selectedUrl, videoTrack?.assetId, videoUrl, waveFactory])
+  }, [events, onTime, selectedAssetId, selectedUrl, videoTrack?.assetId, videoUrl, waveFactory, media.metadata, media.accompaniment?.url, accompanimentAssetId])
+
+  useEffect(() => {
+    modeRef.current = activeTrack
+    clock.current?.setMode(activeTrack)
+  }, [activeTrack])
 
   if (!mixed) return <p className="inline-error">缺少可播放的真实演唱录音。</p>
 
@@ -133,20 +142,19 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   }
 
   const selectTrack = (track: TrackKey) => {
-    if (!media[track] || track === activeTrack) return
-    resumeAt.current = audio.current?.currentTime ?? 0
-    clock.current?.pause()
-    visualizer.current?.stop()
-    setPlaying(false)
+    if (track==='combined' && (!media.accompaniment || !media.metadata)) return
+    modeRef.current=track
+    clock.current?.setMode(track)
     setActiveTrack(track)
   }
 
   const videoMessage = media.video && videoFailed ? '录像加载失败，已降级为音频回放。' : media.videoExpected ? '录像授权尚未可用，音频回放不受影响。' : '未提供录像，音频回放不受影响。'
   return <section className="waveform-player" aria-label="演唱回放">
     <div className="audio-workspace">
-      <div className="playback-card">
-        <h2>演唱回放</h2>
-        <audio key={`${selectedTrack?.assetId}:${selectedUrl}`} ref={audio} src={selectedUrl} onError={() => selectedTrack && void refresh(selectedTrack)} />
+      <div className="spectrum-card">
+        <h2>声音波形</h2>
+        <audio key={`${selectedTrack?.assetId}:${selectedUrl}`} ref={audio} crossOrigin="anonymous" src={selectedUrl} onPause={() => { setPlaying(false); visualizer.current?.stop() }} onEnded={() => { setPlaying(false); visualizer.current?.stop() }} onError={() => selectedTrack && void refresh(selectedTrack)} />
+        {media.accompaniment ? <audio ref={backing} crossOrigin="anonymous" src={overrides[media.accompaniment.assetId] ?? media.accompaniment.url} onError={() => { selectTrack('patient'); void refresh(media.accompaniment!) }} /> : null}
         {failure ? <Alert className="media-playback-error" type="error" showIcon title={failure.message} description={failure.requestId ? `请求编号：${failure.requestId}` : undefined} action={<Button aria-label="重试媒体授权" onClick={() => void refresh(failure.asset, true)}>重试</Button>} /> : null}
         <Space>
           <Button type="primary" shape="circle" aria-label={playing ? '暂停' : '播放'} icon={playing ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => {
@@ -154,23 +162,19 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
           }} />
           {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds) }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
         </Space>
-      </div>
-      <div className="spectrum-card">
-        <h2>声音波形</h2>
         <canvas ref={canvas} width="520" height="80" aria-label="播放可视化" />
         <div role="tablist" aria-label="音轨选择">
-          <button role="tab" aria-selected={activeTrack === 'mixed'} onClick={() => selectTrack('mixed')}>人声 + 伴奏</button>
-          <button role="tab" aria-selected={activeTrack === 'vocal'} aria-disabled={!media.vocal} disabled={!media.vocal} onClick={() => selectTrack('vocal')}>仅人声</button>
-          <button role="tab" aria-selected={activeTrack === 'accompaniment'} aria-disabled={!media.accompaniment} disabled={!media.accompaniment} onClick={() => selectTrack('accompaniment')}>仅伴奏</button>
+          <button role="tab" aria-selected={activeTrack === 'combined'} disabled={!media.accompaniment || !media.metadata} onClick={() => selectTrack('combined')}>人声 + 伴奏</button>
+          <button role="tab" aria-selected={activeTrack === 'patient'} onClick={() => selectTrack('patient')}>人声</button>
         </div>
-        {(!media.vocal || !media.accompaniment) ? <p>缺少真实分轨产物；当前仅可播放真实演唱混合录音。</p> : null}
+        {(!media.accompaniment || !media.metadata) ? <p>缺少可信伴奏同步数据，当前可播放患者人声。</p> : null}
         <div className="waveform-scroll"><div ref={container} className="waveform" /></div>
       </div>
       {children}
     </div>
     <aside className="video-card">
       <h2>演唱录像</h2>
-      {videoTrack ? <video ref={video} src={videoUrl} onError={() => { void refresh(videoTrack).then((renewed) => { if (!renewed) setVideoFailed(true) }) }} controls /> : <div className="video-placeholder"><PlayCircleOutlined /><p>{videoMessage}</p></div>}
+      {videoTrack ? <video ref={video} src={videoUrl} onError={() => { void refresh(videoTrack).then((renewed) => { if (!renewed) setVideoFailed(true) }) }} muted playsInline /> : <div className="video-placeholder"><PlayCircleOutlined /><p>{videoMessage}</p></div>}
     </aside>
   </section>
 }

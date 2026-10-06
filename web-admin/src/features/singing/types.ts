@@ -4,6 +4,7 @@ export type AnalysisResult = { task_type: string; status: string; is_mock: boole
 export type SingingSession = {
   id: string; status: string; score: number | null; burp_count: number | null; duration_seconds: number | null; is_mock: boolean; analysis_generation?: number
   patient: { name?: string; medical_record_no?: string }; song: { title?: string; artist?: string }
+  playback?: { source_asset_id: string | null; accompaniment_asset_id: string | null; reference_version: string | null; combined_available: boolean; metadata: PlaybackMetadata | null }
   media: MediaBinding[]; analysis_results: AnalysisResult[]; created_at?: string; completed_at?: string
 }
 export type SingingPage = { count: number; page: number; page_size: number; results: SingingSession[] }
@@ -19,3 +20,8 @@ export type PatientMetric = {
   is_mock: boolean
 }
 export type PatientMetricsPage = { metric_version: string; count: number; page: number; page_size: number; results: PatientMetric[] }
+
+export type SongPlaybackMode = 'source' | 'accompaniment'
+export type PlaybackAnchor = {recording_ms:number;song_ms:number;track:SongPlaybackMode;playing:boolean;segment:number}
+export type ModeChange = {recording_ms:number;track:SongPlaybackMode}
+export type PlaybackMetadata = {schema_version:1;sample_rate:number;source_asset_id:string|null;accompaniment_asset_id:string|null;reference_version:string|null;anchors:PlaybackAnchor[];mode_changes:ModeChange[]}

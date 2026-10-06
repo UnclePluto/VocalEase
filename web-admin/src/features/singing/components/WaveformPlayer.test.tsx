@@ -1,3 +1,5 @@
+import type { PlaybackMetadata } from '../types'
+const metadata: PlaybackMetadata={schema_version:1,sample_rate:48000,source_asset_id:'s',accompaniment_asset_id:'a',reference_version:null,mode_changes:[],anchors:[{recording_ms:0,song_ms:0,track:'accompaniment',playing:true,segment:0},{recording_ms:60000,song_ms:60000,track:'accompaniment',playing:false,segment:0}]}
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -7,10 +9,12 @@ describe('WaveformPlayer', () => {
   it('禁用未产出的分轨，为每个嗳气事件建立区域，且不伪造分轨', () => {
     const addRegion = vi.fn()
     render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' } }} events={[12.4, 88.2]} waveFactory={() => ({ addRegion, destroy: vi.fn() })} />)
-    expect(screen.getByRole('tab', { name: '仅人声' })).toHaveAttribute('aria-disabled', 'true')
-    expect(screen.getByRole('tab', { name: '仅伴奏' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('tab', { name: '人声' })).toBeEnabled()
+    expect(screen.queryByRole('tab', { name: '仅伴奏' })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '人声 + 伴奏' })).toBeDisabled()
+    expect(screen.queryByRole('heading', {name:'演唱回放'})).not.toBeInTheDocument()
     expect(addRegion).toHaveBeenCalledTimes(2)
-    expect(screen.getByText(/缺少真实分轨产物/)).toBeInTheDocument()
+    expect(screen.getByText(/缺少可信伴奏同步数据/)).toBeInTheDocument()
     expect(screen.queryByText('仅人声正在播放')).not.toBeInTheDocument()
   })
 
@@ -179,13 +183,13 @@ describe('WaveformPlayer', () => {
     await waitFor(() => expect(view.container.querySelector('video')).toHaveAttribute('src', '/video-fresh.mp4'))
   })
 
-  it('真实分轨存在时切换活动轨道并恢复主时钟进度', async () => {
-    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'mix', url: '/mix.mp3' }, vocal: { assetId: 'vocal', url: '/vocal.mp3' }, accompaniment: { assetId: 'acc', url: '/acc.mp3' } }} events={[]} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
+  it('切换患者人声模式保持同一主音频节点和进度', async () => {
+    const view = render(<WaveformPlayer media={{ mixed: { assetId: 'mix', url: '/mix.mp3' }, accompaniment: { assetId: 'backing', url: '/backing.mp3' }, metadata }} events={[]} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
     const first = view.container.querySelector('audio')!
     Object.defineProperty(first, 'currentTime', { value: 12, writable: true })
-    fireEvent.click(screen.getByRole('tab', { name: '仅人声' }))
-    await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/vocal.mp3'))
+    fireEvent.click(screen.getByRole('tab', { name: '人声' }))
+    await waitFor(() => expect(view.container.querySelector('audio')).toBe(first))
     expect(view.container.querySelector('audio')!.currentTime).toBe(12)
-    expect(screen.getByRole('tab', { name: '仅人声' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: '人声' })).toHaveAttribute('aria-selected', 'true')
   })
 })
