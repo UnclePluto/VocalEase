@@ -1,3 +1,4 @@
+from .playback_views import PatientSessionSongPlaybackView, AdminSessionAccompanimentView
 from django.urls import path
 
 from .views import (
@@ -8,6 +9,7 @@ from .views import (
 
 
 patient_urlpatterns = [
+    path("<uuid:session_id>/song-playback/", PatientSessionSongPlaybackView.as_view()),
     path("", PatientSessionListView.as_view(), name="singing-session-list"),
     path("<uuid:session_id>/", PatientSessionDetailView.as_view(), name="singing-session-detail"),
     path("<uuid:session_id>/upload-grants/", PatientSessionUploadGrantView.as_view(), name="singing-session-upload-grant"),
@@ -18,6 +20,7 @@ patient_urlpatterns = [
 ]
 
 admin_urlpatterns = [
+    path("<uuid:session_id>/playback-accompaniment/", AdminSessionAccompanimentView.as_view()),
     path("", AdminSessionListView.as_view(), name="singing-session-list"),
     path("<uuid:session_id>/", AdminSessionDetailView.as_view(), name="singing-session-detail"),
 ]

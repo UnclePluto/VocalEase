@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 from apps.accounts.views import api_response
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
 from common.api.schema import ApiEnvelopeSerializer
+from apps.singing.schema import ReferencePitchEnvelopeSerializer
 from .models import Song
 from .reference_pitch_services import import_reference_pitch, read_reference_pitch
 from .views import PatientCatalogPermission
@@ -14,7 +15,7 @@ from .views import PatientCatalogPermission
 class PatientReferencePitchView(APIView):
     permission_classes = [PatientCatalogPermission]
 
-    @extend_schema(responses={200: ApiEnvelopeSerializer})
+    @extend_schema(responses={200: ReferencePitchEnvelopeSerializer})
     def get(self, request, song_id):
         version = request.query_params.get('version')
         try:
@@ -30,7 +31,7 @@ class PatientReferencePitchView(APIView):
 class AdminReferencePitchView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
-    @extend_schema(request=ApiEnvelopeSerializer, responses={200: ApiEnvelopeSerializer})
+    @extend_schema(request=ApiEnvelopeSerializer, responses={200: ReferencePitchEnvelopeSerializer})
     def post(self, request, song_id):
         if not isinstance(request.data, dict) or 'expected_fingerprint' not in request.data:
             raise ValidationError({'expected_fingerprint': '须提供预期输入指纹'})
