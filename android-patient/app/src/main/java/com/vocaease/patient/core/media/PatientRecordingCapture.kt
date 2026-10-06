@@ -33,6 +33,7 @@ class PatientRecordingCapture(
                     videoStart=System.nanoTime();captureStartNanos=videoStart
                     try {
                         val timingWritten=AtomicBoolean()
+                        val startedDelivered=AtomicBoolean()
                         microphone.start(checkNotNull(patientAudio)) {
                             if(timingWritten.compareAndSet(false,true)) {
                                 val timing=File(checkNotNull(output).parentFile,checkNotNull(output).name+".timing")
@@ -40,8 +41,8 @@ class PatientRecordingCapture(
                                 timing.setReadable(false,false);timing.setWritable(false,false);timing.setReadable(true,true);timing.setWritable(true,true)
                             }
                             samples.trySend(it)
+                            if(timingWritten.get() && !startedDelivered.getAndSet(true)) scope.launch { if(!released.get()) listener(CaptureEvent.Started) }
                         }
-                        listener(CaptureEvent.Started)
                     } catch (_:Exception) { camera.stop();listener(CaptureEvent.Failure(RecordingInterruption.AUDIO)) }
                 }
                 is CaptureEvent.Failure -> { microphone.release();listener(event) }

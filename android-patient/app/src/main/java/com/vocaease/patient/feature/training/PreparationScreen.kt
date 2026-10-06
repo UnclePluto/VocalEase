@@ -59,6 +59,7 @@ fun PreparationScreen(
     onPreviewToggle: () -> Unit = {},
     onRetryPreview: () -> Unit = {},
     modifier: Modifier = Modifier,
+    onModeChange: (com.vocaease.patient.core.media.SongPlaybackMode) -> Unit = {},
 ) {
     Column(
         modifier = modifier
@@ -82,6 +83,13 @@ fun PreparationScreen(
         }
 
         SongIdentity(song, state.previewState, !state.isCreatingSession, onPreviewToggle, onRetryPreview)
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Center) {
+            com.vocaease.patient.core.media.SongPlaybackMode.entries.forEach { mode ->
+                TextButton(onClick={onModeChange(mode)},enabled=!state.isCreatingSession,modifier=Modifier.height(48.dp).testTag("preview-mode-${mode.wire}")) {
+                    Text(if(state.previewMode==mode) "✓ ${mode.label}" else mode.label)
+                }
+            }
+        }
         LyricsUnavailable()
         Text(
             "开始前请确认",

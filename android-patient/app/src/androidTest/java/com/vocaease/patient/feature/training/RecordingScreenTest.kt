@@ -38,7 +38,7 @@ class RecordingScreenTest {
     @get:Rule val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun 演唱页遵循PEN深色结构但只展示播放进度与歌词空态() {
+    fun 演唱页展示真实音高入口与两种歌曲模式() {
         composeRule.setContent {
             VocaEaseTheme {
                 Box(Modifier.fillMaxSize().wrapContentSize(Alignment.TopStart, unbounded = true)) {
@@ -61,24 +61,16 @@ class RecordingScreenTest {
             }
         }
 
-        listOf("小幸运", "播放进度", "01:28 / 04:25", "歌词暂未提供", "面部完整 · 光线良好")
+        listOf("小幸运", "演唱音高", "01:28 / 04:25", "歌词暂未提供", "面部完整 · 光线良好")
             .forEach { composeRule.onNodeWithText(it).assertIsDisplayed() }
         composeRule.onNodeWithText("REC  01:28", substring = true).assertExists()
         listOf("音准", "C4", "A4", "92%", "实时分析", "模拟分析", "非临床结论")
             .forEach { composeRule.onNodeWithText(it, substring = true).assertDoesNotExist() }
-        composeRule.onNodeWithTag("front-camera-preview")
-            .assertIsDisplayed()
-            .assertWidthIsEqualTo(362.dp)
-            .assertHeightIsEqualTo(300.dp)
-            .assertTopPositionInRootIsEqualTo(492.dp)
-        composeRule.onNodeWithTag("recording-progress")
-            .assertWidthIsEqualTo(362.dp)
-            .assertHeightIsEqualTo(194.dp)
-            .assertTopPositionInRootIsEqualTo(64.dp)
-        composeRule.onNodeWithTag("recording-lyrics")
-            .assertWidthIsEqualTo(362.dp)
-            .assertHeightIsEqualTo(212.dp)
-            .assertTopPositionInRootIsEqualTo(272.dp)
+        composeRule.onNodeWithTag("front-camera-preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("singing-pitch-timeline").assertIsDisplayed()
+        composeRule.onNodeWithTag("lower-face-neck-guide").assertIsDisplayed()
+        composeRule.onNodeWithText("✓ 伴奏").assertIsDisplayed()
+        composeRule.onNodeWithText("原唱").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("结束录制")
             .assertWidthIsAtLeast(58.dp).assertHeightIsAtLeast(58.dp)
         composeRule.onNodeWithContentDescription("关闭并取消录制")

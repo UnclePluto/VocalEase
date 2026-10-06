@@ -58,7 +58,8 @@ class CameraXRecordingCapture internal constructor(
         lifecycleOwner: LifecycleOwner,
         surfaceProvider: Preview.SurfaceProvider,
         executor: Executor = ContextCompat.getMainExecutor(context),
-    ) : this(AndroidCameraXBackend(context, lifecycleOwner, surfaceProvider, executor), Dispatchers.Default)
+        viewPortProvider: (() -> androidx.camera.core.ViewPort?)? = null,
+    ) : this(AndroidCameraXBackend(context, lifecycleOwner, surfaceProvider, executor, viewPortProvider), Dispatchers.Default)
 
     private val scope = CoroutineScope(SupervisorJob() + callbackDispatcher)
     private val events = Channel<CaptureEvent>(Channel.UNLIMITED)
@@ -110,6 +111,7 @@ private class AndroidCameraXBackend(
     private val lifecycleOwner: LifecycleOwner,
     private val surfaceProvider: Preview.SurfaceProvider,
     private val executor: Executor,
+    private val viewPortProvider: (() -> androidx.camera.core.ViewPort?)?,
 ) : CameraXBackend {
     private val appContext = context.applicationContext
     private var cameraProvider: ProcessCameraProvider? = null
@@ -119,6 +121,11 @@ private class AndroidCameraXBackend(
     override suspend fun bind(selector: CameraSelector) {
         val provider = awaitCameraProvider()
         withContext(Dispatchers.Main.immediate) {
+            val viewPort = if(viewPortProvider==null) null else kotlinx.coroutines.withTimeout(5000) {
+                var value=viewPortProvider.invoke()
+                while(value==null) { kotlinx.coroutines.delay(16);value=viewPortProvider.invoke() }
+                value
+            }
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(surfaceProvider) }
             val recorder = Recorder.Builder()
                 .setQualitySelector(
@@ -128,9 +135,10 @@ private class AndroidCameraXBackend(
                     ),
                 )
                 .build()
-            val capture = VideoCapture.withOutput(recorder)
+            val capture = VideoCapture.Builder(recorder).setMirrorMode(androidx.camera.core.MirrorMode.MIRROR_MODE_ON_FRONT_ONLY).build()
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+            if(viewPort==null) provider.bindToLifecycle(lifecycleOwner,selector,preview,capture)
+            else provider.bindToLifecycle(lifecycleOwner,selector,androidx.camera.core.UseCaseGroup.Builder().setViewPort(viewPort).addUseCase(preview).addUseCase(capture).build())
             cameraProvider = provider
             videoCapture = capture
         }

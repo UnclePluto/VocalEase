@@ -95,6 +95,7 @@ interface PreparationSavedState {
 data class PreparationUiState(
     val song: PreparationSong? = null,
     val previewState: PreviewState = PreviewState.Idle,
+    val previewMode: com.vocaease.patient.core.media.SongPlaybackMode = com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL,
     val preflight: PreflightResult = PreflightResult(
         blockers = setOf(
             PreflightBlocker.CAMERA_PERMISSION,
@@ -303,7 +304,12 @@ class PreparationViewModel(
         }
     }
 
-    suspend fun switchPreviewMode(mode: com.vocaease.patient.core.media.SongPlaybackMode): Boolean = preview.switchMode(mode)
+    suspend fun switchPreviewMode(mode: com.vocaease.patient.core.media.SongPlaybackMode): Boolean {
+        val result=preview.switchMode(mode)
+        updateState { it.copy(previewMode=preview.activeMode.value) }
+        refreshReadiness()
+        return result
+    }
 
     suspend fun togglePreview(): Boolean {
         if (currentState().isCreatingSession) return false

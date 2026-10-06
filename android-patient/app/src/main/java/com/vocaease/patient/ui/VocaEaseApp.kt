@@ -727,6 +727,7 @@ private fun PreparationRoute(
         },
         onRetry = { scope.launch { viewModel.load() } },
         onPreviewToggle = { scope.launch { viewModel.togglePreview() } },
+        onModeChange = { mode -> scope.launch { viewModel.switchPreviewMode(mode) } },
         onRetryPreview = { scope.launch { viewModel.retryPreview() } },
     )
 }
@@ -774,7 +775,7 @@ private fun RecordingRoute(
     val tempFiles = remember(context) { PrivateRecordingTempFiles(context).also { it.cleanupOrphans() } }
     val coordinator = remember(draftId, previewView, lifecycleOwner, playback, storage) {
         DefaultRecordingCoordinator(
-            capture = container.recordingCaptureFactory.create(context, lifecycleOwner, previewView.surfaceProvider),
+            capture = container.recordingCaptureFactory.create(context, lifecycleOwner, previewView.surfaceProvider) { previewView.viewPort },
             playback = playback,
             clockNanos = container.monotonicClock::nowNanoseconds,
             tempFiles = tempFiles,
@@ -791,6 +792,7 @@ private fun RecordingRoute(
                     AccountScopedRecordingDraftGateway(storage),
                     // Task 7 已向患者展示 3、2、1；本页只完成状态机交接，避免重复等待。
                     countdownTick = {},
+                    referenceRepository = com.vocaease.patient.feature.training.ReferencePitchRepository { id, version -> container.patientApi.referencePitch(id, version).data },
                     dispatcher = container.dispatchers.io,
                 )
             }
@@ -856,6 +858,7 @@ private fun RecordingRoute(
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         },
         onStop = { scope.launch { recordingViewModel.stop() } },
+        onModeChange = { mode -> scope.launch { recordingViewModel.switchMode(mode) } },
         onClose = leave,
     )
 }

@@ -30,6 +30,7 @@ data class RecordingDraftInfo(
     val accountScopeHash: String = "",
     val sessionId: String = "",
     val creationKey: String = "",
+    val songId: String = "",
 )
 
 interface RecordingDraftGateway {
@@ -54,6 +55,7 @@ class AccountScopedRecordingDraftGateway(
             storage.accountScopeHash,
             draft.sessionId,
             draft.creationKey,
+            draft.songId,
         )
     }
 
@@ -77,6 +79,7 @@ class RecordingViewModel(
     private val countdownTick: suspend (Int) -> Unit,
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val cleanupDispatcher: CoroutineDispatcher = dispatcher,
+    private val referenceRepository: ReferencePitchRepository? = null,
 ) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val lifecycleMutex = Mutex()
@@ -101,6 +104,12 @@ class RecordingViewModel(
                 songTitle = info.songTitle,
                 totalDurationMillis = info.totalDurationMillis,
             ) }
+            val version = coordinator.playbackBinding?.referenceVersion
+            if (version != null && referenceRepository != null) scope.launch {
+                updateState { it.copy(referencePitch=ReferencePitchState.Loading) }
+                val reference=referenceRepository.load(info.songId,version)
+                if(!left.get()) updateState { it.copy(referencePitch=reference) }
+            }
             if (info.accountScopeHash.isNotBlank() && info.sessionId.isNotBlank() && info.creationKey.isNotBlank()) {
                 coordinator.takeOver(
                     draftId,
@@ -151,6 +160,13 @@ class RecordingViewModel(
                 cleanupScope.cancel()
             }
         }
+    }
+
+    suspend fun switchMode(mode:com.vocaease.patient.core.media.SongPlaybackMode) {
+        if(mutableState.value.switchingMode || coordinator.state.value !is RecordingState.Recording) return
+        updateState { it.copy(switchingMode=true) }
+        try { coordinator.switchMode(mode);updateState { it.copy(activeMode=coordinator.activeMode.value) } }
+        finally { updateState { it.copy(switchingMode=false) } }
     }
 
     fun consumeReviewNavigation() {
@@ -236,12 +252,16 @@ class RecordingViewModel(
                         current.copy(
                             recordingDurationMillis = duration,
                             playbackPositionMillis = playbackPosition,
+                            activeMode = coordinator.activeMode.value,
+                            patientPitch = coordinator.pitch.value,
+                            playbackAnchors = coordinator.anchors,
+                            pitchHistory = if(current.pitchHistory.lastOrNull()?.recordingMs == coordinator.pitch.value.recordingMs) current.pitchHistory else (current.pitchHistory + coordinator.pitch.value).takeLast(160),
                         )
                     } else {
                         current
                     }
                 }
-                delay(200)
+                delay(50)
             }
         }
     }

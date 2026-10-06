@@ -43,7 +43,7 @@ class PatientRecordingCaptureTest {
     }
     private class FakeMic:PatientMicrophone {
         val done=CompletableDeferred<AudioCaptureResult>();var starts=0
-        override fun start(output:File,onPcm:(PcmBlock)->Unit){starts++}
+        override fun start(output:File,onPcm:(PcmBlock)->Unit){starts++;onPcm(PcmBlock(ShortArray(2208),48000,System.nanoTime()))}
         override suspend fun stop():AudioCaptureResult=done.await()
         override fun release(){}
     }
