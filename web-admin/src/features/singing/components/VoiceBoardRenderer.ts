@@ -1,50 +1,73 @@
+import {AudioAnalyzer,Visualizer,type IOptions} from 'waviz'
 import type {PatientAudioFrame} from './PatientAudioAnalyser'
+
 export interface VoiceRenderer {draw(frame:PatientAudioFrame,elapsedSeconds:number):void;freeze():void;reset():void;destroy():void}
+
+// Waviz 1.0.0 Wave4 / Mixed4 的默认图层；由现有患者采样器供数，避免重复绑定或混入伴奏。
+const wave4:IOptions[] = [
+  {domain:['time',450],color:['#eb1b00ff']},
+  {domain:['time',400],color:['#eb4300ff']},
+  {domain:['time',350],color:['#ff6715ff']},
+  {domain:['time',300],color:['#ff9320ff']},
+  {domain:['time',250],color:['#ffb836ff']},
+  {domain:['time',200],color:['#ffca68ff']},
+  {domain:['time',150],color:['#ffdd9dff']},
+  {domain:['time',100],color:['#ffeeceff']},
+]
+const mixed4:IOptions[] = [
+  {domain:['time',400],coord:['polar',100],viz:['bars',64],color:['radialGradient','#70044aff','#f84791ff',100,120],stroke:[6]},
+  {domain:['time',300],coord:['polar',100],viz:['line'],color:['radialGradient','#003bdcff','#1893B8',100,150],stroke:[4]},
+  {domain:['time',250],coord:['polar',0,0,.1],viz:['particles',[3,3],0,35,5,50],color:['radialGradient','#002f41ff','#02bff8ff',10,50],stroke:[1]},
+]
+
+class PatientFrameData extends AudioAnalyzer {
+  private time=new Uint8Array(1024).fill(128)
+  private frequency=new Uint8Array(1024)
+  update(frame:PatientAudioFrame){
+    this.time.fill(128)
+    const start=Math.max(0,frame.timeDomain.length-1024)
+    for(let i=0;i<Math.min(1024,frame.timeDomain.length);i++){
+      this.time[i]=Math.round((Math.max(-1,Math.min(1,frame.timeDomain[start+i]))+1)*127.5)
+    }
+    this.frequency=new Uint8Array(frame.frequency)
+  }
+  override getTimeDomainData(){return this.time}
+  override getFrequencyData(){return this.frequency}
+}
+
 export class VoiceBoardRenderer implements VoiceRenderer {
-  private history:{top:number;bottom:number}[]=[]
+  private data=new PatientFrameData()
+  private wave:Visualizer
+  private polar:Visualizer|null
   private lastTime=-1
   private destroyed=false
-  constructor(private wave:HTMLCanvasElement,private polar?:HTMLCanvasElement|null){}
+  constructor(wave:HTMLCanvasElement,polar?:HTMLCanvasElement|null){
+    this.wave=new Visualizer(wave,this.data)
+    this.polar=polar?new Visualizer(polar,this.data):null
+  }
   draw(frame:PatientAudioFrame,elapsedSeconds:number){
     if(this.destroyed)return
     if(elapsedSeconds<this.lastTime)this.reset()
-    if(elapsedSeconds!==this.lastTime){
-      const samples=frame.timeDomain
-      for(let bucket=0;bucket<8&&samples.length;bucket++){
-        let top=0,bottom=0
-        for(let i=Math.floor(bucket*samples.length/8);i<Math.floor((bucket+1)*samples.length/8);i++){top=Math.max(top,samples[i]);bottom=Math.max(bottom,-samples[i])}
-        this.history.push({top,bottom})
-      }
-      this.history=this.history.slice(-240);this.lastTime=elapsedSeconds
-    }
-    const ctx=this.wave.getContext('2d'),w=this.wave.width,h=this.wave.height
-    if(ctx){
-      ctx.clearRect(0,0,w,h);ctx.fillStyle='#0b1725';ctx.fillRect(0,0,w,h)
-      const values=this.history.length?this.history:[{top:0,bottom:0}]
-      const layer=(side:'top'|'bottom',color:string,scale:number)=>{
-        ctx.beginPath();ctx.moveTo(0,h/2)
-        for(let i=0;i<values.length;i++)ctx.lineTo(i*w/Math.max(1,values.length-1),h/2+(side==='top'?-1:1)*values[i][side]*h*.46*scale)
-        ctx.lineTo(w,h/2);ctx.closePath();ctx.fillStyle=color;ctx.fill()
-      }
-      layer('top','#ffe9a0',1);layer('top','#ffc34a',.62);layer('bottom','#ff4149',1)
-      ctx.beginPath();ctx.moveTo(0,h/2);ctx.lineTo(w,h/2);ctx.strokeStyle='#6d7788';ctx.lineWidth=1;ctx.stroke()
-    }
-    const polar=this.polar,p=polar?.getContext('2d')
-    if(p&&polar){
-      const width=polar.width,height=polar.height,cx=width/2,cy=height/2,r=Math.min(width,height)*.27
-      p.clearRect(0,0,width,height);p.fillStyle='#0b1725';p.fillRect(0,0,width,height)
-      for(let ring=1;ring<=3;ring++){p.beginPath();p.arc(cx,cy,r*ring/3,0,Math.PI*2);p.strokeStyle='#526775';p.lineWidth=1;p.stroke()}
-      const bins=Math.min(256,frame.frequency.length)
-      for(let i=0;i<bins;i++){
-        const energy=frame.frequency[i]/255;if(!energy)continue
-        const angle=i/bins*Math.PI*2-Math.PI/2
-        const radius=r*(.25+energy*1.9)
-        p.beginPath();p.moveTo(cx,cy);p.lineTo(cx+Math.cos(angle)*radius,cy+Math.sin(angle)*radius)
-        p.strokeStyle=i<bins/4?'#ff4149':'#ff982d';p.lineWidth=1.4;p.stroke()
-      }
-    }
+    this.lastTime=elapsedSeconds
+    this.data.update(frame)
+    this.paint(this.wave,wave4)
+    if(this.polar)this.paint(this.polar,mixed4)
+  }
+  private paint(engine:Visualizer,layers:IOptions[]){
+    const {ctx,canvas}=engine
+    ctx.clearRect(0,0,canvas.width,canvas.height)
+    ctx.fillStyle='#0b1725';ctx.fillRect(0,0,canvas.width,canvas.height)
+    for(const layer of layers)engine.layer({domain:['time'],coord:['rect'],viz:['line'],color:['#E34AB0'],stroke:[2],...layer})
+    engine.frame++
   }
   freeze(){}
-  reset(){this.history=[];this.lastTime=-1;this.wave.getContext('2d')?.clearRect(0,0,this.wave.width,this.wave.height);if(this.polar)this.polar.getContext('2d')?.clearRect(0,0,this.polar.width,this.polar.height)}
+  reset(){
+    this.lastTime=-1
+    for(const engine of [this.wave,this.polar]){
+      if(!engine)continue
+      engine.frame=0;engine.particleSystem=[]
+      engine.ctx.clearRect(0,0,engine.canvas.width,engine.canvas.height)
+    }
+  }
   destroy(){this.destroyed=true;this.reset()}
 }

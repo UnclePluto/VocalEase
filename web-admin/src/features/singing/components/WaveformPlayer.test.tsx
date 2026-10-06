@@ -14,15 +14,14 @@ describe('WaveformPlayer', () => {
     expect(screen.getByRole('tab', { name: '人声 + 伴奏' })).toBeDisabled()
     expect(screen.queryByRole('heading', {name:'演唱回放'})).not.toBeInTheDocument()
     expect(addRegion).toHaveBeenCalledTimes(2)
-    expect(screen.getByText(/缺少可用伴奏/)).toBeInTheDocument()
+    expect(screen.queryByText(/缺少可用伴奏/)).not.toBeInTheDocument()
     expect(screen.queryByText('仅人声正在播放')).not.toBeInTheDocument()
   })
 
-  it('点击事件标记会跳转，卸载释放波形、时钟、可视化和媒体监听', async () => {
+  it('简化回放控制仍可播放且卸载释放媒体资源', async () => {
     const seek = vi.fn(); const destroy = vi.fn(); const visualizer = { start: vi.fn(), stop: vi.fn(), destroy: vi.fn() }
     const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' } }} events={[12]} waveFactory={() => ({ addRegion: vi.fn(), destroy, seek })} visualizerFactory={() => visualizer} />)
-    fireEvent.click(screen.getByRole('button', { name: '跳转至 12 秒' }))
-    expect(seek).toHaveBeenCalledWith(12)
+    expect(screen.queryByRole('button', { name: '跳转至 12 秒' })).not.toBeInTheDocument()
     const audio = view.container.querySelector('audio')!
     Object.defineProperty(audio, 'play', { value: vi.fn().mockResolvedValue(undefined) })
     fireEvent.click(screen.getByRole('button', { name: '播放' }))
@@ -247,16 +246,17 @@ describe('WaveformPlayer', () => {
 
 })
 
-it('历史录音可以校准伴奏而人声始终只有患者音频', async () => {
+it('历史录音直接切换伴奏且人声始终只有患者音频', async () => {
   const view = render(<WaveformPlayer media={{patientAudio:{assetId:'patient',url:'/patient.wav'},accompaniment:{assetId:'backing',url:'/backing.wav'},manualAccompaniment:true,accompanimentOffsetMillis:2000}} events={[]} waveFactory={()=>({addRegion:vi.fn(),destroy:vi.fn()})} visualizerFactory={()=>({start:vi.fn(),stop:vi.fn(),destroy:vi.fn()})} />)
   const [patient,backing] = view.container.querySelectorAll('audio')
   for(const node of [patient,backing]) Object.defineProperty(node,'play',{value:vi.fn().mockResolvedValue(undefined)})
   expect(screen.getByRole('tab',{name:'人声'})).toHaveAttribute('aria-selected','true')
-  fireEvent.change(screen.getByRole('spinbutton',{name:'伴奏偏移（秒）'}),{target:{value:'2'}})
+  expect(screen.queryByRole('spinbutton',{name:'伴奏偏移（秒）'})).not.toBeInTheDocument()
+  expect(screen.queryByText(/此录音缺少/)).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('tab',{name:'人声 + 伴奏'}))
   patient.currentTime = 10
   fireEvent.click(screen.getByRole('button',{name:'播放'}))
-  await waitFor(()=>expect(backing.currentTime).toBe(12))
+  await waitFor(()=>expect(backing.currentTime).toBe(10))
   fireEvent.click(screen.getByRole('tab',{name:'人声'}))
   expect(backing.paused).toBe(true)
   expect(patient.currentTime).toBe(10)

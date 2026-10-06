@@ -16,6 +16,6 @@ export function LiveVoiceBoard({frame,result,seconds,playing=false,waveRef,polar
    </div>
    {frame?.status==='unavailable'?<p className="voice-sampling-error" role="status">患者声音采样不可用，请检查媒体授权与跨域访问。</p>:null}
    {frame?.status==='silent'?<p className="voice-sampling-status" role="status">当前无稳定患者人声音高</p>:null}
-   <div className="voice-board-plots"><div><div className="voice-plot-title"><h3>时序波形流</h3><span>Layered waveform</span></div><canvas ref={waveRef} width="640" height="300" aria-label="患者时序波形"/></div><div><div className="voice-plot-title"><h3>极坐标声场</h3><span>Polar waveform</span></div><canvas ref={polarRef} width="360" height="300" aria-label="患者极坐标频谱"/></div></div>
+   <div className="voice-board-plots"><div><div className="voice-plot-title"><h3>时序波形流 · Wave 4</h3></div><canvas ref={waveRef} width="640" height="300" aria-label="患者时序波形"/></div><div><div className="voice-plot-title"><h3>极坐标声场 · Mixed 4</h3></div><canvas ref={polarRef} width="500" height="300" aria-label="患者极坐标频谱"/></div></div>
  </section>
 }

@@ -1,5 +1,5 @@
 import { PauseOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { Alert, Button, InputNumber, Space } from 'antd'
+import { Alert, Button, Space } from 'antd'
 import WaveSurfer from 'wavesurfer.js'
 import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
@@ -51,7 +51,6 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const activeAssetIds = useRef(new Set<string>())
   const refreshed = useRef(new Set<string>())
   const refreshGenerations = useRef(new Map<string, number>())
-  const [manualOffsetSeconds,setManualOffsetSeconds]=useState(0)
   const canCombine=Boolean(media.accompaniment && (media.metadata || media.manualAccompaniment))
   const [playing, setPlaying] = useState(false)
   const [chosenTrack, setActiveTrack] = useState<TrackKey|null>(null)
@@ -114,9 +113,9 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   useEffect(()=>clock.current?.subscribe(value=>{setSeconds(value);onTime?.(value)}),[onTime,selectedAssetId,selectedUrl])
 
   useEffect(()=>{
-    clock.current?.setFollowers(video.current,backing.current,media.metadata,media.manualAccompaniment ? 0 : media.accompanimentOffsetMillis,media.manualAccompaniment ? manualOffsetSeconds*1000 : undefined)
+    clock.current?.setFollowers(video.current,backing.current,media.metadata,media.manualAccompaniment ? 0 : media.accompanimentOffsetMillis,media.manualAccompaniment ? 0 : undefined)
     clock.current?.setMode(modeRef.current)
-  },[selectedAssetId,selectedUrl,videoTrack?.assetId,videoUrl,backingUrl,media.metadata,media.accompanimentOffsetMillis,media.manualAccompaniment,manualOffsetSeconds])
+  },[selectedAssetId,selectedUrl,videoTrack?.assetId,videoUrl,backingUrl,media.metadata,media.accompanimentOffsetMillis,media.manualAccompaniment])
 
   useEffect(() => {
     if (!container.current || !selectedAssetId || !audio.current) return
@@ -201,19 +200,12 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
           <Button type="primary" shape="circle" aria-label={playing ? '暂停' : '播放'} icon={playing ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => {
             if (playing) { wanted.current=false;clock.current?.pause(); visualizer.current?.stop(); setPlaying(false) } else void play()
           }} />
-          {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds); visualizer.current?.reset?.() }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
         </Space>
         <p aria-label="录音播放时间">{seconds.toFixed(1)} 秒</p>
         <div role="tablist" aria-label="音轨选择">
           <button role="tab" aria-selected={activeTrack === 'combined'} disabled={!canCombine} onClick={() => selectTrack('combined')}>人声 + 伴奏</button>
           <button role="tab" aria-selected={activeTrack === 'patient'} onClick={() => selectTrack('patient')}>人声</button>
         </div>
-        {!canCombine ? <p>缺少可用伴奏，当前可播放患者原始录音。</p> : null}
-        {media.manualAccompaniment && media.accompaniment ? <div className="historical-accompaniment-calibration">
-          <p>此录音缺少已校准的同步起点，使用歌曲伴奏试听；可调整偏移对齐，本次调整不会改写原录音。</p>
-          <label>伴奏偏移（秒） <InputNumber aria-label="伴奏偏移（秒）" value={manualOffsetSeconds} min={-86400} max={86400} step={0.1} onChange={value=>setManualOffsetSeconds(value ?? 0)} /></label>
-          <p>正值让伴奏提前，负值让伴奏延后。人声播放患者原始录音；外放歌曲若已被录入，仍会保留。</p>
-        </div> : null}
         <div className="waveform-scroll"><div ref={container} className="waveform" /></div>
       </div>
       <LiveVoiceBoard frame={audioFrame} result={analysisResult} seconds={seconds} playing={playing} waveRef={canvas} polarRef={polar}/>

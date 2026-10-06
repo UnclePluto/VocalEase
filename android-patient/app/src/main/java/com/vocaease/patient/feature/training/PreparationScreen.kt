@@ -5,7 +5,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -93,7 +94,7 @@ fun PreparationScreen(
                 message,
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 color = androidx.compose.material3.MaterialTheme.colorScheme.error,
-                fontSize = 12.sp,
+                fontSize = 12.sp, lineHeight = 16.sp,
                 textAlign = TextAlign.Center,
             )
         }
@@ -104,14 +105,25 @@ fun PreparationScreen(
             SongIdentity(song, state.previewState, !state.isCreatingSession, onPreviewToggle, onRetryPreview)
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)) {
                 com.vocaease.patient.core.media.SongPlaybackMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = state.previewMode == mode,
-                        onClick = { onModeChange(mode) },
-                        enabled = !state.isCreatingSession && state.previewState != PreviewState.Buffering,
-                        label = { Text(mode.label) },
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("preview-mode-${mode.wire}"),
-                    )
+                    val selected = state.previewMode == mode
+                    Box(
+                        modifier = Modifier.width(84.dp).height(48.dp)
+                            .testTag("preview-mode-${mode.wire}")
+                            .selectable(selected = selected, role = Role.Tab,
+                                enabled = !state.isCreatingSession && state.previewState != PreviewState.Buffering,
+                                onClick = { onModeChange(mode) }),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(32.dp)
+                                .background(if (selected) androidx.compose.ui.graphics.Color(0xFFDDF7EA) else AppSurfaceVariant, RoundedCornerShape(50)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(mode.label, fontSize = 12.sp, lineHeight = 16.sp,
+                                color = if (selected) BrandGreenDark else TextSecondary,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                        }
+                    }
                 }
             }
             LyricsUnavailable()
@@ -119,7 +131,7 @@ fun PreparationScreen(
                 "开始前请确认",
                 modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 8.dp),
                 color = TextPrimary,
-                fontSize = 17.sp,
+                fontSize = 17.sp, lineHeight = 24.sp,
                 fontWeight = FontWeight.Bold,
             )
             PreparationTip(
@@ -140,7 +152,7 @@ fun PreparationScreen(
                     warning,
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                     color = BrandGreenDark,
-                    fontSize = 11.sp,
+                    fontSize = 11.sp, lineHeight = 16.sp,
                     textAlign = TextAlign.Center,
                 )
             }
@@ -167,7 +179,7 @@ fun PreparationScreen(
                     state.isCreatingSession -> "正在创建会话…"
                     else -> "开始演唱"
                 },
-                fontSize = 15.sp,
+                fontSize = 15.sp, lineHeight = 20.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
@@ -177,7 +189,7 @@ fun PreparationScreen(
 
 @Composable
 private fun PreparationHeader(onBack: () -> Unit) {
-    Box(modifier = Modifier.fillMaxWidth().height(92.dp)) {
+    Box(modifier = Modifier.fillMaxWidth().height(64.dp)) {
         TextButton(
             onClick = onBack,
             modifier = Modifier
@@ -196,7 +208,7 @@ private fun PreparationHeader(onBack: () -> Unit) {
             "演唱准备",
             modifier = Modifier.align(Alignment.Center),
             color = TextPrimary,
-            fontSize = 17.sp,
+            fontSize = 17.sp, lineHeight = 24.sp,
             fontWeight = FontWeight.Bold,
         )
     }
@@ -245,14 +257,14 @@ private fun SongIdentity(
                     role = Role.Button
                 },
         ) {
-            Text(label, color = BrandGreenDark, fontWeight = FontWeight.Bold)
+            Text(label, color = BrandGreenDark, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Bold)
         }
     }
     Text(
         song.title,
         modifier = Modifier.padding(top = 12.dp),
         color = TextPrimary,
-        fontSize = 24.sp,
+        fontSize = 24.sp, lineHeight = 32.sp,
         fontWeight = FontWeight.Bold,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -261,7 +273,7 @@ private fun SongIdentity(
         "${song.artist}  ·  ${formatDuration(song.durationSeconds)}",
         modifier = Modifier.padding(top = 1.dp, bottom = 12.dp),
         color = TextSecondary,
-        fontSize = 12.sp,
+        fontSize = 12.sp, lineHeight = 16.sp,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
@@ -272,14 +284,14 @@ private fun LyricsUnavailable() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(132.dp)
+            .height(104.dp)
             .background(AppSurfaceVariant, RoundedCornerShape(22.dp)),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             "歌词暂未提供",
             color = TextSecondary,
-            fontSize = 14.sp,
+            fontSize = 14.sp, lineHeight = 20.sp,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -294,7 +306,7 @@ private fun PreparationTip(symbol: String, title: String, description: String) {
         border = BorderStroke(1.dp, AppOutline),
     ) {
         Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
@@ -304,16 +316,15 @@ private fun PreparationTip(symbol: String, title: String, description: String) {
                 ),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(symbol, color = BrandGreen, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(symbol, color = BrandGreen, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold)
             }
-            Column(modifier = Modifier.padding(start = 14.dp)) {
-                Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Column(modifier = Modifier.weight(1f).padding(start = 14.dp)) {
+                Text(title, color = TextPrimary, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Bold)
                 Text(
                     description,
                     modifier = Modifier.padding(top = 2.dp),
                     color = TextSecondary,
-                    fontSize = 11.sp,
-                    lineHeight = 16.5.sp,
+                    fontSize = 11.sp, lineHeight = 16.sp,
                     maxLines = 2,
                 )
             }

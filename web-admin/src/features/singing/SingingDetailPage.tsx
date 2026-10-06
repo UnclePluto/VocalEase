@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeftOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined } from '@ant-design/icons'
 import { Alert, Button, Spin } from 'antd'
 /* eslint-disable react-refresh/only-export-components */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/errors'
@@ -18,13 +18,13 @@ function audioResult(session: SingingSession) { return session.analysis_results.
 function descriptionFor(error: unknown) { return error instanceof ApiError && error.requestId ? `请求编号：${error.requestId}` : undefined }
 function messageFor(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback }
 
-function usePrivateMedia(session: SingingSession, requested: boolean) {
+function usePrivateMedia(session: SingingSession) {
   const authEpoch = useAuthStore((state) => state.sessionEpoch)
   const audioBinding = session.media.find((item) => item.media_type === 'singing_audio')
   const videoBinding = session.media.find((item) => item.media_type === 'singing_video')
   const audio = useQuery({
     queryKey: ['singing-private-url', authEpoch, session.id, 'audio', audioBinding?.asset_id ?? 'none'],
-    enabled: requested && Boolean(audioBinding),
+    enabled: Boolean(audioBinding),
     retry: false,
     staleTime: 0,
     gcTime: 0,
@@ -32,7 +32,7 @@ function usePrivateMedia(session: SingingSession, requested: boolean) {
   })
   const video = useQuery({
     queryKey: ['singing-private-url', authEpoch, session.id, 'video', videoBinding?.asset_id ?? 'none'],
-    enabled: requested && Boolean(videoBinding),
+    enabled: Boolean(videoBinding),
     retry: false,
     staleTime: 0,
     gcTime: 0,
@@ -42,21 +42,18 @@ function usePrivateMedia(session: SingingSession, requested: boolean) {
   const previewId=session.playback?.combined_available ? undefined : accompanimentId ?? undefined
   const accompaniment=useQuery({
     queryKey:['singing-private-url',authEpoch,session.id,'accompaniment',accompanimentId,previewId],
-    enabled:requested&&Boolean(accompanimentId && (session.playback?.combined_available || session.playback?.accompaniment_preview_available)),retry:false,staleTime:0,gcTime:0,
+    enabled:Boolean(accompanimentId && (session.playback?.combined_available || session.playback?.accompaniment_preview_available)),retry:false,staleTime:0,gcTime:0,
     queryFn:async({signal})=>{const grant=await getSessionAccompanimentUrl(session.id,signal,previewId);if(grant.asset_id!==accompanimentId)throw new Error('会话伴奏资产不匹配');return grant},
   })
   return { audio, audioBinding, video, videoBinding, accompaniment, accompanimentId, previewId }
 }
 
 export function SingingDetailContent({ session, onBack }: { session: SingingSession; onBack?:()=>void }) {
-  const [, setSeconds] = useState(0)
-  const [mediaRequested, setMediaRequested] = useState(false)
   const sessionFence = useRef(session.id)
   useEffect(() => { sessionFence.current = session.id }, [session.id])
   const source = audioResult(session)
   const events = useMemo(()=>source?.payload?.burp_events ?? [],[source])
-  const urls = usePrivateMedia(session, mediaRequested)
-  const hasMediaBindings = Boolean(urls.audioBinding || urls.videoBinding)
+  const urls = usePrivateMedia(session)
   const currentMedia: PlayerMedia = {
     patientAudio: urls.audioBinding && urls.audio.data ? { assetId: urls.audioBinding.asset_id, url: urls.audio.data.url } : undefined,
     video: urls.videoBinding && urls.video.data ? { assetId: urls.videoBinding.asset_id, url: urls.video.data.url } : undefined,
@@ -91,19 +88,12 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
     </div>
     <div className="singing-detail-content">
       {analysisFailed ? <Alert type="warning" showIcon message="模拟分析任务失败，以下指标可能没有结果。" description={analysisFailed.error_summary || analysisFailed.error_code || '请稍后重试分析任务。'} /> : null}
-      {hasMediaBindings && !mediaRequested ? <div className="media-preview-layout">
-        <div className="audio-workspace">
-          <div className="spectrum-card"><h2>声音波形</h2><div className="media-prepare"><Button type="primary" shape="circle" icon={<PlayCircleOutlined />} aria-label="准备回放" onClick={() => setMediaRequested(true)} /><span>点击准备演唱回放</span></div></div>
-          
-        </div>
-        <aside className="video-card"><h2>演唱录像</h2><div className="video-placeholder"><PlayCircleOutlined /><p>点击准备后加载录像</p></div></aside>
-      </div> : null}
-      {mediaRequested && urls.audioBinding && urls.audio.isPending ? <Spin aria-label="正在获取媒体授权" /> : null}
-      {mediaRequested && urls.audio.isError ? <Alert className="media-playback-error" type="error" showIcon title={messageFor(urls.audio.error, '媒体授权失败，请重试')} description={descriptionFor(urls.audio.error)} action={<Button aria-label="重试媒体授权" onClick={() => void urls.audio.refetch()}>重试</Button>} /> : null}
-      {mediaRequested && urls.accompaniment.isError ? <Alert type="warning" title={messageFor(urls.accompaniment.error,'伴奏授权失败，患者人声仍可播放')} action={<Button onClick={()=>void urls.accompaniment.refetch()}>重试伴奏授权</Button>}/> : null}
-      {mediaRequested && urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
-      {mediaRequested && urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
-      {(!hasMediaBindings || (mediaRequested && !urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending))) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} analysisResult={source} onRefreshMedia={refreshMedia} onTime={setSeconds} /> : null}
+      {urls.audioBinding && urls.audio.isPending ? <Spin aria-label="正在获取媒体授权" /> : null}
+      {urls.audio.isError ? <Alert className="media-playback-error" type="error" showIcon title={messageFor(urls.audio.error, '媒体授权失败，请重试')} description={descriptionFor(urls.audio.error)} action={<Button aria-label="重试媒体授权" onClick={() => void urls.audio.refetch()}>重试</Button>} /> : null}
+      {urls.accompaniment.isError ? <Alert type="warning" title={messageFor(urls.accompaniment.error,'伴奏授权失败，患者人声仍可播放')} action={<Button onClick={()=>void urls.accompaniment.refetch()}>重试伴奏授权</Button>}/> : null}
+      {urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
+      {urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
+      {(!urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending)) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} analysisResult={source} onRefreshMedia={refreshMedia} /> : null}
     </div>
   </section>
 }

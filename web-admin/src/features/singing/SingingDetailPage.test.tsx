@@ -36,10 +36,10 @@ describe('SingingDetailPage', () => {
       attempts += 1
       return attempts === 1 ? HttpResponse.json({ code: 'detail_failed', message: '明细暂不可用', data: {}, request_id: 'detail-request' }, { status: 503 }) : HttpResponse.json(envelope(session))
     }))
-    const user = userEvent.setup(); renderApp('/singing/session-1')
+    renderApp('/singing/session-1')
     expect(await screen.findByText('明细暂不可用')).toBeInTheDocument()
     expect(screen.getByText('请求编号：detail-request')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '重试加载演唱明细' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试加载演唱明细' }))
     expect(await screen.findByRole('heading', { name: '演唱明细' })).toBeInTheDocument()
   })
 
@@ -49,14 +49,13 @@ describe('SingingDetailPage', () => {
       http.get('/api/v1/admin/singing-sessions/:id/', () => HttpResponse.json(envelope({ ...session, media: [{ asset_id: 'asset-1', media_type: 'singing_audio', status: 'ready', mime: 'audio/mpeg', size: 1 }] }))),
       http.post('/api/v1/admin/media/:id/private-url/', () => HttpResponse.json({ code: 'media_private_url_invalid', message: '授权已过期', data: {}, request_id: 'media-request' }, { status: 403 })),
     )
-    const user = userEvent.setup(); renderApp('/singing/session-1')
-    await user.click(await screen.findByRole('button', { name: '准备回放' }))
+    renderApp('/singing/session-1')
     expect(await screen.findByText('授权已过期')).toBeInTheDocument()
     expect(screen.getByText('请求编号：media-request')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试媒体授权' })).toBeInTheDocument()
   })
 
-  it('阅读详情不签发私有 URL，点击准备后每资产签发一次且视频失败不拖垮音频', async () => {
+  it('进入详情自动加载每个资产且视频失败不拖垮音频', async () => {
     useAuthStore.setState({ accessToken: 'valid', user: { login_id: 'A', role: 'doctor', must_change_password: false }, status: 'authenticated' })
     let audioRequests = 0; let videoRequests = 0
     server.use(
@@ -67,12 +66,11 @@ describe('SingingDetailPage', () => {
       http.post('/api/v1/admin/media/audio-1/private-url/', () => { audioRequests += 1; return HttpResponse.json(envelope({ url: '/audio.mp3', expires_at: '2026-08-15T10:00:00Z' })) }),
       http.post('/api/v1/admin/media/video-1/private-url/', () => { videoRequests += 1; return HttpResponse.json({ code: 'video_denied', message: '录像授权失败', data: {}, request_id: 'video-request' }, { status: 403 }) }),
     )
-    const user = userEvent.setup(); renderApp('/singing/session-1')
-    const prepare = await screen.findByRole('button', { name: '准备回放' })
-    expect(audioRequests).toBe(0); expect(videoRequests).toBe(0)
-    await user.click(prepare)
+    renderApp('/singing/session-1')
     expect(await screen.findByLabelText('演唱回放')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '准备回放' })).not.toBeInTheDocument()
     expect(document.querySelector('audio')).toHaveAttribute('src', '/audio.mp3')
+    expect(document.querySelector('audio')?.paused).toBe(true)
     expect(audioRequests).toBe(1); expect(videoRequests).toBe(1)
     expect(screen.getByText('录像授权失败')).toBeInTheDocument()
     expect(screen.getByText('请求编号：video-request')).toBeInTheDocument()
@@ -88,16 +86,13 @@ describe('SingingDetailPage', () => {
     }))
     const withAudio = { ...session, media: [{ asset_id: 'audio-1', media_type: 'singing_audio' as const, status: 'ready', mime: 'audio/mpeg', size: 1 }] }
     const client = new QueryClient()
-    const user = userEvent.setup()
     const first = render(<QueryClientProvider client={client}><SingingDetailContent session={withAudio} /></QueryClientProvider>)
-    await user.click(screen.getByRole('button', { name: '准备回放' }))
     await waitFor(() => expect(first.container.querySelector('audio')).toHaveAttribute('src', '/audio-1.mp3'))
     act(() => useAuthStore.setState({ sessionEpoch: useAuthStore.getState().sessionEpoch + 1 }))
     await waitFor(() => expect(first.container.querySelector('audio')).toHaveAttribute('src', '/audio-2.mp3'))
     first.unmount()
     render(<QueryClientProvider client={client}><SingingDetailContent session={withAudio} /></QueryClientProvider>)
     expect(calls).toBe(2)
-    await user.click(screen.getByRole('button', { name: '准备回放' }))
     await waitFor(() => expect(calls).toBe(3))
   })
 })
