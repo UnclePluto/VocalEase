@@ -20,6 +20,7 @@ import com.vocaease.patient.core.media.PreviewGrantSource
 import com.vocaease.patient.core.network.NetworkContractException
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.dto.CreateSessionRequestDto
+import com.vocaease.patient.core.network.dto.asInstant
 import com.vocaease.patient.core.network.dto.toDomain
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +59,7 @@ class VocaEasePreviewGrantSource(
             if(!binding.alignmentVerified || binding.accompanimentOffsetMs==null) throw java.io.IOException("会话伴奏起点尚未核验")
             binding.accompanimentOffsetMs
         } else 0L
-        return PreviewGrant(grant.url, java.time.Instant.parse(grant.expiresAt), grant.assetId, binding,offset)
+        return PreviewGrant(grant.url, grant.expiresAt.asInstant("grant.expires_at"), grant.assetId, binding,offset)
     }
 }
 

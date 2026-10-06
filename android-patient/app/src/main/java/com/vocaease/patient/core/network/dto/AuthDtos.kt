@@ -2,6 +2,7 @@ package com.vocaease.patient.core.network.dto
 
 import com.vocaease.patient.core.network.NetworkContractException
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.LocalDate
 import java.util.UUID
 import kotlinx.serialization.SerialName
@@ -86,7 +87,8 @@ internal fun String.asUuid(field: String): UUID = try {
 }
 
 internal fun String.asInstant(field: String): Instant = try {
-    Instant.parse(this)
+    // 旧版 Android 的 Instant.parse 不接受服务端 isoformat() 输出的 +00:00。
+    OffsetDateTime.parse(this).toInstant()
 } catch (error: RuntimeException) {
     throw NetworkContractException("$field 不是有效 ISO-8601 时间", error)
 }

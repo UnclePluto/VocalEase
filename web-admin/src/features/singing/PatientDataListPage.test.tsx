@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import userEvent from '@testing-library/user-event'
 import { it, expect } from 'vitest'
@@ -24,7 +24,7 @@ it('errorsCanRetryAndEmptyListIsExplicit', async () => {
   renderApp('/patient-data')
   expect(await screen.findByText('患者暂不可用')).toBeVisible()
   await userEvent.click(screen.getByRole('button',{name:'重试'}))
-  expect(await screen.findByText('暂无患者数据')).toBeVisible()
+  await waitFor(() => expect(screen.getByText('暂无患者数据')).toBeVisible())
 })
 it('filtersAndPaginationSurviveDetailReturn', async () => {
   authenticate()
