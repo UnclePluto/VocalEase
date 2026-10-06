@@ -84,3 +84,34 @@ def test_empty_vocal_cannot_be_published_as_ready():
     from rest_framework.exceptions import ValidationError
     with pytest.raises(ValidationError):
         validate_pitch_document({'schema_version':1,'origin':{'type':'vocal_yin','fingerprint':'real'},'notes':[]},duration_ms=1000)
+
+
+@pytest.mark.django_db
+def test_celery_json_identifiers_generate_verified_vocal(monkeypatch):
+    from types import SimpleNamespace
+    from apps.media.contracts import ObjectMetadata
+    from apps.media.models import MediaAsset
+    from apps.songs.models import SongReferencePitch
+    from apps.songs.reference_pitch_services import asset_fingerprint
+    from apps.songs.tasks import generate_reference_pitch_task
+    output = io.BytesIO()
+    with wave.open(output, 'wb') as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8000)
+        wav.writeframes(b''.join(struct.pack('<h', int(15000 * math.sin(2 * math.pi * 220 * i / 8000))) for i in range(8000)))
+    content = output.getvalue()
+    song = Song.objects.create(title='队列真实人声', artist='a', genre='a', language='中文', duration_seconds=1)
+    asset = MediaAsset.objects.create(owner_type='song', owner_id=song.id, media_type='song_vocal', backend='qiniu', object_key='voice.wav', mime='audio/wav', size=len(content), status='ready', etag='verified-etag', upload_expires_at=timezone.now() + timedelta(hours=1))
+    song.vocal_asset = asset
+    song.save()
+    fingerprint = asset_fingerprint(asset)
+    row = SongReferencePitch.objects.create(song=song, input_asset=asset, input_fingerprint=fingerprint)
+    # 保留真实资源归属验证与音频提取，模拟存储传输；队列JSON中的UUID为字符串。
+    monkeypatch.setattr('apps.songs.resources.backend_for_asset', lambda _: SimpleNamespace(stat=lambda key: ObjectMetadata(key, len(content), 'audio/wav', '', 'verified-etag')))
+    monkeypatch.setattr('apps.media.readers.read_verified_asset_bytes', lambda **_: content)
+    generate_reference_pitch_task.run(song_id=str(song.id), expected_fingerprint=fingerprint, version=str(row.id))
+    row.refresh_from_db()
+    assert row.status == 'ready', row.error_code
+    assert row.document['notes']
+    assert abs(row.document['notes'][0]['midi_note'] - 57) < .5

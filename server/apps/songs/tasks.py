@@ -32,8 +32,10 @@ def refresh_song_availability_scan_batch_task(
 
 @shared_task
 def generate_reference_pitch_task(*, song_id, expected_fingerprint, version):
+    from uuid import UUID
     from .reference_pitch_services import generate_reference_pitch
-    return generate_reference_pitch(song_id=song_id, expected_fingerprint=expected_fingerprint, version=version)
+    # Celery JSON传输UUID为字符串；资源归属验证使用UUID值。
+    return generate_reference_pitch(song_id=UUID(str(song_id)), expected_fingerprint=expected_fingerprint, version=UUID(str(version)))
 
 
 @shared_task
