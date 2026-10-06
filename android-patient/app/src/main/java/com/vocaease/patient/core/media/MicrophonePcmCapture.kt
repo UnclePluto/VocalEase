@@ -69,9 +69,12 @@ class MicrophonePcmCapture : PatientMicrophone {
         for (rate in intArrayOf(48000,44100)) {
             val minimum = AudioRecord.getMinBufferSize(rate,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT)
             if (minimum <= 0) continue
-            val record = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            val record = try { AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
                 .setBufferSizeInBytes(maxOf(minimum * 2,rate / 5)).build()
+            } catch (denied: SecurityException) {
+                throw IllegalStateException("麦克风权限已撤销", denied)
+            } catch (_: IllegalArgumentException) { continue }
             if (record.state == AudioRecord.STATE_INITIALIZED) return record
             record.release()
         }

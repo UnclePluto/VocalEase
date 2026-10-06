@@ -73,6 +73,8 @@ class ApiContractTest {
             "get /api/v1/patient/me/",
             "get /api/v1/patient/songs/",
             "get /api/v1/patient/songs/{song_id}/",
+            "get /api/v1/patient/songs/{song_id}/reference-pitch/",
+            "post /api/v1/patient/singing-sessions/{session_id}/song-playback/",
             "post /api/v1/patient/songs/{song_id}/preview/",
             "get /api/v1/patient/singing-sessions/",
             "post /api/v1/patient/singing-sessions/",
@@ -99,7 +101,7 @@ class ApiContractTest {
         assertEquals(
             setOf(
                 "login", "refresh", "changePassword", "logout", "patientMe",
-                "songs", "song", "previewSong", "sessions", "createSession", "session",
+                "songs", "song", "previewSong", "referencePitch", "sessionSongPlayback", "sessions", "createSession", "session",
                 "sessionUploadGrant", "patientMediaUploadGrant", "confirmSessionMedia",
                 "submitSession", "cancelSession", "retrySession", "patientMediaPrivateUrl",
             ),
@@ -301,7 +303,7 @@ class ApiContractTest {
         assertTrue(api.previewSong(SONG_ID).data.url.startsWith("https://private.example/"))
             server.takeRequest().also { request ->
                 assertEquals("POST", request.method)
-                assertEquals("/api/v1/patient/songs/$SONG_ID/preview/?track=accompaniment", request.path)
+                assertEquals("/api/v1/patient/songs/$SONG_ID/preview/?track=source", request.path)
                 assertNull(request.getHeader("Idempotency-Key"))
                 assertEquals(0L, request.bodySize)
             }
@@ -434,7 +436,7 @@ class ApiContractTest {
                 "/api/v1/patient/singing-sessions/$SESSION_ID/submit/",
                 request.requestUrl?.encodedPath,
             )
-            assertEquals(0L, request.bodySize)
+            assertJson("{}", request.body.readUtf8())
         }
 
         enqueue("fixtures/session.json")

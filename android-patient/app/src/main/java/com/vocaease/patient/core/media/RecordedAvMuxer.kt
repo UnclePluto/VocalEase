@@ -48,9 +48,17 @@ class RecordedAvMuxer : RecordingMuxer {
             if(time>=end) break
             buffer.clear();val size=source.readSampleData(buffer,0);check(size in 0..capacity)
             if(size==0) break
-            info.set(0,size,time,source.sampleFlags);target.writeSampleData(track,buffer,info);count++
+            info.set(0,size,time,codecSampleFlags(source.sampleFlags));target.writeSampleData(track,buffer,info);count++
             if(!source.advance()) break
         }
         check(count>0)
     }
+}
+
+internal fun codecSampleFlags(flags: Int): Int {
+    require(flags and MediaExtractor.SAMPLE_FLAG_ENCRYPTED == 0) { "录制文件不能包含加密编码样本" }
+    var result = 0
+    if (flags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) result = result or MediaCodec.BUFFER_FLAG_KEY_FRAME
+    if (flags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0) result = result or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+    return result
 }

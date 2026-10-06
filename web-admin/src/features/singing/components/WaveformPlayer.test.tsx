@@ -192,4 +192,15 @@ describe('WaveformPlayer', () => {
     expect(view.container.querySelector('audio')!.currentTime).toBe(12)
     expect(screen.getByRole('tab', { name: '人声' })).toHaveAttribute('aria-selected', 'true')
   })
+  it('伴奏授权迟到时默认组合模式，用户选择人声后仍尊重选择',()=>{
+    const waveFactory=()=>({addRegion:vi.fn(),destroy:vi.fn()}),events:number[]=[]
+    const patient={assetId:'patient',url:'/patient.wav'},backing={assetId:'backing',url:'/backing.wav'}
+    const view=render(<WaveformPlayer media={{patientAudio:patient,metadata}} events={events} waveFactory={waveFactory}/>)
+    expect(screen.getByRole('tab',{name:'人声',exact:true})).toHaveAttribute('aria-selected','true')
+    view.rerender(<WaveformPlayer media={{patientAudio:patient,accompaniment:backing,metadata}} events={events} waveFactory={waveFactory}/>)
+    expect(screen.getByRole('tab',{name:'人声 + 伴奏'})).toHaveAttribute('aria-selected','true')
+    fireEvent.click(screen.getByRole('tab',{name:'人声',exact:true}))
+    view.rerender(<WaveformPlayer media={{patientAudio:patient,accompaniment:backing,metadata}} events={events} waveFactory={waveFactory}/>)
+    expect(screen.getByRole('tab',{name:'人声',exact:true})).toHaveAttribute('aria-selected','true')
+  })
 })

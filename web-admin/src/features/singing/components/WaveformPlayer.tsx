@@ -51,7 +51,8 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   const refreshed = useRef(new Set<string>())
   const refreshGenerations = useRef(new Map<string, number>())
   const [playing, setPlaying] = useState(false)
-  const [activeTrack, setActiveTrack] = useState<TrackKey>(media.accompaniment && media.metadata ? 'combined' : 'patient')
+  const [chosenTrack, setActiveTrack] = useState<TrackKey|null>(null)
+  const activeTrack:TrackKey = chosenTrack ?? (media.accompaniment && media.metadata ? 'combined' : 'patient')
   const [videoFailed, setVideoFailed] = useState(false)
   const [overrides, setOverrides] = useState<Record<string, string>>({})
   const [failure, setFailure] = useState<MediaFailure | null>(null)
@@ -73,6 +74,8 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
   useEffect(() => {
     if (!container.current || !selectedAssetId || !audio.current) return
     const patientElement=audio.current
+    const resetVisuals=()=>visualizer.current?.reset?.()
+    patientElement.addEventListener('seeked',resetVisuals)
     if (resumeAt.current > 0) audio.current.currentTime = resumeAt.current
     const factory = waveFactory ?? ((element: HTMLElement) => {
       const regions = RegionsPlugin.create()
@@ -92,6 +95,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     clock.current.setMode(modeRef.current)
     const unsubscribe = clock.current.subscribe((seconds)=>{setSeconds(seconds);onTime?.(seconds)})
     return () => {
+      patientElement.removeEventListener('seeked',resetVisuals)
       resumeAt.current = patientElement.currentTime
       unsubscribeWaveError?.()
       unsubscribe(); visualizer.current?.destroy(); visualizer.current = null
@@ -168,6 +172,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
           }} />
           {events.map((seconds) => <Button key={seconds} onClick={() => { clock.current?.seek(seconds); handle.current?.seek?.(seconds); visualizer.current?.reset?.() }} aria-label={`跳转至 ${seconds} 秒`}>{seconds}s 嗳气</Button>)}
         </Space>
+        <p aria-label="录音播放时间">{seconds.toFixed(1)} 秒</p>
         <div role="tablist" aria-label="音轨选择">
           <button role="tab" aria-selected={activeTrack === 'combined'} disabled={!media.accompaniment || !media.metadata} onClick={() => selectTrack('combined')}>人声 + 伴奏</button>
           <button role="tab" aria-selected={activeTrack === 'patient'} onClick={() => selectTrack('patient')}>人声</button>

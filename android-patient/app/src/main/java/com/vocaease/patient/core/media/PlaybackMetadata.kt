@@ -17,6 +17,8 @@ data class ModeChange(@SerialName("recording_ms") val recordingMs: Long, val tra
 
 @Serializable
 data class PlaybackMetadata(
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault
     @SerialName("schema_version") val schemaVersion: Int = 1,
     @SerialName("sample_rate") val sampleRate: Int,
     @SerialName("source_asset_id") val sourceAssetId: String,

@@ -27,6 +27,7 @@ import com.vocaease.patient.core.cleanup.DraftCleanupWorkContract
 import com.vocaease.patient.core.media.AccountScopedRecordingArtifactPublisher
 import com.vocaease.patient.core.media.CaptureEvent
 import com.vocaease.patient.core.media.DefaultRecordingCoordinator
+import com.vocaease.patient.core.media.SongPlaybackMode
 import com.vocaease.patient.core.media.PreviewState
 import com.vocaease.patient.core.media.PrivateRecordingTempFiles
 import com.vocaease.patient.core.media.RecordingCapture
@@ -213,12 +214,14 @@ class PatientClosedLoopTest {
         awaitCondition("试听缓冲完成", { "state=${preview.state.value}, requests=${previewServer.requestCount}" }) {
             preview.state.value is PreviewState.Buffered
         }
+        assertEquals(SongPlaybackMode.ORIGINAL, preview.activeMode.value)
         assertTrue(preparation.togglePreview())
         awaitCondition("试听开始播放") { preview.state.value is PreviewState.Playing }
         assertTrue(preparation.togglePreview())
         awaitCondition("试听暂停") { preview.state.value is PreviewState.Buffered }
         preparation.startTraining()
         assertEquals(DRAFT_ID, preparation.state.value.navigateToRecordingDraftId)
+        assertEquals(SongPlaybackMode.ACCOMPANIMENT, preview.activeMode.value)
 
         val storage = app.draftStorage.current()
         val uploadWork = UploadWorkContract(storage.accountScopeHash, DRAFT_ID)
@@ -238,6 +241,7 @@ class PatientClosedLoopTest {
             clockNanos = app.monotonicClock::nowNanoseconds,
             tempFiles = PrivateRecordingTempFiles(context).also { it.cleanupOrphans() },
             publisher = AccountScopedRecordingArtifactPublisher(storage),
+            persistMetadata = { draftId, metadata -> storage.savePlaybackMetadata(draftId, metadata) },
         )
         val recording = RecordingViewModel(
             DRAFT_ID,
@@ -248,7 +252,9 @@ class PatientClosedLoopTest {
         )
         recording.start()
         capture.emit(CaptureEvent.Started)
-        awaitCondition("录制音乐播放") { preview.state.value is PreviewState.Playing }
+        awaitCondition("录制音乐播放", { "preview=${preview.state.value}, recording=${recording.state.value.recordingState}, coordinator=${coordinator.state.value}, requests=${previewServer.requestCount}" }) { preview.state.value is PreviewState.Playing }
+        assertTrue(recordingPlayback.switchMode(SongPlaybackMode.ORIGINAL))
+        assertEquals(SongPlaybackMode.ORIGINAL, preview.activeMode.value)
         recording.stop()
         capture.emit(CaptureEvent.Finalized(capture.durationMillis))
         assertEquals(DRAFT_ID, recording.state.value.navigateReviewDraftId)
@@ -459,13 +465,20 @@ private class ClosedLoopBackend(
             path == "/api/v1/patient/songs/$SONG_ID/preview/" -> {
                 expect(
                     request,
-                    query = mapOf("track" to "accompaniment"),
+                    query = mapOf("track" to "source"),
                     method = "POST",
                     authenticated = true,
                     idempotencyKey = null,
                     expectedBody = ExpectedRequestBody.EMPTY,
                 )
                 json("""{"code":"ok","message":"","data":{"url":"$previewUrl","expires_at":"2030-01-01T00:00:00Z"},"request_id":"preview"}""")
+            }
+            path == "/api/v1/patient/singing-sessions/$SESSION_ID/song-playback/" -> {
+                val track=request.requestUrl!!.queryParameter("track")!!
+                check(track in setOf("source","accompaniment"))
+                expect(request,method="POST",authenticated=true,idempotencyKey=null,query=mapOf("track" to track),expectedBody=ExpectedRequestBody.EMPTY)
+                val asset=if(track=="source") SOURCE_ASSET_ID else BACKING_ASSET_ID
+                json("""{"code":"ok","message":"","data":{"asset_id":"$asset","url":"$previewUrl","expires_at":"2030-01-01T00:00:00Z"},"request_id":"session-track"}""")
             }
             path == "/api/v1/patient/singing-sessions/" && request.method == "POST" -> {
                 check(!sessionCreated)
@@ -500,8 +513,11 @@ private class ClosedLoopBackend(
                     method = "POST",
                     authenticated = true,
                     idempotencyKey = "submit:$DRAFT_ID",
-                    expectedBody = ExpectedRequestBody.EMPTY,
+                    expectedBody = ExpectedRequestBody.JSON,
                 )
+                val submitted=JSONObject(request.body.readUtf8()).getJSONObject("playback_metadata")
+                check(submitted.getString("accompaniment_asset_id")==BACKING_ASSET_ID)
+                check(submitted.getInt("schema_version")==1)
                 submitCalls.incrementAndGet()
                 submittedSessionId = SESSION_ID
                 json(fixture("session_mutation.json"))
@@ -613,7 +629,7 @@ private class ClosedLoopBackend(
         val mediaJson = media.values.joinToString(",") { item ->
             """{"asset_id":"${item.assetId}","media_type":"${item.kind}","status":"${if (item.confirmed) "ready" else "uploading"}","mime":"${if (item.kind == "singing_audio") "audio/mp4" else "video/mp4"}","size":${item.size},"confirmed_at":${if (item.confirmed) "\"2026-08-27T09:00:30Z\"" else "null"}}"""
         }
-        return """{"code":"ok","message":"","data":{"id":"$SESSION_ID","patient":{"id":"$PATIENT_ID","medical_record_no":"MR-2026-001","name":"患者甲"},"song":{"id":"$SONG_ID","title":"春风","artist":"演示歌手","duration_seconds":90},"treatment_plan":{"id":"33333333-3333-4333-8333-333333333333","start_date":"2026-08-01","cycle_weeks":4,"target_session_count":12},"status":"$status","score":null,"burp_count":null,"duration_seconds":90,"is_mock":false,"created_source":"patient_android_api","analysis_generation":0,"submitted_at":null,"completed_at":null,"created_at":"2026-08-27T09:00:00Z","updated_at":"2026-08-27T09:01:00Z","media":[$mediaJson],"analysis_task_ids":[],"analysis_results":[]},"request_id":"session"}"""
+        return """{"code":"ok","message":"","data":{"id":"$SESSION_ID","patient":{"id":"$PATIENT_ID","medical_record_no":"MR-2026-001","name":"患者甲"},"song":{"id":"$SONG_ID","title":"春风","artist":"演示歌手","duration_seconds":90},"treatment_plan":{"id":"33333333-3333-4333-8333-333333333333","start_date":"2026-08-01","cycle_weeks":4,"target_session_count":12},"status":"$status","score":null,"burp_count":null,"duration_seconds":90,"is_mock":false,"created_source":"patient_android_api","analysis_generation":0,"submitted_at":null,"completed_at":null,"created_at":"2026-08-27T09:00:00Z","updated_at":"2026-08-27T09:01:00Z","media":[$mediaJson],"analysis_task_ids":[],"analysis_results":[],"playback":{"source_asset_id":"$SOURCE_ASSET_ID","accompaniment_asset_id":"$BACKING_ASSET_ID","reference_version":null,"combined_available":false,"metadata":null}},"request_id":"session"}"""
     }
 
     private fun json(body: String) = MockResponse()
@@ -752,6 +768,8 @@ private const val PATIENT_ID = "11111111-1111-4111-8111-111111111111"
 private const val PATIENT_SCOPE_HASH = "bd7662a5eeb41614e720d477abfcb2272e19a8a70a93b7e3bc8560d44ad326e9"
 private const val SONG_ID = "44444444-4444-4444-8444-444444444444"
 private const val SESSION_ID = "55555555-5555-4555-8555-555555555555"
+private const val SOURCE_ASSET_ID = "88888888-8888-4888-8888-888888888888"
+private const val BACKING_ASSET_ID = "99999999-9999-4999-8999-999999999999"
 private const val AUDIO_ASSET_ID = "66666666-6666-4666-8666-666666666666"
 private const val VIDEO_ASSET_ID = "77777777-7777-4777-8777-777777777777"
 private val DRAFT_ID = "closed-loop-${java.util.UUID.randomUUID()}"

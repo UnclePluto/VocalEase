@@ -216,3 +216,44 @@ def test_patient_upload_analysis_to_admin_detail_flow(tmp_path, settings, has_pl
     admin_detail = doctor_client.get(f"/api/v1/admin/singing-sessions/{session_id}/")
     assert admin_detail.status_code == 200
     assert admin_detail.json()["data"] == own_data
+
+@pytest.mark.django_db(transaction=True)
+def test_patient_recording_playback_contract(tmp_path, settings):
+    import math, struct, wave
+    from apps.songs.reference_pitch_services import import_reference_pitch
+    from apps.songs.reference_pitch_audio import decode_vocal, extract_pitch_notes
+    doctor=create_doctor(name="音轨验收医生",gender="male",phone="13600000998",department="康复科",title="医师")
+    doctor.user.must_change_password=False;doctor.user.save(update_fields=["must_change_password"])
+    patient=_create_active_patient(doctor=doctor,suffix=3)
+    song=_create_ready_song(tmp_path=tmp_path,settings=settings)
+    # 来自明确校验标注，不能使用占位参考。歌曲轨道存储绑定沿用上面的合同夹具。
+    reference=import_reference_pitch(actor=doctor.user,song_id=song.id,expected_fingerprint=song.source_receipt_fingerprint,document={"schema_version":1,"origin":{"type":"annotation","citation":"授权验收标注 MIDI57"},"notes":[{"start_ms":0,"end_ms":1000,"midi_note":57,"confidence":1}]})
+    client=APIClient();client.force_authenticate(patient.user)
+    created=client.post("/api/v1/patient/singing-sessions/",{"song_id":str(song.id)},format="json",HTTP_IDEMPOTENCY_KEY="pitch-flow-create")
+    assert created.status_code==201,created.content
+    sid=created.json()["data"]["id"]
+    output=io.BytesIO()
+    with wave.open(output,"wb") as wav:
+        wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(48000)
+        wav.writeframes(b"".join(struct.pack("<h",int(12000*math.sin(2*math.pi*220*i/48000))) for i in range(48000)))
+    body=output.getvalue()
+    audio=_upload_and_confirm(client=client,session_id=sid,media_type="singing_audio",mime="audio/wav",body=body,key="pitch-flow-audio")
+    _upload_and_confirm(client=client,session_id=sid,media_type="singing_video",mime="video/mp4",body=b"test-video-contract",key="pitch-flow-video")
+    metadata={"schema_version":1,"sample_rate":48000,"source_asset_id":str(song.source_asset_id),"accompaniment_asset_id":str(song.accompaniment_asset_id),"reference_version":str(reference.id),"mode_changes":[],"anchors":[{"recording_ms":0,"song_ms":0,"track":"accompaniment","playing":True,"segment":0},{"recording_ms":1000,"song_ms":1000,"track":"accompaniment","playing":False,"segment":0}]}
+    submit=client.post(f"/api/v1/patient/singing-sessions/{sid}/submit/",{"playback_metadata":metadata},format="json",HTTP_IDEMPOTENCY_KEY="pitch-flow-submit")
+    assert submit.status_code==202,submit.content
+    doctor_client=APIClient();doctor_client.force_authenticate(doctor.user)
+    detail=doctor_client.get(f"/api/v1/admin/singing-sessions/{sid}/").json()["data"]
+    assert detail["media"][0]["asset_id"]==audio["asset_id"]
+    assert detail["playback"]["accompaniment_asset_id"]==str(song.accompaniment_asset_id)
+    assert detail["playback"]["metadata"]==metadata
+    grant=doctor_client.post(f"/api/v1/admin/media/{audio['asset_id']}/private-url/").json()["data"]
+    downloaded=doctor_client.get(grant["url"])
+    data=b"".join(downloaded.streaming_content) if downloaded.streaming else downloaded.content
+    assert data==body
+    decoded=decode_vocal(data,duration_ms=1000)
+    notes=extract_pitch_notes(decoded,sample_rate=8000,duration_ms=1000)
+    assert notes and abs(notes[0]["midi_note"]-57)<.2
+    accompaniment=doctor_client.post(f"/api/v1/admin/singing-sessions/{sid}/playback-accompaniment/")
+    assert accompaniment.status_code==200
+    assert accompaniment.json()["data"]["asset_id"]==str(song.accompaniment_asset_id)

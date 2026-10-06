@@ -185,3 +185,13 @@ docker compose --env-file .env -f deploy/compose.yaml down -v
 ```
 
 最后一条命令会不可恢复地删除 Compose 管理的本地演示数据和媒体。当前 `web` 容器本身使用非 root Nginx 同时提供静态页面和 `/api/` 反向代理，因此没有额外重复的 Nginx 服务。
+
+## 演唱体验升级（2026-10-06）
+
+医生“病人数据”入口读取真实患者列表，筛选可沿详情返回。演唱明细仅保留患者“人声＋伴奏”与“人声”，患者录音作为波形、真实音量/F0及录像同步的主时钟；旧会话缺同步依据时只播放患者录音。信噪比、嗳气和临床分析仍须按接口标识模拟来源。
+
+安卓试听默认原唱，进入演唱默认伴奏，两处均可切换。会话固定歌曲媒体及参考音高版本，单一麦克风 PCM 用于实时音高和 AAC 录音，摄像头只采视频，结束后按采集起点合并。引导改为嘴部、下颌和颈部，预览与录像共用 ViewPort。
+
+先升级服务端并执行迁移，确认 FFmpeg 可用；通过授权医生/管理员导入经过核验的音高标注，或从可信歌曲人声音轨生成参考音高。`check_reference_pitch_readiness --song-id <UUID>` 检查验收曲目；缺参考时可唱但参考横块显示明确空态。正式发布前仍需同次真实演唱/七牛/医生回放验证，详见 `docs/superpower/reports/2026-10-06-singing-experience-verification.md`。
+
+不依赖 Docker 的浏览器媒体验证：在 `web-admin` 执行 `pnpm exec playwright test --config playwright.media.config.ts`。接口使用隔离的授权夹具，媒体是浏览器实际解码的 WAV；该检查不替代生产账户或存储验收。

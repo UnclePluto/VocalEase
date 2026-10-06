@@ -8,7 +8,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ApiError } from '../../api/errors'
 import { useAuthStore } from '../../auth/store'
 import { getPrivateMediaUrl, getSessionAccompanimentUrl, getSingingSession } from './api'
-import { MetricPanel, nearestMetricSample } from './components/MetricPanel'
+import { nearestMetricSample } from './components/MetricPanel'
 import { WaveformPlayer, type PlayerMedia } from './components/WaveformPlayer'
 import type { SingingSession } from './types'
 
@@ -47,7 +47,7 @@ function usePrivateMedia(session: SingingSession, requested: boolean) {
 }
 
 export function SingingDetailContent({ session, onBack }: { session: SingingSession; onBack?:()=>void }) {
-  const [seconds, setSeconds] = useState(0)
+  const [, setSeconds] = useState(0)
   const [mediaRequested, setMediaRequested] = useState(false)
   const sessionFence = useRef(session.id)
   useEffect(() => { sessionFence.current = session.id }, [session.id])
@@ -91,7 +91,6 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
         <div className="audio-workspace">
           <div className="spectrum-card"><h2>声音波形</h2><div className="media-prepare"><Button type="primary" shape="circle" icon={<PlayCircleOutlined />} aria-label="准备回放" onClick={() => setMediaRequested(true)} /><span>点击准备演唱回放</span></div></div>
           
-          <MetricPanel seconds={seconds} result={source} />
         </div>
         <aside className="video-card"><h2>演唱录像</h2><div className="video-placeholder"><PlayCircleOutlined /><p>点击准备后加载录像</p></div></aside>
       </div> : null}
@@ -100,7 +99,7 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
       {mediaRequested && urls.accompaniment.isError ? <Alert type="warning" title={messageFor(urls.accompaniment.error,'伴奏授权失败，患者人声仍可播放')} action={<Button onClick={()=>void urls.accompaniment.refetch()}>重试伴奏授权</Button>}/> : null}
       {mediaRequested && urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
       {mediaRequested && urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
-      {(!hasMediaBindings || (mediaRequested && !urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending))) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} analysisResult={source} onRefreshMedia={refreshMedia} onTime={setSeconds}><MetricPanel seconds={seconds} result={source} /></WaveformPlayer> : null}
+      {(!hasMediaBindings || (mediaRequested && !urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending))) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} analysisResult={source} onRefreshMedia={refreshMedia} onTime={setSeconds} /> : null}
     </div>
   </section>
 }

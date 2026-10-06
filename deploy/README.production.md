@@ -35,3 +35,11 @@
 只替换 `/opt/service/openresty_ssl_conf.d/vocaease-probe.conf`，保留两个域名的精确匹配、`/.well-known/acme-challenge/` 路由及 `vocaease-cert/current` 证书路径。自动续期脚本在 `/home/motioncare/vocaease-https/`，每天 03:17 和 15:17 检查，无证书变化时不加载入口。
 
 当前算法是项目已有的流程模拟器，生产部署不代表已接入真实分析算法。
+
+## 演唱媒体与参考音高升级
+
+Django/Celery 镜像安装 FFmpeg，两个进程必须使用相同镜像。部署后执行迁移（songs 0006/0007、singing 0007、media 0010），再更新患者与后台。新增字段允许旧客户端省略播放元数据；旧会话不补造歌曲绑定。`media.0010` 是最上层禁止回退屏障，防止先撤销依赖迁移才遇到旧媒体屏障；数据库回退须按备份恢复流程执行。
+
+对验收歌曲执行 `python manage.py check_reference_pitch_readiness --song-id <UUID>`。自动生成只能使用通过回执校验的 song_vocal；原曲和伴奏不可冒充参考输入。租约60秒、10秒心跳、最多3次尝试；采集/上传保留会话媒体版本，即使曲库换轨也不可改播新文件。
+
+私有媒体须保留签名校验、HTTP Range 与正确 MIME；七牛媒体域名须允许后台来源的匿名 CORS 读取，Web Audio 的 crossOrigin 在 src 前设置。不要建立公开代理绕过鉴权。生产FFmpeg解码、七牛回执/CORS和同一真实病例回放尚需按本次验收报告执行，本地浏览器通过不代表生产发布验收。
