@@ -305,8 +305,12 @@ class PreparationViewModel(
     }
 
     suspend fun switchPreviewMode(mode: com.vocaease.patient.core.media.SongPlaybackMode): Boolean {
+        if (currentState().isCreatingSession) return false
         val result=preview.switchMode(mode)
-        updateState { it.copy(previewMode=preview.activeMode.value) }
+        updateState { it.copy(
+            previewMode = preview.activeMode.value,
+            errorMessage = if (result) null else "试听切换失败，已保留${preview.activeMode.value.label}，请重试",
+        ) }
         refreshReadiness()
         return result
     }

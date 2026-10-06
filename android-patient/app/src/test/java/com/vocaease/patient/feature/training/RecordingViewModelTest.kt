@@ -16,6 +16,33 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RecordingViewModelTest {
+    @Test fun `未校准的伴奏不展示原唱参考音高但保留录制启动`() = runBlocking {
+        val coordinator = FakeRecordingSession().apply {
+            playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion = "version", alignmentVerified = false)
+        }
+        val reference = ReferencePitchRepository { _, version ->
+            com.vocaease.patient.core.network.dto.ReferencePitchDto("ready", version, notes = listOf(com.vocaease.patient.core.network.dto.ReferenceNoteDto(1000,2000,60f,1f)))
+        }
+        val model = RecordingViewModel("draft",coordinator,FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,referenceRepository = reference)
+        model.start()
+        assertFalse(model.state.value.referencePitch is ReferencePitchState.Ready)
+        assertTrue(model.state.value.songTitle.isNotEmpty())
+        model.leave()
+    }
+
+    @Test fun `已校准的伴奏仍展示绑定版本的参考音高`() = runBlocking {
+        val coordinator = FakeRecordingSession().apply {
+            playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion = "version", alignmentVerified = true, accompanimentOffsetMs = 2000)
+        }
+        val reference = ReferencePitchRepository { _, version ->
+            com.vocaease.patient.core.network.dto.ReferencePitchDto("ready", version, notes = listOf(com.vocaease.patient.core.network.dto.ReferenceNoteDto(1000,2000,60f,1f)))
+        }
+        val model = RecordingViewModel("draft",coordinator,FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,referenceRepository = reference)
+        model.start()
+        assertEquals(ReferencePitchState.Ready("version",listOf(com.vocaease.patient.core.network.dto.ReferenceNoteDto(1000,2000,60f,1f))),model.state.value.referencePitch)
+        model.leave()
+    }
+
     @Test
     fun `真正进入Recording后才确认Task7 handoff并开启屏幕常亮`() = runBlocking {
         val coordinator = FakeRecordingSession()
@@ -181,6 +208,7 @@ class RecordingViewModelTest {
 }
 
 private class FakeRecordingSession : RecordingCoordinator {
+    override var playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null
     private val mutable = MutableStateFlow<RecordingState>(RecordingState.Countdown(3))
     override val state: StateFlow<RecordingState> = mutable
     var stopCount = 0

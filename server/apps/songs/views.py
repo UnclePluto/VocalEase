@@ -244,8 +244,6 @@ class PatientSongPreviewView(APIView):
         from .alignment import current_alignment
         song=PatientSongDetailView().get_object(song_id)
         alignment=current_alignment(song)
-        if track=='accompaniment' and alignment is None:
-            raise SongStateConflict('伴奏起点尚未核验')
         private_url = preview_song_resource(
             actor=request.user, request_id=request.request_id,
             song=song,

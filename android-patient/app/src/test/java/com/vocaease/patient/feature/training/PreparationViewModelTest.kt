@@ -22,6 +22,16 @@ import org.junit.Test
 
 class PreparationViewModelTest {
     @Test
+    fun `切换试听失败保留原唱且向患者显示错误`() = runBlocking {
+        val preview = FakePreviewSession().apply { switchSucceeds = false }
+        val model = viewModel(FakePreparationStore(), FakeSessionCreator { createdSession() }, preview = preview)
+        model.load()
+        assertFalse(model.switchPreviewMode(com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT))
+        assertEquals(com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL, model.state.value.previewMode)
+        assertTrue(model.state.value.errorMessage?.contains("切换") == true)
+    }
+
+    @Test
     fun `导航发布时把已预缓冲播放器一次性交给Task8且onCleared不再释放`() = runBlocking {
         val preview = FakePreviewSession()
         val handed = mutableListOf<Pair<String, PreviewSession>>()
@@ -492,6 +502,8 @@ private class FakePreviewSession(
     private val releaseCompletion: CompletableDeferred<Unit> = CompletableDeferred(Unit),
 ) : PreviewSession {
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Buffered)
+    var switchSucceeds = true
+    override suspend fun switchMode(mode: com.vocaease.patient.core.media.SongPlaybackMode) = switchSucceeds
     var releaseCount = 0
     var awaitReleasedCount = 0
     var rewindCount = 0

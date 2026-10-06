@@ -105,7 +105,9 @@ class RecordingViewModel(
                 totalDurationMillis = info.totalDurationMillis,
             ) }
             val version = coordinator.playbackBinding?.referenceVersion
-            if (version != null && referenceRepository != null) scope.launch {
+            val aligned = coordinator.playbackBinding?.let { it.alignmentVerified && it.accompanimentOffsetMs != null } == true
+            if (version != null && !aligned) updateState { it.copy(referencePitch = ReferencePitchState.Unaligned) }
+            if (version != null && aligned && referenceRepository != null) scope.launch {
                 updateState { it.copy(referencePitch=ReferencePitchState.Loading) }
                 val reference=referenceRepository.load(info.songId,version)
                 if(!left.get()) updateState { it.copy(referencePitch=reference) }

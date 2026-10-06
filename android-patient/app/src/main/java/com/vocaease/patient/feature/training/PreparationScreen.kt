@@ -1,6 +1,11 @@
 package com.vocaease.patient.feature.training
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,6 +70,7 @@ fun PreparationScreen(
         modifier = modifier
             .fillMaxSize()
             .background(AppBackground)
+            .safeDrawingPadding()
             .padding(horizontal = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -82,44 +88,6 @@ fun PreparationScreen(
             return@Column
         }
 
-        SongIdentity(song, state.previewState, !state.isCreatingSession, onPreviewToggle, onRetryPreview)
-        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Center) {
-            com.vocaease.patient.core.media.SongPlaybackMode.entries.forEach { mode ->
-                TextButton(onClick={onModeChange(mode)},enabled=!state.isCreatingSession,modifier=Modifier.height(48.dp).testTag("preview-mode-${mode.wire}")) {
-                    Text(if(state.previewMode==mode) "✓ ${mode.label}" else mode.label)
-                }
-            }
-        }
-        LyricsUnavailable()
-        Text(
-            "开始前请确认",
-            modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 8.dp),
-            color = TextPrimary,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        PreparationTip(
-            symbol = "◎",
-            title = "完整露出面部",
-            description = "将手机放稳，确保面部完整出现在画面中。",
-        )
-        Spacer(Modifier.height(12.dp))
-        PreparationTip(
-            symbol = "♬",
-            title = "建议连接带麦耳机",
-            description = "推荐使用带 Mic 的有线或蓝牙耳机，收音更清晰。",
-        )
-        Spacer(Modifier.height(12.dp))
-        DeviceStatus(state, onRequestPermissions, onOpenSettings)
-        state.preflight.warning?.let { warning ->
-            Text(
-                warning,
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                color = BrandGreenDark,
-                fontSize = 11.sp,
-                textAlign = TextAlign.Center,
-            )
-        }
         state.errorMessage?.let { message ->
             Text(
                 message,
@@ -129,7 +97,57 @@ fun PreparationScreen(
                 textAlign = TextAlign.Center,
             )
         }
-        Spacer(Modifier.weight(1f))
+        Column(
+            modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            SongIdentity(song, state.previewState, !state.isCreatingSession, onPreviewToggle, onRetryPreview)
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)) {
+                com.vocaease.patient.core.media.SongPlaybackMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = state.previewMode == mode,
+                        onClick = { onModeChange(mode) },
+                        enabled = !state.isCreatingSession && state.previewState != PreviewState.Buffering,
+                        label = { Text(mode.label) },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("preview-mode-${mode.wire}"),
+                    )
+                }
+            }
+            LyricsUnavailable()
+            Text(
+                "开始前请确认",
+                modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 8.dp),
+                color = TextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            PreparationTip(
+                symbol = "◎",
+                title = "露出嘴部、下颌和颈部",
+                description = "将手机放稳，让鼻子以下到颈部出现在引导框中。",
+            )
+            Spacer(Modifier.height(12.dp))
+            PreparationTip(
+                symbol = "♬",
+                title = "建议连接带麦耳机",
+                description = "推荐使用带 Mic 的有线或蓝牙耳机，收音更清晰。",
+            )
+            Spacer(Modifier.height(12.dp))
+            DeviceStatus(state, onRequestPermissions, onOpenSettings)
+            state.preflight.warning?.let { warning ->
+                Text(
+                    warning,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    color = BrandGreenDark,
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+        }
+        Spacer(Modifier.height(12.dp))
         Button(
             onClick = onStart,
             enabled = state.preflight.canStart && !state.isCreatingSession,
@@ -270,7 +288,7 @@ private fun LyricsUnavailable() {
 @Composable
 private fun PreparationTip(symbol: String, title: String, description: String) {
     Card(
-        modifier = Modifier.fillMaxWidth().height(78.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 78.dp),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = AppWhite),
         border = BorderStroke(1.dp, AppOutline),

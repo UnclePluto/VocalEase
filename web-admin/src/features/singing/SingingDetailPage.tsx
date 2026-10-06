@@ -38,12 +38,14 @@ function usePrivateMedia(session: SingingSession, requested: boolean) {
     gcTime: 0,
     queryFn: ({ signal }) => getPrivateMediaUrl(videoBinding!.asset_id, signal),
   })
+  const accompanimentId=session.playback?.combined_available ? session.playback.accompaniment_asset_id : session.playback?.accompaniment_preview_asset_id
+  const previewId=session.playback?.combined_available ? undefined : accompanimentId ?? undefined
   const accompaniment=useQuery({
-    queryKey:['singing-private-url',authEpoch,session.id,'accompaniment',session.playback?.accompaniment_asset_id],
-    enabled:requested&&Boolean(session.playback?.combined_available),retry:false,staleTime:0,gcTime:0,
-    queryFn:async({signal})=>{const grant=await getSessionAccompanimentUrl(session.id,signal);if(grant.asset_id!==session.playback?.accompaniment_asset_id)throw new Error('会话伴奏资产不匹配');return grant},
+    queryKey:['singing-private-url',authEpoch,session.id,'accompaniment',accompanimentId,previewId],
+    enabled:requested&&Boolean(accompanimentId && (session.playback?.combined_available || session.playback?.accompaniment_preview_available)),retry:false,staleTime:0,gcTime:0,
+    queryFn:async({signal})=>{const grant=await getSessionAccompanimentUrl(session.id,signal,previewId);if(grant.asset_id!==accompanimentId)throw new Error('会话伴奏资产不匹配');return grant},
   })
-  return { audio, audioBinding, video, videoBinding, accompaniment }
+  return { audio, audioBinding, video, videoBinding, accompaniment, accompanimentId, previewId }
 }
 
 export function SingingDetailContent({ session, onBack }: { session: SingingSession; onBack?:()=>void }) {
@@ -60,14 +62,15 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
     video: urls.videoBinding && urls.video.data ? { assetId: urls.videoBinding.asset_id, url: urls.video.data.url } : undefined,
     videoExpected: Boolean(urls.videoBinding),
     accompaniment: urls.accompaniment.data ? {assetId:urls.accompaniment.data.asset_id,url:urls.accompaniment.data.url}:undefined,
-    metadata: session.playback?.metadata,
+    metadata: session.playback?.combined_available ? session.playback.metadata : null,
+    manualAccompaniment: Boolean(urls.previewId),
     accompanimentOffsetMillis:session.playback?.accompaniment_offset_ms ?? 0,
 
   }
   const refreshMedia = async (assetId: string) => {
     const expectedSession = sessionFence.current
     const epoch=useAuthStore.getState().sessionEpoch
-    const next = assetId===session.playback?.accompaniment_asset_id ? await getSessionAccompanimentUrl(expectedSession) : await getPrivateMediaUrl(assetId)
+    const next = assetId===urls.accompanimentId ? await getSessionAccompanimentUrl(expectedSession,undefined,urls.previewId) : await getPrivateMediaUrl(assetId)
     if(epoch!==useAuthStore.getState().sessionEpoch)throw new ApiError('stale_media_response','已忽略过期账户授权')
     if('asset_id' in next && next.asset_id!==assetId)throw new ApiError('media_binding_mismatch','会话伴奏资产不匹配')
     if (expectedSession !== sessionFence.current) throw new ApiError('stale_media_response', '已忽略过期媒体授权响应')

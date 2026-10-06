@@ -37,10 +37,12 @@ def validate_playback_metadata(value: object, *, session: SingingSession) -> dic
     if not isinstance(anchors,list) or not 1 <= len(anchors) <= 10000 or not isinstance(changes,list) or len(changes)>1000:
         invalid()
     prior=None;limit=session.song_snapshot.get('duration_seconds',0)*1000
+    native_accompaniment = bound_alignment(session) is None
+    max_duration_ms = 24 * 60 * 60 * 1000
     for anchor in anchors:
         if not isinstance(anchor,dict) or set(anchor)!= {'recording_ms','song_ms','track','playing','segment'}:
             invalid()
-        if any(type(anchor[k]) is not int or anchor[k]<0 for k in ('recording_ms','song_ms','segment')) or type(anchor['playing']) is not bool or anchor['track'] not in ('source','accompaniment') or anchor['song_ms']>limit or anchor['recording_ms']>24*60*60*1000:
+        if any(type(anchor[k]) is not int or anchor[k]<0 for k in ('recording_ms','song_ms','segment')) or type(anchor['playing']) is not bool or anchor['track'] not in ('source','accompaniment') or anchor['song_ms']>(max_duration_ms if native_accompaniment and anchor['track']=='accompaniment' else limit) or anchor['recording_ms']>max_duration_ms:
             invalid()
         if prior and (anchor['recording_ms']<=prior['recording_ms'] or anchor['segment']<prior['segment'] or (anchor['segment']==prior['segment'] and anchor['song_ms']<prior['song_ms'])):
             invalid()
@@ -62,12 +64,24 @@ def bound_alignment(session):
     return value
 
 
+def accompaniment_preview_asset(session):
+    # 已绑定会话仍使用原资源；旧会话只提供本次明确选择的当前歌曲伴奏。
+    if session.playback_accompaniment_asset_id:
+        return session.playback_accompaniment_asset
+    song = session.song
+    if song.deleted_at or not song.accompaniment_asset_id:
+        return None
+    return song.accompaniment_asset
+
+
 def playback_description(session):
     alignment=bound_alignment(session)
-    return {'alignment_verified':bool(alignment),'accompaniment_offset_ms':alignment['offset_ms'] if alignment else None,'source_asset_id':str(session.playback_source_asset_id) if session.playback_source_asset_id else None,'accompaniment_asset_id':str(session.playback_accompaniment_asset_id) if session.playback_accompaniment_asset_id else None,'reference_version':str(session.reference_version_id) if session.reference_version_id else None,'combined_available':bool(alignment and session.playback_accompaniment_asset_id and session.playback_metadata and session.playback_metadata.get('anchors')),'metadata':session.playback_metadata}
+    preview_asset=accompaniment_preview_asset(session)
+    preview_available=bool(preview_asset and preview_asset.status=='ready' and not preview_asset.deleted_at)
+    return {'alignment_verified':bool(alignment),'accompaniment_offset_ms':alignment['offset_ms'] if alignment else None,'source_asset_id':str(session.playback_source_asset_id) if session.playback_source_asset_id else None,'accompaniment_asset_id':str(session.playback_accompaniment_asset_id) if session.playback_accompaniment_asset_id else None,'reference_version':str(session.reference_version_id) if session.reference_version_id else None,'combined_available':bool(alignment and session.playback_accompaniment_asset_id and session.playback_metadata and session.playback_metadata.get('anchors')),'metadata':session.playback_metadata,'accompaniment_preview_available':preview_available,'accompaniment_preview_asset_id':str(preview_asset.id) if preview_available else None}
 
 
-def authorize_session_song(*, actor, session_id, track, request_id):
+def authorize_session_song(*, actor, session_id, track, request_id, preview=False, expected_asset_id=None):
     if track not in ('source','accompaniment'):
         raise ValidationError({'track':'请选择原唱或伴奏'})
     session=get_object_or_404(SingingSession.objects.select_related('patient','playback_source_asset','playback_accompaniment_asset'),pk=session_id)
@@ -75,16 +89,18 @@ def authorize_session_song(*, actor, session_id, track, request_id):
         raise PermissionDenied()
     if actor.role == Role.PATIENT and session.patient.user_id != actor.id:
         raise PermissionDenied()
-    if track=='accompaniment' and bound_alignment(session) is None:
-        raise SongStateConflict('会话伴奏起点尚未核验')
-    asset=getattr(session, f'playback_{track}_asset')
+    if preview and (track!='accompaniment' or actor.role not in (Role.DOCTOR, Role.SYSTEM_ADMIN)):
+        raise PermissionDenied()
+    asset=accompaniment_preview_asset(session) if preview else getattr(session, f'playback_{track}_asset')
+    if preview and (not asset or str(asset.id)!=expected_asset_id):
+        raise SongStateConflict('伴奏资源已变更，请重新加载演唱明细')
     if not asset:
         raise SongStateConflict('此会话缺少可信歌曲音轨绑定')
-    if asset_fingerprint(asset) != getattr(session,f'playback_{track}_fingerprint'):
+    if getattr(session,f'playback_{track}_asset_id') and asset_fingerprint(asset) != getattr(session,f'playback_{track}_fingerprint'):
         raise SongStateConflict('会话音轨回执已变更')
     validate_song_resource(song_id=session.song_id,asset_id=asset.id,media_type='song_source' if track=='source' else 'song_accompaniment')
     backend=backend_for_asset(asset)
     grant=backend.create_private_url(asset.object_key,ttl_seconds=settings.MEDIA_PRIVATE_URL_TTL_SECONDS,**({'asset_id':asset.id,'expected_generation':asset.manifest_generation} if isinstance(backend,LocalStorageBackend) else {}))
     from apps.audit.services import record
-    record(actor=actor,action='singing.playback_authorized',target=session,changes={'asset_id':str(asset.id),'track':track},request_id=request_id)
+    record(actor=actor,action='singing.accompaniment_preview_authorized' if preview else 'singing.playback_authorized',target=session,changes={'asset_id':str(asset.id),'track':track},request_id=request_id)
     return {'asset_id':str(asset.id),'url':grant.url,'expires_at':grant.expires_at.isoformat()}

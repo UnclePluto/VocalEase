@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 sealed interface ReferencePitchState {
     data object Loading:ReferencePitchState
     data class Ready(val version:String,val notes:List<ReferenceNoteDto>):ReferencePitchState
+    data object Unaligned:ReferencePitchState
     data object Unavailable:ReferencePitchState
     data object Failed:ReferencePitchState
 }

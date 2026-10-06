@@ -7,7 +7,7 @@ from .models import SessionMedia, SingingSession
 
 def sessions_for_patient(*, patient_id, created_from=None, created_to=None, include_media=False):
     queryset = SingingSession.objects.filter(patient_id=patient_id).select_related(
-        "patient", "song", "treatment_plan"
+        "patient", "song", "song__accompaniment_asset", "playback_accompaniment_asset", "treatment_plan"
     )
     if include_media:
         queryset = queryset.prefetch_related(Prefetch(
@@ -23,7 +23,7 @@ def sessions_for_patient(*, patient_id, created_from=None, created_to=None, incl
 
 def sessions_for_admin(*, patient_id=None, status="", created_from=None, created_to=None, include_media=False):
     queryset = SingingSession.objects.select_related(
-        "patient", "song", "treatment_plan"
+        "patient", "song", "song__accompaniment_asset", "playback_accompaniment_asset", "treatment_plan"
     )
     if include_media:
         queryset = queryset.prefetch_related(Prefetch(

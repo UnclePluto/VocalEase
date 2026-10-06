@@ -54,6 +54,10 @@ fun SingingPitchTimeline(state:RecordingUiState,modifier:Modifier=Modifier) {
                 drawCircle(Color.White.copy(alpha=.18f),10.dp.toPx(),Offset(axis,y));drawCircle(Color.White,4.dp.toPx(),Offset(axis,y))
             }
         }
-        if(notes.isEmpty()) Text(if(state.referencePitch is ReferencePitchState.Failed) "参考音高加载失败；仍显示您的声音" else "暂无参考音高；仍显示您的声音",color=Color(0xFF89A094),fontSize=11.sp)
+        if(notes.isEmpty()) Text(when (state.referencePitch) {
+            is ReferencePitchState.Failed -> "参考音高加载失败；仍显示您的声音"
+            ReferencePitchState.Unaligned -> "伴奏起点未校准；仍显示您的声音"
+            else -> "暂无参考音高；仍显示您的声音"
+        },color=Color(0xFF89A094),fontSize=11.sp)
     }
 }

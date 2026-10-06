@@ -45,8 +45,7 @@ class VocaEasePreviewGrantSource(
         if (sessionId == null) {
             val grant=api.previewSong(songId,mode.wire).data
             val offset=if(mode==com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT) {
-                if(!grant.alignmentVerified || grant.accompanimentOffsetMs==null) throw java.io.IOException("伴奏起点尚未核验")
-                grant.accompanimentOffsetMs
+                if (grant.alignmentVerified) grant.accompanimentOffsetMs ?: throw NetworkContractException("伴奏同步数据不完整") else 0L
             } else 0L
             val url=grant.toDomain()
             return PreviewGrant(url.url,url.expiresAt,timelineOffsetMillis=offset)
@@ -56,8 +55,7 @@ class VocaEasePreviewGrantSource(
         val expected = if (mode == com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL) binding.sourceAssetId else binding.accompanimentAssetId
         require(grant.assetId.isNotBlank() && grant.assetId == expected) { "会话媒体版本不一致" }
         val offset=if(mode==com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT) {
-            if(!binding.alignmentVerified || binding.accompanimentOffsetMs==null) throw java.io.IOException("会话伴奏起点尚未核验")
-            binding.accompanimentOffsetMs
+            if (binding.alignmentVerified) binding.accompanimentOffsetMs ?: throw NetworkContractException("会话伴奏同步数据不完整") else 0L
         } else 0L
         return PreviewGrant(grant.url, grant.expiresAt.asInstant("grant.expires_at"), grant.assetId, binding,offset)
     }

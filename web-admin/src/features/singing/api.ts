@@ -14,4 +14,7 @@ export function getPatientMetrics(medicalRecordNo: string, signal?: AbortSignal)
   return apiRequest<PatientMetricsPage>(`/v1/admin/analytics/patients/?${params}`, { signal })
 }
 
-export function getSessionAccompanimentUrl(sessionId: string, signal?: AbortSignal) { return apiRequest<PrivateMediaUrl & {asset_id:string}>(`/v1/admin/singing-sessions/${sessionId}/playback-accompaniment/`, {method:'POST',signal}) }
+export function getSessionAccompanimentUrl(sessionId: string, signal?: AbortSignal, previewAssetId?: string) {
+  const params=previewAssetId ? `?${new URLSearchParams({preview:'true',expected_asset_id:previewAssetId})}` : ''
+  return apiRequest<PrivateMediaUrl & {asset_id:string}>(`/v1/admin/singing-sessions/${sessionId}/playback-accompaniment/${params}`, {method:'POST',signal})
+}

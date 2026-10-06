@@ -4,7 +4,7 @@ export type AnalysisResult = { task_type: string; status: string; is_mock: boole
 export type SingingSession = {
   id: string; status: string; score: number | null; burp_count: number | null; duration_seconds: number | null; is_mock: boolean; analysis_generation?: number
   patient: { name?: string; medical_record_no?: string }; song: { title?: string; artist?: string }
-  playback?: { alignment_verified?:boolean;accompaniment_offset_ms?:number|null; source_asset_id: string | null; accompaniment_asset_id: string | null; reference_version: string | null; combined_available: boolean; metadata: PlaybackMetadata | null }
+  playback?: { accompaniment_preview_available?:boolean;accompaniment_preview_asset_id?:string|null;alignment_verified?:boolean;accompaniment_offset_ms?:number|null; source_asset_id: string | null; accompaniment_asset_id: string | null; reference_version: string | null; combined_available: boolean; metadata: PlaybackMetadata | null }
   media: MediaBinding[]; analysis_results: AnalysisResult[]; created_at?: string; completed_at?: string
 }
 export type SingingPage = { count: number; page: number; page_size: number; results: SingingSession[] }
