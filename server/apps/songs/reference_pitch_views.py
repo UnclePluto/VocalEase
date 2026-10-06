@@ -36,3 +36,15 @@ class AdminReferencePitchView(APIView):
             raise ValidationError({'expected_fingerprint': '须提供预期输入指纹'})
         pitch = import_reference_pitch(actor=request.user, song_id=song_id, document=request.data.get('document'), expected_fingerprint=request.data['expected_fingerprint'])
         return api_response(data=read_reference_pitch(song_id=song_id, version=pitch.id), request_id=request.request_id)
+
+
+class AdminGenerateReferencePitchView(APIView):
+    permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
+
+    @extend_schema(request=ApiEnvelopeSerializer, responses={202: ApiEnvelopeSerializer})
+    def post(self, request, song_id):
+        from .reference_pitch_services import request_reference_pitch
+        if not isinstance(request.data, dict) or not isinstance(request.data.get('expected_fingerprint'), str):
+            raise ValidationError({'expected_fingerprint': '须提供预期人声音轨指纹'})
+        pitch = request_reference_pitch(actor=request.user, song_id=song_id, expected_fingerprint=request.data['expected_fingerprint'])
+        return api_response(data={'version':str(pitch.id), 'status':pitch.status}, request_id=request.request_id, status_code=202)

@@ -165,6 +165,7 @@ except (TypeError, ValueError):
     # 配置错误由 Django system check 稳定报告，避免 settings 导入阶段 traceback。
     ANALYSIS_TASK_LEASE_SECONDS = 0
 CELERY_BEAT_SCHEDULE = {
+    "recover-reference-pitch": {"task": "apps.songs.tasks.recover_reference_pitch_tasks", "schedule": 30.0},
     "recover-analysis-tasks": {
         "task": "apps.analysis.tasks.recover_analysis_tasks_task",
         "schedule": 60.0,

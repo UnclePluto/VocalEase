@@ -1,5 +1,7 @@
 FROM ghcr.io/astral-sh/uv:0.9.0-python3.13-bookworm-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --create-home --uid 10001 app
 
 WORKDIR /app/server

@@ -133,6 +133,11 @@ class SongReferencePitch(models.Model):
     input_asset = models.ForeignKey('media.MediaAsset', on_delete=models.PROTECT, null=True, blank=True)
     input_fingerprint = models.CharField(max_length=64, blank=True)
     document = models.JSONField(default=dict)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    attempt = models.PositiveSmallIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

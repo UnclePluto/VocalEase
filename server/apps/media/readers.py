@@ -23,7 +23,9 @@ def _read_limited(stream, *, max_bytes: int) -> bytes:
 
 def _qiniu_etag(content: bytes) -> str:
     # 歌词上限 1MB，七牛此时使用单块 ETag 格式。
-    return urlsafe_b64encode(b"\x16" + hashlib.sha1(content).digest()).decode().rstrip("=")
+    block = 4 * 1024 * 1024
+    digest = b"\x16" + hashlib.sha1(content).digest() if len(content) <= block else b"\x96" + hashlib.sha1(b"".join(hashlib.sha1(content[i:i+block]).digest() for i in range(0, len(content), block))).digest()
+    return urlsafe_b64encode(digest).decode().rstrip("=")
 
 
 def read_verified_asset_bytes(*, asset: MediaAsset, max_bytes: int) -> bytes:

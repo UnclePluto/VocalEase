@@ -27,6 +27,11 @@ class SongReadSerializer(serializers.ModelSerializer):
     accompaniment_asset = serializers.UUIDField(source="accompaniment_asset_id", allow_null=True, read_only=True)
     lyrics_asset = serializers.UUIDField(source="lyrics_asset_id", allow_null=True, read_only=True)
     artifacts = serializers.SerializerMethodField()
+    vocal_fingerprint = serializers.SerializerMethodField()
+
+    def get_vocal_fingerprint(self, song):
+        from .reference_pitch_services import asset_fingerprint
+        return asset_fingerprint(song.vocal_asset)
 
     def get_artifacts(self, song):
         return {kind: bool(getattr(song, f"{field}_id") and getattr(song, field).status == "ready" and getattr(song, field).deleted_at is None)
@@ -34,7 +39,7 @@ class SongReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Song
-        fields = ("id", "title", "artist", "genre", "language", "duration_seconds", "source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset", "ingestion_mode", "artifacts", "analysis_status", "publication_status", "uploaded_at")
+        fields = ("id", "title", "artist", "genre", "language", "duration_seconds", "source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset", "ingestion_mode", "artifacts", "source_receipt_fingerprint", "vocal_fingerprint", "analysis_status", "publication_status", "uploaded_at")
 
 
 class PatientSongReadSerializer(SongReadSerializer):

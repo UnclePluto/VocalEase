@@ -86,6 +86,9 @@ def update_song_resources(*, actor, request_id: str, song: Song, updates: dict, 
                 raise SongStateConflict("歌曲资源已被其他管理员修改", code="song_resource_conflict")
             setattr(locked, field, validate_song_resource(song_id=locked.id, asset_id=new_id, media_type=RESOURCE_TYPES[field]))
         locked.save(update_fields=[*updates, "updated_at"])
+        if "vocal_asset" in updates:
+            from .models import SongReferencePitch
+            SongReferencePitch.objects.filter(song=locked, status__in=['pending','processing']).update(status='stale')
         record(actor=actor, action="song.resources_update", target=locked, changes={field: {"from": str(expected[field]) if expected[field] else None, "to": str(value)} for field, value in updates.items()}, request_id=request_id)
         return locked
 
