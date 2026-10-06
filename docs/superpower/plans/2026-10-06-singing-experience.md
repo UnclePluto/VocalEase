@@ -54,7 +54,7 @@
 
 ## 第一组：服务端媒体合同与真实参考音高
 
-### 任务 1：参考音高版本、导入和读取合同
+### Task 1: 参考音高版本、导入和读取合同
 
 **Files:** 新建 `server/apps/songs/reference_pitch.py`、`reference_pitch_services.py`、`reference_pitch_views.py`、`migrations/0006_reference_pitch.py`（后三者同目录）；修改 `server/apps/songs/models.py`、`urls.py`、`serializers.py` 及 `server/apps/singing/schema.py`（现有歌曲信封定义位于此处）；测试 `server/apps/songs/tests/test_reference_pitch_api.py`。
 **Interfaces:** 产出 `validate_pitch_document(value: object, *, duration_ms: int) -> dict`；`import_reference_pitch(*, actor, song_id: UUID, document: dict, expected_fingerprint: str) -> SongReferencePitch`；`read_reference_pitch(*, song_id: UUID, version: UUID | None = None) -> dict`。SongReferencePitch 包含版本 UUID、状态、歌曲 FK、输入资产/指纹、区段、来源，已发布版本不可变。
@@ -73,7 +73,7 @@ assert invalid_response.status_code == 400
 - [ ] **5. 验证。** 该文件全绿，并运行 `uv run --frozen pytest apps/songs/tests/test_manual_song_api.py apps/singing/tests/test_free_singing.py -q`；`uv run --frozen python manage.py makemigrations --check --dry-run` 返回无遗漏模型变更。
 - [ ] **6. 提交。** 仅本任务文件，中文消息“增加歌曲参考音高版本与校验标注接口”。
 
-### 任务 2：从真实歌曲人声生成参考音高与部署运行时
+### Task 2: 从真实歌曲人声生成参考音高与部署运行时
 
 **Files:** 新建 `server/apps/songs/reference_pitch_audio.py`、`management/commands/check_reference_pitch_readiness.py`、`migrations/0007_reference_pitch_lease.py`（后两者同 server/apps/songs/）；修改 `models.py`、`reference_pitch_services.py`、`reference_pitch_views.py`、`tasks.py`、`resources.py`、`services.py`（均 server/apps/songs/）；修改 `deploy/docker/server.Dockerfile`、`server/vocaease/settings/base.py`；测试 `server/apps/songs/tests/test_reference_pitch_generation.py`、`server/tests/test_deployment_contract.py`。
 **Interfaces:** 消费任务 1 的验证/发布；产出 `extract_pitch_notes(pcm: Iterable[float], *, sample_rate: int, duration_ms: int) -> list[dict]`、`generate_reference_pitch(*, song_id: UUID, expected_fingerprint: str, version: UUID) -> None`；生成状态追加 lease_token、lease_until、attempt、next_attempt_at；租约 60 秒，每 10 秒心跳，最多 3 次尝试，解码超时 120 秒。任务需失联恢复和有界重试，导入与生成使用同一版本防覆盖规则。
@@ -92,7 +92,7 @@ assert stale_version.status != "ready"
 - [ ] **5. 验证。** generation/API/部署测试全绿，重建的服务端镜像 `ffmpeg -version` 可运行；失败任务明确 failed，旧版本仍可按 ID 读取。发布前由运营数据准备补齐验收歌曲，不生成虚假标注。
 - [ ] **6. 提交。** 中文消息“实现真实歌曲人声音高生成与就绪检查”。
 
-### 任务 3：演唱会话资源快照、元数据提交与授权
+### Task 3: 演唱会话资源快照、元数据提交与授权
 
 **Files:** 新建 `server/apps/singing/playback.py`、`playback_views.py`、`migrations/0007_session_playback.py`；修改 `server/apps/singing/models.py`、`services.py`、`serializers.py`、`schema.py`、`views.py`、`urls.py`、`selectors.py`；测试 `server/apps/singing/tests/test_playback_contract.py`、`test_submission_idempotency.py`；更新 `server/tests/test_openapi.py`。
 **Interfaces:** 消费任务 1 版本；产出 `validate_playback_metadata(value: object, *, session: SingingSession) -> dict | None`、`authorize_session_song(*, actor, session_id: UUID, track: str, request_id: str) -> dict`。会话不可变绑定 source/accompaniment 的 MediaAsset FK、回执指纹、参考版本和歌曲轨偏移；`submit_session(..., playback_metadata: dict | None = None) -> SubmissionResult`。
@@ -113,7 +113,7 @@ assert changed_body_submit.status_code == 409
 
 ## 第二组：安卓采音、切换与实时音高
 
-### 任务 4：安卓媒体 DTO 和保留时间的模式切换
+### Task 4: 安卓媒体 DTO 和保留时间的模式切换
 
 **Files:** 新建安卓 `core/media/SongPlaybackMode.kt`、`PlaybackMetadata.kt`、`core/network/dto/PlaybackDtos.kt`；修改 `core/network/VocaEaseApi.kt`、`SessionApis.kt`、`dto/SongDtos.kt`、`dto/SessionDtos.kt`、`core/media/PreviewPlayer.kt`、`RecordingPlaybackHandoff.kt`、`feature/training/PreparationProduction.kt`、`PreparationViewModel.kt`、`AppContainer.kt`；单元测试 `core/media/PreviewPlayerTest.kt`、`RecordingPlaybackHandoffTest.kt`、`core/network/PlaybackContractTest.kt`；更新 OpenAPI 及媒体 fixture。
 **Interfaces:** 产出 `enum SongPlaybackMode { ORIGINAL, ACCOMPANIMENT }`，wire 映射 source/accompaniment；`PlaybackAnchor(recordingMs:Long,songMs:Long,track:SongPlaybackMode,playing:Boolean,segment:Int)`；`PlaybackMetadata(schemaVersion:Int,sampleRate:Int,sourceAssetId:String,accompanimentAssetId:String,referenceVersion:String?,anchors:List<PlaybackAnchor>,modeChanges:List<ModeChange>)`，ModeChange 包含 recordingMs、track。扩展 `PreviewSession.switchMode(mode: SongPlaybackMode): Boolean`、`bindSession(sessionId: String): Boolean`、`PreviewGrantSource.fetch(songId: String, mode: SongPlaybackMode, sessionId: String?): PreviewGrant`；PreviewGrant 追加可空 assetId，既有歌曲试听响应允许缺该字段；会话授权中的 assetId 必须非空并匹配快照。已生效模式通过 StateFlow 暴露。
@@ -132,7 +132,7 @@ assertEquals(0L, handedOff.currentPositionMillis)
 - [ ] **5. 验证。** 三类全绿，追加跑 PreparationViewModelTest、ProductionProtectedApiTest，确认账户切换撤销旧请求、加载失败不启动录制。
 - [ ] **6. 提交。** 中文消息“支持试听与演唱原唱伴奏切换并保留进度”。
 
-### 任务 5：实时患者音高检测和时间轴几何
+### Task 5: 实时患者音高检测和时间轴几何
 
 **Files:** 新建安卓 `core/media/PitchDetector.kt`、`feature/training/PitchTimelineGeometry.kt`；单元测试 `core/media/PitchDetectorTest.kt`、`feature/training/PitchTimelineGeometryTest.kt`。
 **Interfaces:** 产出 `PitchSample(recordingMs:Long,frequencyHz:Float?,confidence:Float)`；`PitchDetector.detect(pcm:ShortArray,sampleRate:Int,recordingMs:Long):PitchSample`；`pitchToMidi(frequencyHz:Float):Float`；`timelineX(noteMs:Long,positionMs:Long,widthPx:Float):Float`，固定轴位于宽度 1/4，覆盖 -2s 至 +6s。时间映射复用任务 4 的 PlaybackAnchor，不自行另造时间合同。
@@ -151,7 +151,7 @@ assertEquals(width / 8f, oldX - advancedX, 0.1f)
 - [ ] **5. 验证。** 两类全绿；记录目标设备检测计算耗时，耗时超过预算先优化采样/检测线程，不以延迟 UI 代替录音完整性。
 - [ ] **6. 提交。** 中文消息“增加真实患者音高检测与滚动时间轴映射”。
 
-### 任务 6：唯一麦克风采集、患者 AAC 与同步录像合并
+### Task 6: 唯一麦克风采集、患者 AAC 与同步录像合并
 
 **Files:** 新建安卓 `core/media/MicrophonePcmCapture.kt`、`PatientAudioEncoder.kt`、`PatientRecordingCapture.kt`、`RecordedAvMuxer.kt`；修改 `CameraXRecordingCoordinator.kt`、`RecordingCoordinator.kt`、`PrivateRecordingTempFiles.kt`、`RecordingStagingRecovery.kt`、`AccountScopedRecordingArtifactPublisher.kt`、`AppContainer.kt`；单元测试 `PatientRecordingCaptureTest.kt`、`RecordingCoordinatorTest.kt`、`CameraXRecordingCaptureTest.kt`（core/media）；设备测试 `core/media/RecordedAvMuxerTest.kt`、`PatientAudioCaptureTest.kt`。
 **Interfaces:** 消费 PitchDetector；产出 `PcmBlock(samples:ShortArray,sampleRate:Int,firstSampleNanos:Long)`、`EncodedRecording(video:File,audio:File,sampleRate:Int,captureStartNanos:Long,effectiveStartOffsetMillis:Long,durationMillis:Long)`。MicrophonePcmCapture 唯一持有 AudioRecord；`RecordedAvMuxer.merge(videoOnly:File,patientAudio:File,output:File,videoStartNanos:Long,audioStartNanos:Long):MuxedRecording`，MuxedRecording 含有效时长及统一起点偏移。PatientRecordingCapture 实现现有 RecordingCapture，内部管理采集器和音高 StateFlow，CaptureEvent.Finalized 只在合并有效后发送。
@@ -170,7 +170,7 @@ assertTrue(measuredAvDriftMillis <= 100L)
 - [ ] **5. 验证。** 单元和设备测试全绿；录制 10 秒、3 分钟及歌曲完整时长，各在首尾检测 AV 偏差。权限、路由断开、磁盘不足、相机失败、编码失败、中途退出走已定义中断；未通过真实编码/相机设备路径不能声明录像修复。
 - [ ] **6. 提交。** 中文消息“统一患者麦克风采集并合并同步音视频”。
 
-### 任务 7：加密草稿中的同步元数据及上传重试
+### Task 7: 加密草稿中的同步元数据及上传重试
 
 **Files:** 新建安卓 `core/media/PlaybackMetadataRecorder.kt`；修改 `core/database/DraftEntity.kt`、`DraftDao.kt`、`AccountScopedDraftStorage.kt`、`VocaEaseDatabase.kt`、`core/media/RecordingCoordinator.kt`、`feature/upload/UploadStateMachine.kt`、`RoomUploadStore.kt`、`UploadOrchestrator.kt`、`VocaEaseUploadRemote.kt`、`core/network/SessionApis.kt`、`VocaEaseApi.kt`；新建 Room `app/schemas/com.vocaease.patient.core.database.VocaEaseDatabase/11.json`；单元测试 `core/media/PlaybackMetadataRecorderTest.kt`、`feature/upload/PlaybackMetadataUploadTest.kt`；设备测试 `core/database/PlaybackMetadataMigrationTest.kt`。
 **Interfaces:** 消费 PlaybackMetadata/EncodedRecording，encoded timing 为任务 6 的合并有效起点，最终元数据加入会话绑定 sourceAssetId/accompanimentAssetId/referenceVersion；产出 `PlaybackMetadataRecorder.record(recordingMs:Long,songMs:Long,track:SongPlaybackMode,playing:Boolean):Unit`、`snapshot():PlaybackMetadata`；`AccountScopedDraftStorage.loadPlaybackMetadata(draftId:String):PlaybackMetadata?`；UploadRemote.submit 追加 `metadata:PlaybackMetadata?`。DraftEntity 仅增加加密元数据相对路径与版本，不存明文 JSON。
@@ -189,7 +189,7 @@ assertEquals(firstAnchor.songMs, lastAnchor.songMs)
 - [ ] **5. 验证。** 两类及迁移全绿；追加现有 UploadOrchestratorTest、RecordingStagingRecoveryTest 和录制发布设备测试，确认退出账户、半写文件及断电恢复无明文泄漏。
 - [ ] **6. 提交。** 中文消息“持久化加密演唱同步元数据并接入上传”。
 
-### 任务 8：准备/演唱控件、版本化音高块和鼻子以下至颈部取景
+### Task 8: 准备/演唱控件、版本化音高块和鼻子以下至颈部取景
 
 **Files:** 新建安卓 `feature/training/ReferencePitchRepository.kt`、`SingingPitchTimeline.kt`、`LowerFaceNeckGuide.kt`；修改 `PreparationScreen.kt`、`PreparationViewModel.kt`、`RecordingScreen.kt`、`RecordingViewModel.kt`（feature/training）、`ui/VocaEaseApp.kt`、`core/media/CameraXRecordingCoordinator.kt`、`AppContainer.kt`；单元测试 `feature/training/ReferencePitchRepositoryTest.kt`、`RecordingViewModelTest.kt`；设备测试 `feature/training/RecordingScreenTest.kt`、`SingingPitchTimelineTest.kt`、`CameraFramingTest.kt`。
 **Interfaces:** 消费任务 1/3/4/5/6/7；产出 `ReferencePitchRepository.load(songId:String,version:String?):ReferencePitchState`；ReferencePitchState={Loading,Ready(version,notes),Unavailable,Failed}，notes 使用合同的毫秒/MIDI/置信度。RecordingUiState 追加模式、切换状态、参考音高及真实 PitchSample，界面操作回调触发 viewModel。
@@ -210,7 +210,7 @@ assertTrue(stopButton.isDisplayed())
 
 ## 第三组：医生患者数据与真实声音回放
 
-### 任务 9：病人数据列表与详情返回
+### Task 9: 病人数据列表与详情返回
 
 **Files:** 新建 `web-admin/src/features/singing/PatientDataListPage.tsx`、`PatientDataListPage.test.tsx`；修改 `web-admin/src/app/router.tsx`、`features/singing/PatientDataPage.tsx`、`layouts/AdminLayout.tsx`；如需复用筛选，新增 `web-admin/src/features/patients/patientListQuery.ts` 并从 PatientListPage.tsx 提取已有逻辑；测试 `web-admin/e2e/admin-workflows.spec.ts`。
 **Interfaces:** 消费既有 `listPatients(query:PatientListQuery,signal?:AbortSignal)`、patientKeys、详情路由；产出 /patient-data 的真实列表，详情导航保存回返 URL（state.backTo），从账户管理进入详情仍使用其原入口。
@@ -229,7 +229,7 @@ expect(screen.queryByText("模块建设中")).not.toBeInTheDocument()
 - [ ] **5. 验证。** 新测试及 PatientDataPage.test.tsx、PatientListPage.test.tsx 全绿，浏览器从侧栏→列表→详情→明细→返回验证筛选连续。
 - [ ] **6. 提交。** 中文消息“接通病人数据列表及筛选返回导航”。
 
-### 任务 10：两种患者音轨回放及三媒体时间同步
+### Task 10: 两种患者音轨回放及三媒体时间同步
 
 **Files:** 新建 `web-admin/src/features/singing/PlaybackTimeline.ts`、`PlaybackTimeline.test.ts`；修改 `PlaybackClock.ts`、`PlaybackClock.test.ts`、`types.ts`、`api.ts`、`SingingDetailPage.tsx`、`SingingDetailPage.test.tsx`、`components/WaveformPlayer.tsx`、`WaveformPlayer.test.tsx`、`web-admin/src/styles/global.css`；更新 `web-admin/e2e/singing-detail.spec.ts`。
 **Interfaces:** 消费任务 3 playback 响应，在 `types.ts` 定义与任务 4 一致的 TypeScript PlaybackMetadata、PlaybackAnchor、ModeChange 和 SongPlaybackMode；产出 `songTimeAt(recordingSeconds:number,metadata:PlaybackMetadata):{seconds:number,playing:boolean,track:SongPlaybackMode}|null`，默认不外推到有效区间之外。扩展 `createPlaybackClock(audio:HTMLMediaElement,video?:HTMLMediaElement|null,accompaniment?:HTMLMediaElement|null,metadata?:PlaybackMetadata)`，新增 `setMode(mode:'combined'|'patient'):void`；既有 Clock play/pause/seek/subscribe/destroy 保留。
@@ -248,7 +248,7 @@ expect(accompaniment.pause).toHaveBeenCalled()
 - [ ] **5. 验证。** 四文件全绿；用真实媒体浏览器跑 singing-detail.spec.ts 验证切轨前后患者波形不变、音频和录像不叠音、失败授权可恢复。
 - [ ] **6. 提交。** 中文消息“修正患者人声音轨语义并实现同步伴奏回放”。
 
-### 任务 11：真实患者采样、双图看板及播放恢复
+### Task 11: 真实患者采样、双图看板及播放恢复
 
 **Files:** 新建 `web-admin/src/features/singing/components/PatientAudioAnalyser.ts`、`VoiceBoardRenderer.ts`、`LiveVoiceBoard.tsx` 及对应 `.test.ts`/`.test.tsx`；修改 `VisualizerAdapter.ts`、`VisualizerAdapter.test.ts`、`MetricPanel.tsx`、`WaveformPlayer.tsx`、`SingingDetailPage.tsx`、`web-admin/src/styles/global.css`、`web-admin/e2e/singing-detail.spec.ts`、`visual.spec.ts`；修改 `server/apps/media/views.py`、`deploy/nginx/default.conf`、`deploy/openresty.vocaease.conf` 仅在真实跨域采样证据要求时进行。
 **Interfaces:** 产出 `PatientAudioAnalyser.attach(media:HTMLMediaElement):Promise<void>`、`sample():PatientAudioFrame`、`resume():Promise<void>`、`close():void`；PatientAudioFrame 含真实时域、频域、rmsDbfs、可信 pitchHz/null 和状态。`VoiceBoardRenderer.draw(frame:PatientAudioFrame,elapsedSeconds:number):void`、`freeze():void`、`reset():void`、`destroy():void`；原 VisualizerAdapter 收窄为该模块生命周期适配，不再调用 Waviz。
@@ -269,7 +269,7 @@ expect(silentFrame.pitchHz).toBeNull()
 
 ## 第四组：完整录制闭环与交付
 
-### 任务 12：真实歌曲、同次录制及迁移回归验收
+### Task 12: 真实歌曲、同次录制及迁移回归验收
 
 **Files:** 修改 `server/tests/test_full_singing_flow.py`、`web-admin/e2e/singing-detail.spec.ts`、`visual.spec.ts`、安卓设备测试 `e2e/PatientClosedLoopTest.kt`；新增 `docs/superpower/reports/2026-10-06-singing-experience-verification.md`；更新 `README.md`、`android-patient/docs/qa-device-matrix.md`、`qiniu-integration-runbook.md`、`deploy/README.production.md`。构建产物和媒体测试工件不纳入 Git。
 **Interfaces:** 消费任务 1–11，产出逐项证据、未验项和可构建产物；不再新增用户功能或改变已批准合同。
