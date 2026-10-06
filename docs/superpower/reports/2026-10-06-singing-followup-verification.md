@@ -30,4 +30,12 @@
 
 最终日志：`/tmp/vocaease-followup-server-final.log`、`/tmp/vocaease-followup-web-final.log`、`/tmp/vocaease-followup-release-approved.log`、`/tmp/vocaease-followup-layout-verified.log`。准备页截图：`/tmp/vocaease-followup-preparation-390.png`。
 
-线上发布与本轮手机更新结果待随后记录。
+## 线上发布与手机更新结果
+
+- 发布提交：`226f1c5cd8fc498a91cb9dc49d6a70eb4a1e2a0a`；部署标签：`deploy-20261006-singing-followup`。
+- [构建与真实生产容器检查](https://github.com/UnclePluto/VocalEase/actions/runs/37466655572)成功；[正式服务器发布](https://github.com/UnclePluto/VocalEase/actions/runs/37468542649)成功。服务器确认上述提交，本轮无待应用迁移。
+- 外网后台、API schema、后台代理 schema 均返回200，新历史伴奏授权参数已出现；匿名患者接口返回401。内部健康检查由正式发布脚本完成。
+- 线上历史《成都》会话实际验收：默认人声，“人声＋伴奏”授权后可选，实际切换成功，伴奏偏移输入可用；患者录音和伴奏分别载入，录像静音。仅切换选项，未播放或创建新的生产录制数据。截图：`/tmp/vocaease-followup-doctor-online.jpg`。
+- 华为 LIO_AN00m 覆盖安装成功，保留应用数据，更新时间为2026-10-06 20:55:37；启动后曲库正常显示《成都》。从手机取回实际安装APK，SHA256与发布包一致。
+- 签名APK：`deploy/releases/226f1c5cd8fc498a91cb9dc49d6a70eb4a1e2a0a/VocaEase-20261006-226f1c5.apk`；SHA256：`6a927b4ee0a8574f17254fa64fca292f44c90bc942804e58b87229b1093f8de7`。证书与此前安装版本一致，未卸载或清除数据。
+- 同目录保留固定镜像摘要发布包及元数据；外网检查记录：`/tmp/vocaease-followup-online-health.json`；安装日志：`/tmp/vocaease-followup-phone-install.log`。
