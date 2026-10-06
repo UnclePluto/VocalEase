@@ -21,6 +21,12 @@ class SongWriteSerializer(serializers.Serializer):
 
 
 class SongReadSerializer(serializers.ModelSerializer):
+    reference_pitch = serializers.SerializerMethodField()
+
+    def get_reference_pitch(self, song):
+        from .reference_pitch_services import reference_pitch_status
+        return reference_pitch_status(song)
+
     alignment_source_fingerprint = serializers.SerializerMethodField()
     alignment_accompaniment_fingerprint = serializers.SerializerMethodField()
     def get_alignment_source_fingerprint(self,obj):
@@ -47,7 +53,7 @@ class SongReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Song
-        fields = ("id", "title", "artist", "genre", "language", "duration_seconds", "source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset", "ingestion_mode", "artifacts", "source_receipt_fingerprint", "vocal_fingerprint", "playback_alignment", "alignment_source_fingerprint", "alignment_accompaniment_fingerprint", "analysis_status", "publication_status", "uploaded_at")
+        fields = ("id", "title", "artist", "genre", "language", "duration_seconds", "source_asset", "vocal_asset", "accompaniment_asset", "lyrics_asset", "ingestion_mode", "artifacts", "source_receipt_fingerprint", "vocal_fingerprint", "reference_pitch", "playback_alignment", "alignment_source_fingerprint", "alignment_accompaniment_fingerprint", "analysis_status", "publication_status", "uploaded_at")
 
 
 class PatientSongReadSerializer(SongReadSerializer):

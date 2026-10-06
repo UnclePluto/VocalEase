@@ -53,3 +53,34 @@ def test_readiness_lists_missing_tracks():
     out=io.StringIO()
     call_command('check_reference_pitch_readiness', song_id=str(song.id), stdout=out)
     assert str(song.id) in out.getvalue() and 'missing' in out.getvalue()
+
+@pytest.mark.django_db
+def test_generation_request_reuses_current_pending_and_ready(monkeypatch):
+    from apps.accounts.models import Role, User
+    from apps.media.models import MediaAsset
+    from apps.songs.models import SongReferencePitch
+    from apps.songs.reference_pitch_services import asset_fingerprint, request_reference_pitch
+    actor=User.objects.create_user(login_id='generation-admin',password='888888',role=Role.SYSTEM_ADMIN,must_change_password=False)
+    song=Song.objects.create(title='真实人声',artist='a',genre='a',language='中文',duration_seconds=10)
+    asset=MediaAsset.objects.create(owner_type='song',owner_id=song.id,media_type='song_vocal',backend='local',object_key='voice.wav',mime='audio/wav',size=20,status='ready',sha256='a'*64,manifest_generation='b'*32,upload_expires_at=timezone.now()+timedelta(hours=1))
+    song.vocal_asset=asset;song.save()
+    monkeypatch.setattr('apps.songs.resources.validate_song_resource',lambda **kw:asset)
+    fingerprint=asset_fingerprint(asset)
+    first=request_reference_pitch(actor=actor,song_id=song.id,expected_fingerprint=fingerprint)
+    second=request_reference_pitch(actor=actor,song_id=song.id,expected_fingerprint=fingerprint)
+    assert second.id == first.id
+    first.status='ready';first.document={'schema_version':1,'origin':{'type':'vocal_yin','fingerprint':fingerprint},'notes':[{'start_ms':0,'end_ms':1000,'midi_note':60,'confidence':1}]};first.save()
+    assert request_reference_pitch(actor=actor,song_id=song.id,expected_fingerprint=fingerprint).id == first.id
+    assert SongReferencePitch.objects.filter(song=song).count() == 1
+    failed=SongReferencePitch.objects.create(song=song,input_asset=asset,input_fingerprint=fingerprint,status='failed')
+    retry=request_reference_pitch(actor=actor,song_id=song.id,expected_fingerprint=fingerprint)
+    assert retry.id not in (first.id,failed.id)
+    assert retry.status == 'pending'
+    first.refresh_from_db()
+    assert first.status == 'ready'
+
+def test_empty_vocal_cannot_be_published_as_ready():
+    from apps.songs.reference_pitch import validate_pitch_document
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError):
+        validate_pitch_document({'schema_version':1,'origin':{'type':'vocal_yin','fingerprint':'real'},'notes':[]},duration_ms=1000)

@@ -37,3 +37,25 @@ def test_reference_pitch_rejects_overlap_and_limits():
             validate_pitch_document({**DOCUMENT, 'notes': notes}, duration_ms=10000)
     with pytest.raises(ValidationError):
         validate_pitch_document({**DOCUMENT, 'origin': {'type':'annotation', 'citation':'x'*(10*1024*1024)}}, duration_ms=10000)
+
+@pytest.mark.django_db
+def test_admin_can_read_reference_generation_status_but_patient_cannot():
+    admin = User.objects.create_user(login_id='pitch-read-admin', password='888888', role=Role.SYSTEM_ADMIN, must_change_password=False)
+    patient = User.objects.create_user(login_id='pitch-read-patient', password='888888', role=Role.PATIENT, must_change_password=False)
+    song = Song.objects.create(title='校准状态', artist='歌手', genre='流行', language='中文', duration_seconds=10)
+    client = APIClient(); client.force_authenticate(admin)
+    url=f'/api/v1/admin/songs/{song.id}/reference-pitch/'
+    response=client.get(url)
+    assert response.status_code == 200
+    assert response.data['data']['status'] == 'missing'
+    client.force_authenticate(patient)
+    assert client.get(url).status_code == 403
+
+@pytest.mark.django_db
+def test_admin_song_exposes_reference_status():
+    from apps.songs.serializers import SongReadSerializer, PatientSongReadSerializer
+    from apps.songs.models import SongReferencePitch
+    song=Song.objects.create(title='状态',artist='a',genre='a',language='中文',duration_seconds=10)
+    SongReferencePitch.objects.create(song=song,status='pending',input_fingerprint='')
+    assert SongReadSerializer(song).data['reference_pitch']['status'] == 'pending'
+    assert 'reference_pitch' not in PatientSongReadSerializer(song).data

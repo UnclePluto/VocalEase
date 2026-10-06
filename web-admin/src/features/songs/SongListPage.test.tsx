@@ -206,3 +206,36 @@ describe('曲库管理页面', () => {
     expect(server.calls('/api/v1/admin/songs/')).toHaveLength(0)
   })
 })
+
+
+it('原唱音高入口使用当前人声指纹生成且同步双击只发一次', async () => {
+  authenticate()
+  const withVoice: Song = { ...song, vocal_asset: 'voice', vocal_fingerprint: 'receipt', artifacts: { vocal: true }, reference_pitch: { status: 'missing', version: null, note_count: 0 } }
+  useList([withVoice])
+  server.use(http.get(`/api/v1/admin/songs/${song.id}/`, () => HttpResponse.json(envelope(withVoice))))
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  server.use(http.post(`/api/v1/admin/songs/${song.id}/reference-pitch/generate/`, async () => { await gate; return HttpResponse.json(envelope({ status: 'pending', version: 'pitch' }), { status: 202 }) }))
+  renderApp('/songs')
+  fireEvent.click(await actionForSong('原唱音高'))
+  const dialog = await screen.findByRole('dialog')
+  const generate = await within(dialog).findByRole('button', { name: '生成音高' })
+  await waitFor(() => expect(generate).toBeEnabled())
+  act(() => { fireEvent.click(generate); fireEvent.click(generate) })
+  await waitFor(() => expect(server.calls(`/api/v1/admin/songs/${song.id}/reference-pitch/generate/`)).toHaveLength(1))
+  expect(server.lastJson(`/api/v1/admin/songs/${song.id}/reference-pitch/generate/`)).toEqual({ expected_fingerprint: 'receipt', force: false })
+  await act(async () => { release() })
+})
+
+it('已有真实原唱音高显示音符数量且重新生成明确提交force', async () => {
+  authenticate()
+  const prepared: Song = { ...song, vocal_asset: 'voice', vocal_fingerprint: 'receipt', artifacts: { vocal: true }, reference_pitch: { status: 'ready', version: 'pitch', note_count: 234 } }
+  useList([prepared])
+  server.use(http.get(`/api/v1/admin/songs/${song.id}/`, () => HttpResponse.json(envelope(prepared))), http.post(`/api/v1/admin/songs/${song.id}/reference-pitch/generate/`, () => HttpResponse.json(envelope({status:'pending',version:'next'}),{status:202})))
+  renderApp('/songs')
+  fireEvent.click(await actionForSong('原唱音高'))
+  const dialog=await screen.findByRole('dialog')
+  expect(await within(dialog).findByText('已保存 234 个音符片段')).toBeInTheDocument()
+  fireEvent.click(await within(dialog).findByRole('button',{name:'重新生成'}))
+  await waitFor(()=>expect(server.lastJson(`/api/v1/admin/songs/${song.id}/reference-pitch/generate/`)).toEqual({expected_fingerprint:'receipt',force:true}))
+})

@@ -30,32 +30,62 @@ def import_reference_pitch(*, actor, song_id: UUID, document: dict, expected_fin
     return SongReferencePitch.objects.create(song=song, status='ready', input_asset=song.source_asset, input_fingerprint=expected_fingerprint, document=data)
 
 
+def current_reference_pitch(song, *, ready_only=False):
+    rows = SongReferencePitch.objects.filter(song=song).exclude(status='stale')
+    if ready_only:
+        rows = rows.filter(status='ready')
+    vocal_fingerprint = asset_fingerprint(song.vocal_asset)
+    for row in rows:
+        expected = song.source_receipt_fingerprint if row.document.get('origin', {}).get('type') == 'annotation' else vocal_fingerprint
+        if row.input_fingerprint == expected:
+            return row
+    return None
+
+
+def reference_pitch_status(song):
+    pitch = current_reference_pitch(song)
+    return {'status': pitch.status if pitch else 'missing', 'version': str(pitch.id) if pitch else None,
+            'note_count': len(pitch.document.get('notes', [])) if pitch else 0}
+
+
 def read_reference_pitch(*, song_id: UUID, version: UUID | None = None) -> dict:
-    query = SongReferencePitch.objects.filter(song_id=song_id)
     if version:
-        pitch = get_object_or_404(query, pk=version)
+        pitch = get_object_or_404(SongReferencePitch, song_id=song_id, pk=version)
     else:
-        song = get_object_or_404(Song, pk=song_id)
-        pitch = next((row for row in query.filter(status='ready') if row.input_fingerprint == (asset_fingerprint(song.vocal_asset) if row.document.get('origin', {}).get('type') == 'vocal_yin' else song.source_receipt_fingerprint)), None)
+        pitch = current_reference_pitch(get_object_or_404(Song, pk=song_id), ready_only=True)
     if pitch is None:
         return {'status': 'missing', 'version': None, 'schema_version': 1, 'notes': []}
     return {'status': pitch.status, 'version': str(pitch.id), **pitch.document}
 
 
-def request_reference_pitch(*, actor, song_id, expected_fingerprint):
-    from .resources import validate_song_resource
+def queue_reference_pitch(song, *, force=False):
+    """调用者已在歌曲事务内核验真实人声音轨；同一输入只保持一个运行任务。"""
     from .tasks import generate_reference_pitch_task
+    fingerprint = asset_fingerprint(song.vocal_asset)
+    rows = SongReferencePitch.objects.filter(song=song, input_asset=song.vocal_asset, input_fingerprint=fingerprint)
+    active = rows.filter(status__in=['pending', 'processing']).first()
+    if active:
+        return active
+    latest = rows.exclude(status='stale').first()
+    if latest and latest.status == 'ready' and not force:
+        return latest
+    pitch = SongReferencePitch.objects.create(song=song, input_asset=song.vocal_asset, input_fingerprint=fingerprint)
+    transaction.on_commit(lambda: generate_reference_pitch_task.delay(song_id=str(song.id), expected_fingerprint=fingerprint, version=str(pitch.id)), robust=True)
+    return pitch
+
+
+def request_reference_pitch(*, actor, song_id, expected_fingerprint, force=False):
+    from .resources import validate_song_resource
+    if not actor.is_active or actor.deleted_at or actor.must_change_password or actor.role not in (Role.SYSTEM_ADMIN, Role.DOCTOR):
+        raise PermissionDenied()
     with transaction.atomic():
         song = get_object_or_404(Song.objects.select_for_update(), pk=song_id, deleted_at__isnull=True)
         if not song.vocal_asset_id:
             raise SongStateConflict('缺少真实歌曲人声音轨')
         asset = validate_song_resource(song_id=song.id, asset_id=song.vocal_asset_id, media_type='song_vocal')
-        fingerprint = asset_fingerprint(asset)
-        if fingerprint != expected_fingerprint:
+        if asset_fingerprint(asset) != expected_fingerprint:
             raise SongStateConflict('人声音轨已变更')
-        pitch = SongReferencePitch.objects.create(song=song, input_asset=asset, input_fingerprint=fingerprint)
-        transaction.on_commit(lambda: generate_reference_pitch_task.delay(song_id=str(song.id), expected_fingerprint=fingerprint, version=str(pitch.id)))
-        return pitch
+        return queue_reference_pitch(song, force=force)
 
 
 def generate_reference_pitch(*, song_id: UUID, expected_fingerprint: str, version: UUID) -> None:

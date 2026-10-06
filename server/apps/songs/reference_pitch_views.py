@@ -31,6 +31,12 @@ class PatientReferencePitchView(APIView):
 class AdminReferencePitchView(APIView):
     permission_classes = [IsAdminNamespaceUser, MustChangePasswordPermission]
 
+    @extend_schema(responses={200: ApiEnvelopeSerializer})
+    def get(self, request, song_id):
+        from .reference_pitch_services import reference_pitch_status
+        song = get_object_or_404(Song, pk=song_id, deleted_at__isnull=True)
+        return api_response(data=reference_pitch_status(song), request_id=request.request_id)
+
     @extend_schema(request=ApiEnvelopeSerializer, responses={200: ReferencePitchEnvelopeSerializer})
     def post(self, request, song_id):
         if not isinstance(request.data, dict) or 'expected_fingerprint' not in request.data:
@@ -47,5 +53,8 @@ class AdminGenerateReferencePitchView(APIView):
         from .reference_pitch_services import request_reference_pitch
         if not isinstance(request.data, dict) or not isinstance(request.data.get('expected_fingerprint'), str):
             raise ValidationError({'expected_fingerprint': '须提供预期人声音轨指纹'})
-        pitch = request_reference_pitch(actor=request.user, song_id=song_id, expected_fingerprint=request.data['expected_fingerprint'])
+        force = request.data.get('force', False)
+        if type(force) is not bool:
+            raise ValidationError({'force': '须为布尔值'})
+        pitch = request_reference_pitch(actor=request.user, song_id=song_id, expected_fingerprint=request.data['expected_fingerprint'], force=force)
         return api_response(data={'version':str(pitch.id), 'status':pitch.status}, request_id=request.request_id, status_code=202)

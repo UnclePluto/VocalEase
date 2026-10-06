@@ -22,7 +22,7 @@ def validate_pitch_document(value: object, *, duration_ms: int) -> dict:
     if not isinstance(origin.get('citation' if origin['type'] == 'annotation' else 'fingerprint'), str) or not origin.get('citation' if origin['type'] == 'annotation' else 'fingerprint', '').strip():
         invalid()
     notes = value.get('notes')
-    if not isinstance(notes, list) or len(notes) > 100000:
+    if not isinstance(notes, list) or not notes or len(notes) > 100000:
         invalid()
     previous_end = 0
     normalized = []

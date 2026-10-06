@@ -89,6 +89,8 @@ def update_song_resources(*, actor, request_id: str, song: Song, updates: dict, 
         if "vocal_asset" in updates:
             from .models import SongReferencePitch
             SongReferencePitch.objects.filter(song=locked, status__in=['pending','processing']).update(status='stale')
+            from .reference_pitch_services import queue_reference_pitch
+            queue_reference_pitch(locked)
         record(actor=actor, action="song.resources_update", target=locked, changes={field: {"from": str(expected[field]) if expected[field] else None, "to": str(value)} for field, value in updates.items()}, request_id=request_id)
         return locked
 
