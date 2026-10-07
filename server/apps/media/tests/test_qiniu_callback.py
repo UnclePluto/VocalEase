@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+from datetime import timedelta
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
@@ -16,7 +17,7 @@ from apps.media.backends.qiniu import QiniuStorageBackend
 from apps.media.contracts import ObjectMetadata
 from qiniu import Auth
 from apps.media.models import MediaAsset
-from apps.media.services import STORAGE_BACKEND_FACTORIES, create_upload_grant
+from apps.media.services import STORAGE_BACKEND_FACTORIES, MediaConflict, complete_qiniu_callback, create_upload_grant
 from apps.patients.services import create_patient
 
 
@@ -40,6 +41,63 @@ def test_qiniu_policy_locks_key_type_size_and_callback_without_network():
     assert policy["callbackBodyType"] == "application/x-www-form-urlencoded"
     assert "key=$(key)" in policy["callbackBody"]
     assert str(uuid4()) not in grant.object_key
+
+
+@pytest.mark.parametrize("reissue", [False, True])
+@pytest.mark.parametrize("media_type,mime", [("lyrics", "text/plain"), ("lyrics", "application/json"), ("singing_audio", "audio/mpeg")])
+def test_qiniu_lrc_policy_accepts_detected_binary_without_changing_other_media(reissue, media_type, mime):
+    backend = QiniuStorageBackend(
+        access_key="access-key", secret_key="secret-key", bucket="private-bucket", domain="https://cdn.example.test",
+        callback_url="https://api.example.test/api/v1/media/qiniu/callback/", environment="production",
+    )
+    kwargs = dict(owner_id=uuid4(), media_type=media_type, mime=mime, size=64)
+    if reissue:
+        grant = backend.reissue_upload_grant(object_key=f"production/{media_type}/object", expires_at=timezone.now() + timedelta(minutes=5), **kwargs)
+    else:
+        grant = backend.create_upload_grant(**kwargs)
+    policy = json.loads(base64.urlsafe_b64decode(grant.upload_token.split(":")[-1] + "=="))
+    if media_type == "lyrics" and mime == "text/plain":
+        # 线上七牛将 LRC 正文识别为 octet-stream；mimeLimit 会独立于 detectMime 检查正文。
+        assert "application/octet-stream" in policy["mimeLimit"].split(";")
+        assert "text/plain" in policy["mimeLimit"].split(";")
+        assert policy["detectMime"] == 1
+    else:
+        assert policy["mimeLimit"] == mime
+        assert policy["detectMime"] == 1
+    assert policy["scope"] == f"private-bucket:{grant.object_key}"
+    assert policy["fsizeLimit"] == 64
+    assert policy["insertOnly"] == 1
+    assert policy["callbackBodyType"] == "application/x-www-form-urlencoded"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("media_type,declared_mime,stored_mime,size_delta,allowed", [
+    ("lyrics", "text/plain", "application/octet-stream", 0, True),
+    ("lyrics", "text/plain", "text/plain", 0, True),
+    ("lyrics", "application/json", "application/octet-stream", 0, False),
+    ("lyrics", "text/plain", "text/html", 0, False),
+    ("song_source", "audio/mpeg", "application/octet-stream", 0, False),
+    ("lyrics", "text/plain", "application/octet-stream", 1, False),
+])
+def test_qiniu_callback_binary_mime_compatibility_is_limited_to_lrc(media_type, declared_mime, stored_mime, size_delta, allowed):
+    backend = QiniuStorageBackend(
+        access_key="ak", secret_key="sk", bucket="private-bucket", domain="https://cdn.example.test",
+        callback_url="https://api.example.test/callback/", environment="test",
+        stat_transport=lambda key: ObjectMetadata(key, 3 + size_delta, stored_mime, etag="etag"),
+    )
+    asset, grant = create_upload_grant(owner_type="song", owner_id=uuid4(), media_type=media_type, mime=declared_mime, size=3, backend=backend)
+    payload = {"key": grant.object_key, "fsize": 3 + size_delta, "mime": stored_mime, "hash": "etag"}
+    if allowed:
+        complete_qiniu_callback(payload=payload, backend=backend)
+        asset.refresh_from_db()
+        assert asset.status == MediaAsset.Status.READY
+        assert asset.mime == stored_mime
+    else:
+        with pytest.raises(MediaConflict):
+            complete_qiniu_callback(payload=payload, backend=backend)
+        asset.refresh_from_db()
+        assert asset.status == MediaAsset.Status.UPLOADING
+        assert asset.mime == declared_mime
 
 
 def test_qiniu_callback_signature_covers_path_query_and_raw_body():

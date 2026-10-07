@@ -30,6 +30,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -201,6 +203,50 @@ class AuthFlowTest {
         assertFalse(remote.logoutCalled)
         composeRule.onNodeWithText("密码已修改，请重新登录").assertExists()
         composeRule.onNodeWithTag("login-submit").assertExists()
+    }
+
+    @Test
+    fun 首次改密使用真实响应解析和系统安全存储后返回登录() {
+        val vault = AndroidTokenVault(context)
+        val passwordCalls = java.util.concurrent.atomic.AtomicInteger()
+        val client = com.vocaease.patient.core.network.NetworkModule
+            .createAuthenticatedHttpClient(vault, diagnosticSink = {})
+            .newBuilder()
+            .addInterceptor { chain ->
+                val path = chain.request().url.encodedPath
+                val data = if (path.endsWith("change-password/")) {
+                    passwordCalls.incrementAndGet()
+                    "{}"
+                } else {
+                    """{"access":"test-access","refresh":"test-refresh",
+                        "refresh_expires_at":"2026-10-01T08:00:00+00:00",
+                        "user":{"login_id":"test-patient","role":"patient","must_change_password":true}}"""
+                }
+                okhttp3.Response.Builder().request(chain.request()).code(200).message("OK")
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .body("""{"code":"ok","message":"","data":$data,"request_id":"test-change"}"""
+                        .toResponseBody("application/json".toMediaType())).build()
+            }.build()
+        val remote = VocaEaseAuthRemoteDataSource(com.vocaease.patient.core.network.RawAuthApi(
+            com.vocaease.patient.core.network.NetworkModule.createApi("https://example.invalid/", client),
+        ))
+        val repository = AuthRepository(
+            tokenVault = vault,
+            remote = remote,
+            refreshCoordinator = com.vocaease.patient.core.network.RefreshCoordinator(vault, remote),
+            patientIdentity = PatientIdentityRemoteDataSource { error("改密前不应读取患者资料") },
+        )
+        runBlocking { repository.login("test-patient", "initial-password") }
+        composeRule.setContent { AuthFlow(repository) }
+        composeRule.onNodeWithTag("change-old-password").performTextInput("initial-password")
+        composeRule.onNodeWithTag("change-new-password").performTextInput("new-password")
+        composeRule.onNodeWithTag("change-password-submit").performClick()
+        composeRule.waitUntil(5_000) { repository.state.value == AuthState.LoggedOut }
+        composeRule.onNodeWithText("密码已修改，请重新登录").assertExists()
+        composeRule.onNodeWithTag("login-submit").assertExists()
+        assertEquals(1, passwordCalls.get())
+        assertNull(vault.sessionSnapshot().accessToken)
+        assertFalse(context.getFileStreamPath(AndroidTokenVault.FILE_NAME).exists())
     }
 
     private fun cleanVault() {

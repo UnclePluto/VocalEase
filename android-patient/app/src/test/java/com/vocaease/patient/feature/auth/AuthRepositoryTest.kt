@@ -166,6 +166,44 @@ class AuthRepositoryTest {
     }
 
     @Test
+    fun `登录诊断区分角色和缺失刷新令牌并清除会话`() = runBlocking {
+        listOf(
+            session().copy(role = AccountRole.DOCTOR) to "AUTH-ROLE",
+            session().copy(refresh = null) to "AUTH-REFRESH-MISSING",
+        ).forEach { (response, code) ->
+            val vault = FakeTokenVault()
+            val repository = repository(vault, FakeAuthRemote(loginResult = response))
+            repository.login("patient-001", "secret")
+            val error = repository.operation.value as AuthOperationState.Error
+            assertTrue(error.message.contains(code))
+            assertFalse(error.message.contains("secret"))
+            assertEquals(AuthState.LoggedOut, repository.state.value)
+            assertNull(vault.refreshValue())
+        }
+    }
+
+    @Test
+    fun `登录字段异常显示固定诊断码且未知异常不泄露响应内容`() = runBlocking {
+        listOf(
+            "access 不能为空" to "AUTH-ACCESS-EMPTY",
+            "refresh 不能为空" to "AUTH-REFRESH-EMPTY",
+            "user.login_id 不能为空" to "AUTH-ACCOUNT-EMPTY",
+            "refresh_expires_at 不是有效 ISO-8601 时间" to "AUTH-EXPIRY-FORMAT",
+            "sensitive-server-response" to "AUTH-CONTRACT",
+        ).forEach { (message, code) ->
+            val repository = repository(
+                FakeTokenVault(),
+                FakeAuthRemote(loginFailure = com.vocaease.patient.core.network.NetworkContractException(message)),
+            )
+            repository.login("patient-001", "secret")
+            val error = repository.operation.value as AuthOperationState.Error
+            assertTrue(error.message.contains(code))
+            assertFalse(error.message.contains("sensitive-server-response"))
+            assertFalse(error.message.contains("secret"))
+        }
+    }
+
+    @Test
     fun `首次登录必须改密时不能进入主页`() = runBlocking {
         val remote = FakeAuthRemote(loginResult = session(mustChangePassword = true))
         val identity = FakePatientIdentity()
@@ -216,6 +254,9 @@ class AuthRepositoryTest {
         assertNull(repository.currentAuthenticatedLease())
         assertNull(vault.sessionSnapshot().accessToken)
         assertNull(vault.refreshValue())
+        val error = repository.operation.value as AuthOperationState.Error
+        assertTrue(error.message.contains("PATIENT-ID-FORMAT"))
+        assertTrue(error.message.startsWith("获取患者资料失败"))
     }
 
     @Test
@@ -699,6 +740,7 @@ private class FakeTokenVault(
 
 private class FakeAuthRemote(
     private val loginResult: AuthSession = session(),
+    private val loginFailure: Throwable? = null,
     private val refreshResult: AuthSession = session(),
     private val refreshFailure: Throwable? = null,
     private val logoutFailure: Throwable? = null,
@@ -713,6 +755,7 @@ private class FakeAuthRemote(
 
     override suspend fun login(request: LoginRequestDto): AuthSession {
         lastLogin = request
+        loginFailure?.let { throw it }
         return loginResult
     }
 

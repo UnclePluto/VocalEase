@@ -626,7 +626,21 @@ class AuthRepository(
             is ApiFailure.Unauthorized -> if (endpoint == ApiEndpoint.AUTH_LOGIN) "手机号或密码错误" else failure.userMessage
             else -> failure.userMessage
         }
-        is AuthContractException, is NetworkContractException -> "服务返回的登录信息不完整，请稍后重试"
+        is AuthContractException, is NetworkContractException -> {
+            val stage = if (endpoint == ApiEndpoint.PATIENT_ME) "获取患者资料" else "登录"
+            // 仅展示固定诊断文案，不能直接显示异常及其可能包含的响应值。
+            val detail = when (message) {
+                "仅支持患者账号登录" -> "账号不是患者账号，请使用患者账号登录（AUTH-ROLE）"
+                "安卓登录响应缺少 refresh token" -> "服务未返回刷新令牌（AUTH-REFRESH-MISSING）"
+                "access 不能为空" -> "服务返回的访问令牌为空（AUTH-ACCESS-EMPTY）"
+                "refresh 不能为空" -> "服务返回的刷新令牌为空（AUTH-REFRESH-EMPTY）"
+                "user.login_id 不能为空" -> "服务返回的登录账号为空（AUTH-ACCOUNT-EMPTY）"
+                "refresh_expires_at 不是有效 ISO-8601 时间" -> "服务返回的令牌到期时间格式错误（AUTH-EXPIRY-FORMAT）"
+                "patient.id 不是有效 UUID" -> "服务返回的患者 ID 格式错误（PATIENT-ID-FORMAT）"
+                else -> "服务返回的数据不符合要求（AUTH-CONTRACT）"
+            }
+            "${stage}失败：$detail。请将此提示截图反馈。"
+        }
         is SessionExpiredException -> "登录状态已失效，请重新登录"
         is VaultInvalidatedException -> "安全会话保存失败，请重新登录"
         is GeneralSecurityException, is ProviderException, is ErrnoException -> "安全会话保存失败，请重新登录"

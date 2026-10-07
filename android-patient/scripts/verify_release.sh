@@ -90,4 +90,6 @@ echo "[6/7] 隐私扫描器稳定正例与负例"
 echo "[7/7] release 源码、DEX、resources 与 native 隐私扫描"
 ./scripts/scan_release_privacy.sh app/src/main/java "$apk"
 
+python3 ./scripts/check_release_response_types.py "$apk" app/build/outputs/mapping/release/mapping.txt
+
 echo "release 验证通过（API 主机与凭据未输出）"
