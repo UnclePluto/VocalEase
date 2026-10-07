@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+from datetime import timedelta
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
@@ -40,6 +41,33 @@ def test_qiniu_policy_locks_key_type_size_and_callback_without_network():
     assert policy["callbackBodyType"] == "application/x-www-form-urlencoded"
     assert "key=$(key)" in policy["callbackBody"]
     assert str(uuid4()) not in grant.object_key
+
+
+@pytest.mark.parametrize("reissue", [False, True])
+@pytest.mark.parametrize("media_type,mime", [("lyrics", "text/plain"), ("lyrics", "application/json"), ("singing_audio", "audio/mpeg")])
+def test_qiniu_lrc_policy_accepts_detected_binary_and_preserves_declared_mime(reissue, media_type, mime):
+    backend = QiniuStorageBackend(
+        access_key="access-key", secret_key="secret-key", bucket="private-bucket", domain="https://cdn.example.test",
+        callback_url="https://api.example.test/api/v1/media/qiniu/callback/", environment="production",
+    )
+    kwargs = dict(owner_id=uuid4(), media_type=media_type, mime=mime, size=64)
+    if reissue:
+        grant = backend.reissue_upload_grant(object_key=f"production/{media_type}/object", expires_at=timezone.now() + timedelta(minutes=5), **kwargs)
+    else:
+        grant = backend.create_upload_grant(**kwargs)
+    policy = json.loads(base64.urlsafe_b64decode(grant.upload_token.split(":")[-1] + "=="))
+    if media_type == "lyrics" and mime == "text/plain":
+        # 线上七牛将 LRC 正文识别为 octet-stream；mimeLimit 会独立于 detectMime 检查正文。
+        assert "application/octet-stream" in policy["mimeLimit"].split(";")
+        assert "text/plain" in policy["mimeLimit"].split(";")
+        assert policy["detectMime"] == 0
+    else:
+        assert policy["mimeLimit"] == mime
+        assert policy["detectMime"] == 1
+    assert policy["scope"] == f"private-bucket:{grant.object_key}"
+    assert policy["fsizeLimit"] == 64
+    assert policy["insertOnly"] == 1
+    assert policy["callbackBodyType"] == "application/x-www-form-urlencoded"
 
 
 def test_qiniu_callback_signature_covers_path_query_and_raw_body():

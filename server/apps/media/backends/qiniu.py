@@ -36,11 +36,19 @@ class QiniuStorageBackend:
     def from_settings(cls, **kwargs):
         return cls(access_key=settings.QINIU_ACCESS_KEY, secret_key=settings.QINIU_SECRET_KEY, bucket=settings.QINIU_BUCKET, domain=settings.QINIU_DOMAIN, callback_url=settings.QINIU_CALLBACK_URL, environment=settings.MEDIA_ENVIRONMENT, **kwargs)
 
+    @staticmethod
+    def _upload_mime_policy(*, media_type: str, mime: str) -> dict[str, Any]:
+        if media_type == "lyrics" and mime == "text/plain":
+            # 七牛可能把 LRC 正文识别为二进制；mimeLimit 即使 detectMime=0 仍检查正文。
+            # 保留上传端的 text/plain，让 stat/回调与资产一致；绑定歌曲前仍严格解析 UTF-8 LRC。
+            return {"mimeLimit": "text/plain;application/octet-stream", "detectMime": 0}
+        return {"mimeLimit": mime, "detectMime": 1}
+
     def create_upload_grant(self, *, owner_id: UUID, media_type: str, mime: str, size: int) -> UploadGrant:
         validate_media_request(media_type=media_type, mime=mime, size=size)
         object_key = build_object_key(self.environment, media_type)
         deadline = int((timezone.now() + timedelta(seconds=settings.MEDIA_UPLOAD_GRANT_TTL_SECONDS)).timestamp())
-        policy = {"scope": f"{self.bucket}:{object_key}", "insertOnly": 1, "fsizeLimit": size, "mimeLimit": mime, "detectMime": 1, "callbackUrl": self.callback_url, "callbackBodyType": self.callback_content_type, "callbackBody": "key=$(key)&hash=$(etag)&fsize=$(fsize)&mime=$(mimeType)"}
+        policy = {"scope": f"{self.bucket}:{object_key}", "insertOnly": 1, "fsizeLimit": size, **self._upload_mime_policy(media_type=media_type, mime=mime), "callbackUrl": self.callback_url, "callbackBodyType": self.callback_content_type, "callbackBody": "key=$(key)&hash=$(etag)&fsize=$(fsize)&mime=$(mimeType)"}
         self.last_policy = policy
         token = self.auth.upload_token(self.bucket, object_key, expires=settings.MEDIA_UPLOAD_GRANT_TTL_SECONDS, policy=policy.copy(), strict_policy=True)
         return UploadGrant(object_key=object_key, expires_at=datetime.fromtimestamp(deadline, tz=datetime_timezone.utc), upload_url=settings.QINIU_UPLOAD_URL, upload_token=token, fields={"key": object_key, "token": token})
@@ -57,7 +65,7 @@ class QiniuStorageBackend:
             raise StorageValidationError("上传凭证剩余时间不足")
         policy = {
             "scope": f"{self.bucket}:{object_key}", "insertOnly": 1, "fsizeLimit": size,
-            "mimeLimit": mime, "detectMime": 1, "callbackUrl": self.callback_url,
+            **self._upload_mime_policy(media_type=media_type, mime=mime), "callbackUrl": self.callback_url,
             "callbackBodyType": self.callback_content_type,
             "callbackBody": "key=$(key)&hash=$(etag)&fsize=$(fsize)&mime=$(mimeType)",
             "deadline": deadline,
