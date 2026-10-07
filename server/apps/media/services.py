@@ -404,9 +404,13 @@ def complete_qiniu_callback(*, payload: Mapping[str, Any], backend: QiniuStorage
             receipt = backend.verify_completion(locked.object_key, payload)
         except StorageValidationError as exc:
             raise MediaConflict(str(exc), code="media_verification_failed") from exc
+        if locked.media_type == "lyrics" and locked.mime == "text/plain" and receipt.mime == "application/octet-stream":
+            # 仅兼容七牛对 LRC 的类型识别；receipt 已通过回调与可信 stat 比对。
+            # 记录实际存储类型以供后续 stat 校验，歌词绑定仍须通过严格内容解析。
+            locked.mime = receipt.mime
         _check_receipt(locked, receipt)
         locked.etag, locked.sha256, locked.status = receipt.etag, receipt.sha256, MediaAsset.Status.READY
-        locked.save(update_fields=["etag", "sha256", "status", "updated_at"])
+        locked.save(update_fields=["mime", "etag", "sha256", "status", "updated_at"])
         return locked
 
 

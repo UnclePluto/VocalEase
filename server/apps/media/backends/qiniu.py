@@ -39,9 +39,9 @@ class QiniuStorageBackend:
     @staticmethod
     def _upload_mime_policy(*, media_type: str, mime: str) -> dict[str, Any]:
         if media_type == "lyrics" and mime == "text/plain":
-            # 七牛可能把 LRC 正文识别为二进制；mimeLimit 即使 detectMime=0 仍检查正文。
-            # 保留上传端的 text/plain，让 stat/回调与资产一致；绑定歌曲前仍严格解析 UTF-8 LRC。
-            return {"mimeLimit": "text/plain;application/octet-stream", "detectMime": 0}
+            # 七牛可能把 LRC 正文识别为二进制；回调据可信 stat 保存实际类型，
+            # 绑定歌曲前仍严格解析 UTF-8 LRC，不能仅凭 MIME 判断歌词有效。
+            return {"mimeLimit": "text/plain;application/octet-stream", "detectMime": 1}
         return {"mimeLimit": mime, "detectMime": 1}
 
     def create_upload_grant(self, *, owner_id: UUID, media_type: str, mime: str, size: int) -> UploadGrant:

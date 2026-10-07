@@ -42,10 +42,10 @@ def test_qiniu_lrc_upload_callback_binding_and_content_validation(settings, monk
     policy = json.loads(base64.urlsafe_b64decode(grant["upload_token"].split(":")[-1] + "=="))
     # 重现线上存储边界：正文被识别为二进制，但浏览器发送的文件类型为 text/plain。
     assert "application/octet-stream" in policy["mimeLimit"].split(";")
-    assert policy["detectMime"] == 0
     key, etag = grant["object_key"], _qiniu_etag(content)
-    objects[key] = ObjectMetadata(key, len(content), "text/plain", etag=etag)
-    body = urlencode({"key": key, "hash": etag, "fsize": len(content), "mime": "text/plain"}).encode()
+    # 实际七牛回调和 stat 都记录 octet-stream，不能假设其沿用客户端声明类型。
+    objects[key] = ObjectMetadata(key, len(content), "application/octet-stream", etag=etag)
+    body = urlencode({"key": key, "hash": etag, "fsize": len(content), "mime": "application/octet-stream"}).encode()
     authorization = f"QBox {backend.auth.token_of_request(backend.callback_url, body.decode(), 'application/x-www-form-urlencoded')}"
     callback = APIClient().post("/api/v1/media/qiniu/callback/", body, content_type="application/x-www-form-urlencoded", HTTP_AUTHORIZATION=authorization)
     assert callback.status_code == 200, callback.content
@@ -76,4 +76,4 @@ def test_qiniu_lrc_upload_callback_binding_and_content_validation(settings, monk
         assert linked.status_code == 400, linked.content
         assert song.lyrics_asset_id is None
         assert "lyrics" in str(linked.json())
-    assert MediaAsset.objects.get(pk=grant["asset_id"]).mime == "text/plain"
+    assert MediaAsset.objects.get(pk=grant["asset_id"]).mime == "application/octet-stream"

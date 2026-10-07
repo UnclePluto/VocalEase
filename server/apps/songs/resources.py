@@ -20,8 +20,10 @@ def _validated_song_resource(*, song_id: UUID, asset_id: UUID, media_type: str) 
     asset = MediaAsset.objects.filter(pk=asset_id, deleted_at__isnull=True).first()
     if not asset or asset.owner_type != "song" or asset.owner_id != song_id or asset.media_type != media_type or asset.status != "ready":
         raise SourceAssetInvalid("歌曲资源不可用", code="song_resource_invalid")
-    if media_type == "lyrics" and (asset.mime != "text/plain" or asset.size > 1024 * 1024):
-        raise SourceAssetInvalid("歌词类型或大小不符合人工上传要求", code="song_resource_invalid")
+    if media_type == "lyrics":
+        allowed_mimes = {"text/plain", "application/octet-stream"} if asset.backend == "qiniu" else {"text/plain"}
+        if asset.mime not in allowed_mimes or asset.size > 1024 * 1024:
+            raise SourceAssetInvalid("歌词类型或大小不符合人工上传要求", code="song_resource_invalid")
     try:
         metadata = backend_for_asset(asset).stat(asset.object_key)
     except Exception as exc:
