@@ -356,7 +356,20 @@ private fun AppNavHost(
             val route = entry.toRoute<AppRoute.Recording>()
             recordingContent(
                 route.draftId,
-                { navController.popBackStack() },
+                {
+                    val preparation = navController.previousBackStackEntry
+                        ?.takeIf { it.destination.hasRoute<AppRoute.Preparation>() }
+                        ?.toRoute<AppRoute.Preparation>()
+                    if (preparation == null) {
+                        navController.popBackStack()
+                    } else {
+                        // 播放器交接给录制后已释放，返回须重建准备页及其 ViewModelStore。
+                        navController.navigate(preparation) {
+                            popUpTo(preparation) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                },
                 { draftId ->
                     navController.navigate(AppRoute.Review(draftId)) {
                         popUpTo(AppRoute.Recording(draftId)) { inclusive = true }

@@ -1,6 +1,12 @@
 package com.vocaease.patient.ui
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Column
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
@@ -37,6 +43,38 @@ import org.junit.runner.RunWith
 class AppNavigationTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
+
+    @Test
+    fun 取消演唱返回新准备资源且重复返回不积累页面() {
+        composeRule.setContent {
+            AuthenticatedApp(
+                initialRoute = AppRoute.Catalog,
+                catalogContent = { openSong -> Button(onClick = { openSong("song-return") }) { Text("打开歌曲") } },
+                preparationContent = { songId, onBack, onRecording ->
+                    // 模拟交接后被录制释放的播放器，验证真实导航的 ViewModelStore 生命周期。
+                    val resource: PreparationResourceTestViewModel = viewModel()
+                    Column {
+                        Text("歌曲:$songId")
+                        Text(if (resource.released) "播放器已释放，无法就绪" else "新播放器已就绪")
+                        Button(onClick = { resource.released = true; onRecording("draft-return") }) { Text("进入录制") }
+                        Button(onClick = onBack) { Text("返回曲库") }
+                    }
+                },
+                recordingContent = { _, onBack, _ -> Button(onClick = onBack) { Text("取消录制") } },
+            )
+        }
+        composeRule.onNodeWithText("打开歌曲").performClick()
+        repeat(3) {
+            composeRule.onNodeWithText("新播放器已就绪").assertIsDisplayed()
+            composeRule.onNodeWithText("进入录制").performClick()
+            composeRule.onNodeWithText("取消录制").performClick()
+            composeRule.onNodeWithText("歌曲:song-return").assertIsDisplayed()
+            composeRule.onNodeWithText("新播放器已就绪").assertIsDisplayed()
+        }
+        composeRule.onNodeWithText("返回曲库").performClick()
+        composeRule.onNodeWithText("打开歌曲").assertIsDisplayed()
+        composeRule.onNodeWithText("去唱歌").assertIsDisplayed()
+    }
 
     @Test
     fun 两标签可切换且详情返回后恢复原主页底栏() {
@@ -167,4 +205,8 @@ class AppNavigationTest {
         InstrumentationRegistry.getInstrumentation().uiAutomation
             .executeShellCommand("screencap -p /sdcard/task11-profile-390x844.png").close()
     }
+}
+
+class PreparationResourceTestViewModel : ViewModel() {
+    var released by mutableStateOf(false)
 }
