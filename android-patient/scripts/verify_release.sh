@@ -42,6 +42,9 @@ fi
 [[ -n "$apkanalyzer" && -x "$apkanalyzer" ]] || { echo "找不到 PATH 或 Android SDK cmdline-tools 中的 apkanalyzer" >&2; exit 2; }
 : "${VOCAEASE_API_BASE_URL:?请设置 VOCAEASE_API_BASE_URL（完整 HTTPS URL，且以 / 结尾）}"
 
+# 校验真实构建门禁拒绝重复接口路径，再核对当前发布地址。
+./scripts/test_release_api_base_url.sh
+
 # 与 release lifecycle 共用 buildSrc 的 java.net.URI 校验，避免 shell 与构建规则漂移。
 ./gradlew --offline -PvocaeaseApiBaseUrl="$VOCAEASE_API_BASE_URL" :app:validateReleaseApiBaseUrl >/dev/null
 
