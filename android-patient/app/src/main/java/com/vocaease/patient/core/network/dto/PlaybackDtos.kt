@@ -3,6 +3,7 @@ package com.vocaease.patient.core.network.dto
 import com.vocaease.patient.core.media.PlaybackMetadata
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class PlaybackBindingDto(
@@ -28,7 +29,14 @@ data class SongPlaybackGrantDto(
 data class ReferenceNoteDto(@SerialName("start_ms") val startMs: Long, @SerialName("end_ms") val endMs: Long, @SerialName("midi_note") val midiNote: Float, val confidence: Float)
 
 @Serializable
-data class ReferencePitchDto(val status: String, val version: String?, @SerialName("schema_version") val schemaVersion: Int = 1, val notes: List<ReferenceNoteDto> = emptyList())
+data class ReferencePitchDto(
+    val status: String,
+    val version: String?,
+    @SerialName("schema_version") val schemaVersion: Int = 1,
+    val notes: List<ReferenceNoteDto> = emptyList(),
+    // 服务端 origin 是可扩展的来源字典，自动分析与人工标注使用不同属性。
+    val origin: JsonObject? = null,
+)
 
 
 @Serializable
