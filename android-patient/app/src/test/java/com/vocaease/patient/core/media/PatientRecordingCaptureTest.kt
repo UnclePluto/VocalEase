@@ -5,6 +5,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PatientRecordingCaptureTest {
+    @Test fun pauseAndResumeBothCameraAndPatientAudioWithoutRestarting()=runBlocking {
+        val camera=FakeCamera();val mic=FakeMic()
+        val capture=PatientRecordingCapture(camera,mic,RecordingMuxer { _,_,_,_,_ -> MuxedRecording(1,0) },Dispatchers.Unconfined)
+        val out=File.createTempFile("pause-recording-",".mp4")
+        capture.start(out);camera.listener(CaptureEvent.Started)
+        capture.pause();assertTrue(camera.paused);assertTrue(mic.paused)
+        capture.resume();assertFalse(camera.paused);assertFalse(mic.paused)
+        assertEquals(1,mic.starts)
+        capture.release();out.delete();Unit
+    }
     @Test fun onlyOneMicAndBothFinalizeBeforeReview() = runBlocking {
         val camera=FakeCamera();val microphone=FakeMic()
         val muxEntered=CompletableDeferred<Unit>();val finishMux=CompletableDeferred<Unit>()
@@ -51,6 +61,9 @@ class PatientRecordingCaptureTest {
         capture.release();out.delete();Unit
     }
     private class FakeCamera:RecordingCapture {
+        var paused=false
+        override suspend fun pause(){paused=true}
+        override suspend fun resume(){paused=false}
         var origin:Long=System.nanoTime()
         override val captureStartNanos get()=origin
         override var listener:suspend(CaptureEvent)->Unit={}
@@ -60,6 +73,9 @@ class PatientRecordingCaptureTest {
         override fun stop(){stops++}
     }
     private class FakeMic:PatientMicrophone {
+        var paused=false
+        override fun pause(){paused=true}
+        override fun resume(){paused=false}
         val done=CompletableDeferred<AudioCaptureResult>();var starts=0;var first=System.nanoTime()
         override fun start(output:File,onPcm:(PcmBlock)->Unit){starts++;onPcm(PcmBlock(ShortArray(2208),48000,first))}
         override suspend fun stop():AudioCaptureResult=done.await()

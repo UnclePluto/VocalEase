@@ -15,6 +15,37 @@ import org.junit.Test
 
 class RecordingCoordinatorTest {
     @Test
+    fun `退出弹框暂停采集播放且取消后同次录制继续并扣除暂停时长`() = runBlocking {
+        var now = 1_000_000_000L
+        val capture = FakeCapture()
+        val playback = FakePlayback()
+        val publisher = FakePublisher()
+        val coordinator = DefaultRecordingCoordinator(capture, playback, { now }, FakeTempFiles(), publisher)
+        coordinator.takeOver("draft")
+        coordinator.onCountdownFinished()
+        capture.emit(CaptureEvent.Started)
+        now += 2_000_000_000L
+        assertTrue(coordinator.pause())
+        assertTrue(capture.paused)
+        assertFalse(playback.playing)
+        assertTrue(coordinator.state.value is RecordingState.Paused)
+        now += 10_000_000_000L
+        assertEquals(2_000L, coordinator.recordingDurationMillis)
+        assertTrue(coordinator.resume())
+        assertFalse(capture.paused)
+        assertTrue(playback.playing)
+        now += 1_000_000_000L
+        assertEquals(3_000L, coordinator.recordingDurationMillis)
+        assertEquals(1, capture.startCount)
+        assertEquals(0, publisher.calls)
+        assertTrue(coordinator.pause())
+        coordinator.interrupt(RecordingInterruption.CANCELLED)
+        coordinator.close()
+        capture.emit(CaptureEvent.Finalized(3_000))
+        assertEquals(0, publisher.calls)
+        assertFalse(coordinator.resume())
+    }
+    @Test
     fun `Countdown中断后倒计时协程迟到不得创建暂存启动采集或播放`() = runBlocking {
         for (reason in listOf(RecordingInterruption.AUDIO, RecordingInterruption.CAMERA)) {
             val capture = FakeCapture()
@@ -379,6 +410,9 @@ class RecordingCoordinatorTest {
 }
 
 private class FakeCapture(private val calls: MutableList<String> = mutableListOf()) : RecordingCapture {
+    var paused = false
+    override suspend fun pause() { paused = true }
+    override suspend fun resume() { paused = false }
     override var listener: suspend (CaptureEvent) -> Unit = {}
     var frontCamera = false
     var audioEnabled = false
@@ -400,6 +434,8 @@ private class FakeCapture(private val calls: MutableList<String> = mutableListOf
 }
 
 private class FakePlayback(private val calls: MutableList<String> = mutableListOf()) : RecordingPlayback {
+    override suspend fun pause(): Boolean { playing = false; return true }
+    override suspend fun resume(): Boolean { play(); return true }
     override val currentPositionMillis: Long = 0
     var playing = false
     var playCount = 0

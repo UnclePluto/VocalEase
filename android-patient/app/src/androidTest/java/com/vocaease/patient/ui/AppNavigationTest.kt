@@ -1,6 +1,7 @@
 package com.vocaease.patient.ui
 
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.viewmodel.initializer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
@@ -37,6 +38,37 @@ import org.junit.runner.RunWith
 class AppNavigationTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
+
+    @Test
+    fun 演唱确认返回后准备页使用新播放器而非已释放交接资源() {
+        var initialized = 0
+        composeRule.setContent {
+            AuthenticatedApp(
+                initialRoute = AppRoute.Catalog,
+                catalogContent = { onSong -> Button(onClick = { onSong("song") }) { Text("选择歌曲") } },
+                preparationContent = { _, _, onRecording ->
+                    val resource = androidx.compose.runtime.remember { NavigationPreviewResource() }
+                    val model: NavigationPreviewModel = androidx.lifecycle.viewmodel.compose.viewModel(
+                        factory = androidx.lifecycle.viewmodel.viewModelFactory {
+                            initializer { initialized++; NavigationPreviewModel(resource) }
+                        },
+                    )
+                    androidx.compose.foundation.layout.Column {
+                        Text(if (model.resource.released) "歌曲缓冲中" else "歌曲已缓冲")
+                        Button(onClick = { model.resource.released = true; onRecording("draft") }) { Text("开始演唱") }
+                    }
+                },
+                recordingContent = { _, onBack, _ -> Button(onClick = onBack) { Text("确认不保存返回") } },
+            )
+        }
+        composeRule.onNodeWithText("选择歌曲").performClick()
+        composeRule.onNodeWithText("歌曲已缓冲").assertIsDisplayed()
+        composeRule.onNodeWithText("开始演唱").performClick()
+        composeRule.onNodeWithText("确认不保存返回").performClick()
+        composeRule.onNodeWithText("歌曲已缓冲").assertIsDisplayed()
+        composeRule.onNodeWithText("歌曲缓冲中").assertDoesNotExist()
+        assertEquals(2, initialized)
+    }
 
     @Test
     fun 两标签可切换且详情返回后恢复原主页底栏() {
@@ -168,3 +200,6 @@ class AppNavigationTest {
             .executeShellCommand("screencap -p /sdcard/task11-profile-390x844.png").close()
     }
 }
+
+private class NavigationPreviewResource { var released = false }
+private class NavigationPreviewModel(val resource: NavigationPreviewResource) : androidx.lifecycle.ViewModel()

@@ -36,6 +36,8 @@ interface RecordingCapture {
     var listener: suspend (CaptureEvent) -> Unit
     suspend fun bindFrontCamera()
     fun start(output: File)
+    suspend fun pause() { error("采集暂停未实现") }
+    suspend fun resume() { error("采集恢复未实现") }
     fun stop()
     fun release() = Unit
 }
@@ -47,6 +49,8 @@ interface RecordingPlayback {
     suspend fun switchMode(mode: SongPlaybackMode): Boolean = false
     val currentPositionMillis: Long
     fun play()
+    suspend fun pause(): Boolean = false
+    suspend fun resume(): Boolean = false
     fun stop()
     fun setOnEnded(listener: () -> Unit) = Unit
 }
@@ -82,6 +86,8 @@ interface RecordingCoordinator : AutoCloseable {
     suspend fun takeOver(draftId: String, stagingIdentity: RecordingStagingIdentity) = takeOver(draftId)
     suspend fun onCountdownFinished()
     suspend fun stop()
+    suspend fun pause(): Boolean = false
+    suspend fun resume(): Boolean = false
     suspend fun onPlaybackEnded()
     suspend fun interrupt(reason: RecordingInterruption)
     override fun close()
@@ -135,9 +141,11 @@ class DefaultRecordingCoordinator(
     override val state: StateFlow<RecordingState> = mutableState.asStateFlow()
     override val playbackPositionMillis: Long get() = playback.currentPositionMillis.coerceAtLeast(0)
     override val recordingDurationMillis: Long
-        get() = (mutableState.value as? RecordingState.Recording)?.let {
-            ((clockNanos() - it.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
-        } ?: terminalDurationMillis.get()
+        get() = when (val current = mutableState.value) {
+            is RecordingState.Recording -> ((clockNanos() - current.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
+            is RecordingState.Paused -> ((current.pausedAtNanos - current.recording.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
+            else -> terminalDurationMillis.get()
+        }
     private var draftId: String? = null
     private var stagingIdentity: RecordingStagingIdentity? = null
     private var video: File? = null
@@ -196,12 +204,48 @@ class DefaultRecordingCoordinator(
 
     override suspend fun stop() = mutex.withLock { requestStop() }
 
+    override suspend fun pause(): Boolean = mutex.withLock {
+        if (closed.get()) return@withLock false
+        if (machine.state is RecordingState.Paused) return@withLock true
+        if (machine.state !is RecordingState.Recording) return@withLock false
+        try {
+            check(playback.pause()) { "歌曲暂停失败" }
+            capture.pause()
+            update(RecordingEvent.Paused(clockNanos()))
+            // 暂停区间不写入成片，不添加静止播放锚点；恢复时重新校准映射。
+            true
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            publicationAllowed.set(false)
+            interruptInternal(RecordingInterruption.CAMERA)
+            issueStopOnce()
+            false
+        }
+    }
+
+    override suspend fun resume(): Boolean = mutex.withLock {
+        if (closed.get() || machine.state !is RecordingState.Paused) return@withLock false
+        try {
+            capture.resume()
+            check(playback.resume()) { "歌曲恢复失败" }
+            update(RecordingEvent.Resumed(clockNanos()))
+            recordAnchor()
+            machine.state is RecordingState.Recording
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            publicationAllowed.set(false)
+            interruptInternal(RecordingInterruption.CAMERA)
+            issueStopOnce()
+            false
+        }
+    }
+
     override suspend fun onPlaybackEnded() = mutex.withLock { requestStop(playbackEnded = true) }
 
     override suspend fun interrupt(reason: RecordingInterruption) {
         if (!reason.isRecoverableSystemInterruption()) publicationAllowed.set(false)
         mutex.withLock {
-            if (reason.isRecoverableSystemInterruption() && machine.state is RecordingState.Recording) {
+            if (reason.isRecoverableSystemInterruption() && (machine.state is RecordingState.Recording || machine.state is RecordingState.Paused)) {
                 pendingInterruption = pendingInterruption ?: reason
                 requestStop()
             } else if (reason.isRecoverableSystemInterruption() && machine.state === RecordingState.Finalizing) {
@@ -277,7 +321,7 @@ class DefaultRecordingCoordinator(
                 interruptInternal(event.reason)
             }
             is CaptureEvent.Finalized -> {
-                if (event.interruption != null && machine.state is RecordingState.Recording) {
+                if (event.interruption != null && (machine.state is RecordingState.Recording || machine.state is RecordingState.Paused)) {
                     pendingInterruption = pendingInterruption ?: event.interruption
                     requestStop()
                 }
@@ -322,7 +366,7 @@ class DefaultRecordingCoordinator(
 
     private fun requestStop(playbackEnded: Boolean = false) {
         metadataRecorder?.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
-        if (machine.state !is RecordingState.Recording && machine.state !== RecordingState.Finalizing) return
+        if (machine.state !is RecordingState.Recording && machine.state !is RecordingState.Paused && machine.state !== RecordingState.Finalizing) return
         snapshotRecordingDuration()
         update(if (playbackEnded) RecordingEvent.PlaybackEnded else RecordingEvent.StopRequested)
         issueStopOnce()
@@ -341,10 +385,9 @@ class DefaultRecordingCoordinator(
     }
 
     private fun snapshotRecordingDuration() {
-        val recording = mutableState.value as? RecordingState.Recording ?: return
-        terminalDurationMillis.set(
-            ((clockNanos() - recording.startedAtNanos) / 1_000_000L).coerceAtLeast(0),
-        )
+        if (mutableState.value is RecordingState.Recording || mutableState.value is RecordingState.Paused) {
+            terminalDurationMillis.set(recordingDurationMillis)
+        }
     }
 
     private fun cleanupPlaintext() {

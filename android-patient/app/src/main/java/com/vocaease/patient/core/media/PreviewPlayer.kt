@@ -127,6 +127,7 @@ class PreviewPlayer internal constructor(
     private var currentGrant: PreviewGrant? = null
     private var refreshUsed = false
     private var resumeAfterReady = false
+    private var pausedDuringBuffering = false
     private var mediaLoaded = false
     private var activePreparationToken: PreparationToken? = null
     private var pendingPreparation: CompletableDeferred<Result<Unit>>? = null
@@ -339,6 +340,7 @@ class PreviewPlayer internal constructor(
         ) return
         when (val event = command.event) {
             PreviewEngineEvent.Ready -> if (mediaLoaded) {
+                pausedDuringBuffering = false
                 modeState.value = requestedMode
                 pendingSwitch?.complete(true); pendingSwitch = null; switchBackup = null
                 mutableState.value = PreviewState.Buffered
@@ -388,6 +390,12 @@ class PreviewPlayer internal constructor(
     }
 
     private suspend fun applyPlay(command: PreviewCommand.Play) {
+        if (mediaLoaded && pausedDuringBuffering && mutableState.value is PreviewState.Buffering) {
+            resumeAfterReady = true
+            pausedDuringBuffering = false
+            command.completion.complete(true)
+            return
+        }
         if (mutableState.value !is PreviewState.Buffered || !mediaLoaded) {
             command.completion.complete(false)
             return
@@ -398,12 +406,15 @@ class PreviewPlayer internal constructor(
     }
 
     private suspend fun applyPause(command: PreviewCommand.Pause) {
-        if (mutableState.value !is PreviewState.Playing || !mediaLoaded) {
+        val state = mutableState.value
+        if (!mediaLoaded || (state !is PreviewState.Playing && state !is PreviewState.Buffered && state !is PreviewState.Buffering)) {
             command.completion.complete(false)
             return
         }
         engine.pause()
-        mutableState.value = PreviewState.Buffered
+        resumeAfterReady = false
+        pausedDuringBuffering = state is PreviewState.Buffering
+        if (state !is PreviewState.Buffering) mutableState.value = PreviewState.Buffered
         command.completion.complete(true)
     }
 

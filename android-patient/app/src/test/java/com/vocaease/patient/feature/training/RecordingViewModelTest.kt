@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -18,6 +19,49 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RecordingViewModelTest {
+    @Test
+    fun `返回先暂停二次确认取消继续确认丢弃且重复确认不重复导航`() = runBlocking {
+        val coordinator = FakeRecordingSession()
+        val gateway = FakeRecordingDraftGateway()
+        val model = RecordingViewModel("draft", coordinator, gateway, {}, kotlinx.coroutines.Dispatchers.Unconfined)
+        model.start()
+        coordinator.emit(RecordingState.Recording(1L, 0L))
+        model.requestExit()
+        assertTrue(model.state.value.showExitConfirmation)
+        assertEquals(1, coordinator.pauseCount)
+        assertEquals(0, coordinator.closeCount)
+        assertEquals(0, gateway.discardCount)
+        model.cancelExit()
+        assertFalse(model.state.value.showExitConfirmation)
+        assertEquals(1, coordinator.resumeCount)
+        model.requestExit()
+        assertTrue(model.confirmExit())
+        assertFalse(model.confirmExit())
+        assertEquals(1, gateway.discardCount)
+        assertEquals(1, coordinator.closeCount)
+        assertEquals(listOf(RecordingInterruption.CANCELLED), coordinator.interruptions)
+    }
+
+    @Test
+    fun `等待录制启动时请求返回不得错过暂停且音高失败可单独重试`() = runBlocking {
+        val coordinator = FakeRecordingSession().apply {
+            playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion="bound", alignmentVerified=true, accompanimentOffsetMs=0)
+        }
+        var failing = true
+        val model = RecordingViewModel("draft",coordinator,FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
+            referenceRepository=ReferencePitchRepository { _,version -> if(failing) error("offline") else com.vocaease.patient.core.network.dto.ReferencePitchDto("ready",version) })
+        model.start()
+        assertEquals(ReferencePitchState.Failed,model.state.value.referencePitch)
+        failing = false
+        model.retryReferencePitch()
+        assertTrue(model.state.value.referencePitch is ReferencePitchState.Ready)
+        val request = async { model.requestExit() }
+        assertFalse(model.state.value.showExitConfirmation)
+        coordinator.emit(RecordingState.Recording(1L,0L))
+        request.await()
+        assertTrue(model.state.value.showExitConfirmation)
+        assertTrue(model.confirmExit())
+    }
     @Test fun `录制读取真实歌词失败也不阻止启动`() = runBlocking {
         val model = RecordingViewModel("draft",FakeRecordingSession(),FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
             lyricsRepository = LyricsRepository { SongLyricsDto(listOf(LyricLineDto(1000,"真实歌词"))) })
@@ -224,6 +268,20 @@ class RecordingViewModelTest {
 }
 
 private class FakeRecordingSession : RecordingCoordinator {
+    var pauseCount = 0
+    var resumeCount = 0
+    override suspend fun pause(): Boolean {
+        val recording = mutable.value as? RecordingState.Recording ?: return false
+        pauseCount++
+        mutable.value = RecordingState.Paused(recording, recording.startedAtNanos)
+        return true
+    }
+    override suspend fun resume(): Boolean {
+        val paused = mutable.value as? RecordingState.Paused ?: return false
+        resumeCount++
+        mutable.value = paused.recording
+        return true
+    }
     override var playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null
     private val mutable = MutableStateFlow<RecordingState>(RecordingState.Countdown(3))
     override val state: StateFlow<RecordingState> = mutable
@@ -251,6 +309,8 @@ private class FakeRecordingSession : RecordingCoordinator {
 }
 
 private class FakeRecordingDraftGateway : RecordingDraftGateway {
+    var discardCount = 0
+    override suspend fun discard(draftId: String) { discardCount++ }
     var ackCount = 0
     var interruption: RecordingInterruption? = null
     var ackFailure = false

@@ -28,7 +28,13 @@ data class SongPlaybackGrantDto(
 data class ReferenceNoteDto(@SerialName("start_ms") val startMs: Long, @SerialName("end_ms") val endMs: Long, @SerialName("midi_note") val midiNote: Float, val confidence: Float)
 
 @Serializable
-data class ReferencePitchDto(val status: String, val version: String?, @SerialName("schema_version") val schemaVersion: Int = 1, val notes: List<ReferenceNoteDto> = emptyList())
+data class ReferencePitchDto(
+    val status: String,
+    val version: String?,
+    @SerialName("schema_version") val schemaVersion: Int = 1,
+    val notes: List<ReferenceNoteDto> = emptyList(),
+    val origin: kotlinx.serialization.json.JsonObject? = null,
+)
 
 
 @Serializable

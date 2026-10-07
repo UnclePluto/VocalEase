@@ -71,6 +71,8 @@ private class PreviewSessionRecordingPlayback(
     override val activeMode get() = session.activeMode
     override val playbackState get() = session.state
     override suspend fun switchMode(mode: SongPlaybackMode) = !stopped.get() && session.switchMode(mode)
+    override suspend fun pause() = !stopped.get() && session.pause()
+    override suspend fun resume() = !stopped.get() && session.play()
 
     init {
         scope.launch {

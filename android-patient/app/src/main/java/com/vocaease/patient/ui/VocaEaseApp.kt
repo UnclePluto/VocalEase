@@ -356,7 +356,16 @@ private fun AppNavHost(
             val route = entry.toRoute<AppRoute.Recording>()
             recordingContent(
                 route.draftId,
-                { navController.popBackStack() },
+                {
+                    val preparation = navController.previousBackStackEntry
+                    if (preparation?.destination?.hasRoute<AppRoute.Preparation>() == true) {
+                        val songId = preparation.toRoute<AppRoute.Preparation>().songId
+                        navController.navigate(AppRoute.Preparation(songId)) {
+                            popUpTo<AppRoute.Preparation> { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    } else navController.popBackStack()
+                },
                 { draftId ->
                     navController.navigate(AppRoute.Review(draftId)) {
                         popUpTo(AppRoute.Recording(draftId)) { inclusive = true }
@@ -849,14 +858,16 @@ private fun RecordingRoute(
     }
     val leave = {
         scope.launch {
-            recordingViewModel.leave()
-            onBack()
+            recordingViewModel.requestExit()
         }
         Unit
     }
     BackHandler(onBack = leave)
     RecordingScreen(
         onRetryLyrics = recordingViewModel::retryLyrics,
+        onRetryReferencePitch = recordingViewModel::retryReferencePitch,
+        onConfirmExit = { scope.launch { if (recordingViewModel.confirmExit()) onBack() } },
+        onCancelExit = { scope.launch { recordingViewModel.cancelExit() } },
         state = state,
         preview = {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())

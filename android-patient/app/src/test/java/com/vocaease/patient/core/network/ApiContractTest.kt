@@ -61,6 +61,17 @@ class ApiContractTest {
     }
 
     @Test
+    fun `参考音高接受服务端的出处字段并显示绑定版本`() = runBlocking {
+        val version = "10000000-0000-4000-8000-000000000001"
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
+            """{"code":"ok","message":"","request_id":"reference","data":{"status":"ready","version":"$version","schema_version":1,"origin":{"type":"vocal_yin","fingerprint":"verified-input"},"notes":[{"start_ms":1000,"end_ms":2000,"midi_note":60.5,"confidence":0.9}]}}"""))
+        val repository = com.vocaease.patient.feature.training.ReferencePitchRepository { id, bound -> api().referencePitch(id, bound).data }
+        val state = repository.load("song", version)
+        assertTrue("真实服务端音高数据不应显示加载失败：$state", state is com.vocaease.patient.feature.training.ReferencePitchState.Ready)
+        assertEquals("/api/v1/patient/songs/song/reference-pitch/?version=$version", server.takeRequest().path)
+    }
+
+    @Test
     fun `真实歌词接口解析毫秒与中文文本`() = runBlocking {
         server.enqueue(MockResponse().setHeader("Content-Type","application/json").setBody(
             """{"code":"ok","message":"","request_id":"lyrics","data":{"lines":[{"time_ms":1200,"text":"真实歌词"}]}}"""))

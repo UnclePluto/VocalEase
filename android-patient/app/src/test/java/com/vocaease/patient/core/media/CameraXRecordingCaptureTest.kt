@@ -4,6 +4,7 @@ import androidx.camera.core.CameraSelector
 import com.vocaease.patient.feature.training.RecordingInterruption
 import java.io.File
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -13,6 +14,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CameraXRecordingCaptureTest {
+    @Test
+    fun `暂停与恢复等待录像后端确认而非提前展示弹框`() = runBlocking {
+        val backend = FakeCameraXBackend()
+        val capture = CameraXRecordingCapture(backend, kotlinx.coroutines.Dispatchers.Unconfined)
+        val paused = async { capture.pause() }
+        backend.pauseEntered.await()
+        assertTrue(!paused.isCompleted)
+        backend.pauseConfirmed.complete(Unit)
+        paused.await()
+        val resumed = async { capture.resume() }
+        backend.resumeEntered.await()
+        assertTrue(!resumed.isCompleted)
+        backend.resumeConfirmed.complete(Unit)
+        resumed.await()
+        capture.release()
+    }
     @Test
     fun `生产适配层固定前摄且CameraX仅采集视频`() = runBlocking {
         val backend = FakeCameraXBackend()
@@ -110,6 +127,12 @@ class CameraXRecordingCaptureTest {
 }
 
 private class FakeCameraXBackend : CameraXBackend {
+    val pauseConfirmed = CompletableDeferred<Unit>()
+    val resumeConfirmed = CompletableDeferred<Unit>()
+    val pauseEntered = CompletableDeferred<Unit>()
+    val resumeEntered = CompletableDeferred<Unit>()
+    override suspend fun pause() { pauseEntered.complete(Unit); pauseConfirmed.await() }
+    override suspend fun resume() { resumeEntered.complete(Unit); resumeConfirmed.await() }
     var selector: CameraSelector? = null
     var audioEnabled = false
     var stopCount = 0

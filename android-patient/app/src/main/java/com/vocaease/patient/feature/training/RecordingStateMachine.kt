@@ -17,6 +17,7 @@ sealed interface RecordingState {
         val startedAtNanos: Long,
         val playbackOffsetMillis: Long,
     ) : RecordingState
+    data class Paused(val recording: Recording, val pausedAtNanos: Long) : RecordingState
     data object Finalizing : RecordingState
     data class Reviewable(val durationMillis: Long) : RecordingState
     data class Interrupted(val reason: RecordingInterruption) : RecordingState
@@ -25,6 +26,8 @@ sealed interface RecordingState {
 sealed interface RecordingEvent {
     data object CountdownTick : RecordingEvent
     data class CaptureStarted(val startedAtNanos: Long, val playbackOffsetMillis: Long) : RecordingEvent
+    data class Paused(val atNanos: Long) : RecordingEvent
+    data class Resumed(val atNanos: Long) : RecordingEvent
     data object StopRequested : RecordingEvent
     data object PlaybackEnded : RecordingEvent
     data class Finalized(val durationMillis: Long) : RecordingEvent
@@ -53,7 +56,11 @@ class RecordingStateMachine {
                 else RecordingState.Starting
             current === RecordingState.Starting && event is RecordingEvent.CaptureStarted ->
                 RecordingState.Recording(event.startedAtNanos, event.playbackOffsetMillis)
-            current is RecordingState.Recording &&
+            current is RecordingState.Recording && event is RecordingEvent.Paused ->
+                RecordingState.Paused(current, event.atNanos)
+            current is RecordingState.Paused && event is RecordingEvent.Resumed ->
+                current.recording.copy(startedAtNanos = current.recording.startedAtNanos + (event.atNanos - current.pausedAtNanos).coerceAtLeast(0))
+            (current is RecordingState.Recording || current is RecordingState.Paused) &&
                 (event === RecordingEvent.StopRequested || event === RecordingEvent.PlaybackEnded) -> RecordingState.Finalizing
             current === RecordingState.Finalizing &&
                 (event === RecordingEvent.StopRequested || event === RecordingEvent.PlaybackEnded) -> current

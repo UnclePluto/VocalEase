@@ -11,6 +11,8 @@ interface PatientMicrophone {
     var onFailure: (Throwable) -> Unit get() = {}
         set(value) {}
     fun start(output: File, onPcm: (PcmBlock) -> Unit)
+    fun pause() { error("采音暂停未实现") }
+    fun resume() { error("采音恢复未实现") }
     suspend fun stop(): AudioCaptureResult
     fun release()
 }
@@ -23,6 +25,9 @@ class MicrophonePcmCapture : PatientMicrophone {
     private var recorder: AudioRecord? = null
     private var result = CompletableDeferred<AudioCaptureResult>()
     private var worker: Job? = null
+    private val recordingGate = PcmRecordingGate()
+    override fun pause() = recordingGate.pause()
+    override fun resume() = recordingGate.resume()
     override fun start(output: File, onPcm: (PcmBlock) -> Unit) {
         check(worker == null)
         worker = scope.launch {
@@ -30,11 +35,12 @@ class MicrophonePcmCapture : PatientMicrophone {
             try {
                 val audio = createRecorder(); recorder = audio
                 val rate = audio.sampleRate
-                encoder = PatientAudioEncoder(output, rate)
+                val activeEncoder = PatientAudioEncoder(output, rate)
+                encoder = activeEncoder
                 val buffer = ShortArray((rate * .046).toInt())
                 audio.startRecording()
                 val startEstimate = System.nanoTime()
-                var frames = 0L; var origin: Long? = null
+                var origin: Long? = null
                 val stamp = AudioTimestamp()
                 while (!stopping.get()) {
                     val count = audio.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
@@ -43,10 +49,12 @@ class MicrophonePcmCapture : PatientMicrophone {
                     if (origin == null) {
                         origin = if (audio.getTimestamp(stamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) stamp.nanoTime - stamp.framePosition * 1_000_000_000L / rate else startEstimate
                     }
-                    encoder.write(buffer, count, frames * 1_000_000L / rate)
-                    onPcm(PcmBlock(buffer.copyOf(count), rate, origin + frames * 1_000_000_000L / rate))
-                    frames += count
+                    recordingGate.encode(count) { frames ->
+                        activeEncoder.write(buffer, count, frames * 1_000_000L / rate)
+                        onPcm(PcmBlock(buffer.copyOf(count), rate, origin!! + frames * 1_000_000_000L / rate))
+                    }
                 }
+                val frames = recordingGate.frameCount
                 encoder.finish(frames * 1_000_000L / rate)
                 result.complete(AudioCaptureResult(rate, origin ?: startEstimate, frames * 1000 / rate))
             } catch (error: Throwable) {
@@ -79,5 +87,20 @@ class MicrophonePcmCapture : PatientMicrophone {
             record.release()
         }
         error("麦克风不支持所需采样率")
+    }
+}
+
+/** 暂停期间继续排空系统采音缓冲，但不编码、不发出音高样本；恢复接在同一有效时间轴上。 */
+internal class PcmRecordingGate {
+    private var paused = false
+    private var frames = 0L
+    val frameCount: Long @Synchronized get() = frames
+    @Synchronized fun pause() { paused = true }
+    @Synchronized fun resume() { paused = false }
+    @Synchronized fun encode(count: Int, write: (Long) -> Unit): Boolean {
+        if (paused) return false
+        write(frames)
+        frames += count
+        return true
     }
 }

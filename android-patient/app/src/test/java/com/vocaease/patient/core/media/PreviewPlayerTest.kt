@@ -21,6 +21,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreviewPlayerTest {
+    @Test fun `缓冲中的返回确认仍可暂停取消后在缓冲结束继续播放`()=runBlocking {
+        val engine=FakePreviewEngine()
+        val player=PreviewPlayer(engine,PreviewGrantSource { PreviewGrant("https://private.invalid/source",Instant.MAX) })
+        try {
+            player.prepare(SONG_ID);engine.emit(PreviewEngineEvent.Ready)
+            withTimeout(2000){while(player.state.value !is PreviewState.Buffered) yield()}
+            player.play();engine.position=1000;engine.emit(PreviewEngineEvent.Buffering)
+            withTimeout(2000){while(player.state.value !is PreviewState.Buffering) yield()}
+            assertTrue("缓冲中必须能暂停",player.pause())
+            engine.emit(PreviewEngineEvent.Ready)
+            withTimeout(2000){while(player.state.value !is PreviewState.Buffered) yield()}
+            assertEquals(1000L,player.currentPositionMillis)
+            player.play();engine.emit(PreviewEngineEvent.Buffering)
+            withTimeout(2000){while(player.state.value !is PreviewState.Buffering) yield()}
+            assertTrue(player.pause())
+            assertTrue("取消退出应允许缓冲完成后恢复播放",player.play())
+            engine.emit(PreviewEngineEvent.Ready)
+            withTimeout(2000){while(player.state.value !is PreviewState.Playing) yield()}
+            assertEquals(1000L,player.currentPositionMillis)
+        } finally {player.release();player.awaitReleased()}
+    }
     @Test fun verifiedOffsetKeepsCanonicalSongPositionAcrossSwitchAndRewind()=runBlocking {
         val engine=FakePreviewEngine()
         val source=object:PreviewGrantSource {

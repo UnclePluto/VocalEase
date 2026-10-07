@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -37,6 +38,7 @@ interface RecordingDraftGateway {
     suspend fun load(draftId: String): RecordingDraftInfo
     suspend fun acknowledgeHandoff(draftId: String)
     suspend fun markInterrupted(draftId: String, reason: RecordingInterruption, durationMillis: Long)
+    suspend fun discard(draftId: String) = Unit
 }
 
 class AccountScopedRecordingDraftGateway(
@@ -70,6 +72,7 @@ class AccountScopedRecordingDraftGateway(
     ) {
         storage.markRecordingInterrupted(draftId, durationMillis, reason.safeMessage())
     }
+    override suspend fun discard(draftId: String) = storage.deleteReviewDraft(draftId)
 }
 
 class RecordingViewModel(
@@ -84,11 +87,13 @@ class RecordingViewModel(
 ) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val lifecycleMutex = Mutex()
+    private val exitMutex = Mutex()
     private val acknowledged = AtomicBoolean()
     private val left = AtomicBoolean()
     private var ticker: Job? = null
     private var lyricsJob: Job? = null
     private var lyricsSongId: String? = null
+    private var referenceJob: Job? = null
     @Volatile private var cleanupJob: Job? = null
     private val mutableState = MutableStateFlow(RecordingUiState())
     val state: StateFlow<RecordingUiState> = mutableState.asStateFlow()
@@ -109,14 +114,7 @@ class RecordingViewModel(
             ) }
             lyricsSongId = info.songId
             retryLyrics()
-            val version = coordinator.playbackBinding?.referenceVersion
-            val aligned = coordinator.playbackBinding?.let { it.alignmentVerified && it.accompanimentOffsetMs != null } == true
-            if (version != null && !aligned) updateState { it.copy(referencePitch = ReferencePitchState.Unaligned) }
-            if (version != null && aligned && referenceRepository != null) scope.launch {
-                updateState { it.copy(referencePitch=ReferencePitchState.Loading) }
-                val reference=referenceRepository.load(info.songId,version)
-                if(!left.get()) updateState { it.copy(referencePitch=reference) }
-            }
+            retryReferencePitch()
             if (info.accountScopeHash.isNotBlank() && info.sessionId.isNotBlank() && info.creationKey.isNotBlank()) {
                 coordinator.takeOver(
                     draftId,
@@ -150,7 +148,74 @@ class RecordingViewModel(
         }
     }
 
-    suspend fun stop() = coordinator.stop()
+    fun retryReferencePitch() {
+        if (left.get()) return
+        val id = lyricsSongId ?: return
+        val repository = referenceRepository ?: return
+        val binding = coordinator.playbackBinding
+        val version = binding?.referenceVersion ?: return
+        if (!binding.alignmentVerified || binding.accompanimentOffsetMs == null) {
+            updateState { it.copy(referencePitch = ReferencePitchState.Unaligned) }
+            return
+        }
+        referenceJob?.cancel()
+        referenceJob = scope.launch {
+            updateState { it.copy(referencePitch = ReferencePitchState.Loading) }
+            val result = repository.load(id, version)
+            if (!left.get()) updateState { it.copy(referencePitch = result) }
+        }
+    }
+
+    suspend fun requestExit() = exitMutex.withLock {
+        if (left.get() || mutableState.value.showExitConfirmation) return@withLock
+        updateState { it.copy(exitBusy = true) }
+        try {
+            val active = kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                coordinator.state.first { it !is RecordingState.Countdown && it !== RecordingState.Starting }
+            }
+            val paused = when (active) {
+                is RecordingState.Recording -> coordinator.pause()
+                is RecordingState.Paused -> true
+                else -> false
+            }
+            if (active == null || (!paused && coordinator.state.value is RecordingState.Recording)) {
+                coordinator.interrupt(RecordingInterruption.CAMERA)
+            }
+            if (!left.get()) updateState { it.copy(showExitConfirmation = true, canResumeRecording = paused) }
+        } finally { updateState { it.copy(exitBusy = false) } }
+    }
+
+    suspend fun cancelExit() = exitMutex.withLock {
+        if (left.get() || !mutableState.value.showExitConfirmation) return@withLock
+        updateState { it.copy(exitBusy = true) }
+        try {
+            val resumed = coordinator.resume()
+            updateState { it.copy(
+                showExitConfirmation = false,
+                errorMessage = if (resumed) null else "录制已中断，请返回准备页重新开始",
+                navigateReviewDraftId = if (coordinator.state.value is RecordingState.Reviewable) draftId else null,
+            ) }
+        } finally { updateState { it.copy(exitBusy = false) } }
+    }
+
+    suspend fun confirmExit(): Boolean = exitMutex.withLock {
+        if (!mutableState.value.showExitConfirmation || mutableState.value.exitBusy) return@withLock false
+        updateState { it.copy(exitBusy = true, canResumeRecording = false) }
+        try {
+            leave()
+            gateway.discard(draftId)
+            updateState { it.copy(showExitConfirmation = false, navigateReviewDraftId = null) }
+            true
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            updateState { it.copy(errorMessage = "录制已停止，清理失败，请再次确认返回") }
+            false
+        } finally { updateState { it.copy(exitBusy = false) } }
+    }
+
+    suspend fun stop() = exitMutex.withLock {
+        if (!left.get() && !mutableState.value.showExitConfirmation && !mutableState.value.exitBusy) coordinator.stop()
+    }
 
     suspend fun onHostStopped() = coordinator.interrupt(RecordingInterruption.CAMERA)
 
@@ -170,6 +235,7 @@ class RecordingViewModel(
             coordinator.close()
             ticker?.cancel()
             lyricsJob?.cancel()
+            referenceJob?.cancel()
             return
         }
         val cleanupScope = CoroutineScope(SupervisorJob() + cleanupDispatcher)
@@ -182,8 +248,8 @@ class RecordingViewModel(
         }
     }
 
-    suspend fun switchMode(mode:com.vocaease.patient.core.media.SongPlaybackMode) {
-        if(mutableState.value.switchingMode || coordinator.state.value !is RecordingState.Recording) return
+    suspend fun switchMode(mode:com.vocaease.patient.core.media.SongPlaybackMode) = exitMutex.withLock {
+        if(mutableState.value.switchingMode || mutableState.value.showExitConfirmation || mutableState.value.exitBusy || coordinator.state.value !is RecordingState.Recording) return@withLock
         updateState { it.copy(switchingMode=true) }
         try { coordinator.switchMode(mode);updateState { it.copy(activeMode=coordinator.activeMode.value) } }
         finally { updateState { it.copy(switchingMode=false) } }
@@ -212,15 +278,17 @@ class RecordingViewModel(
             coordinator.close()
             ticker?.cancel()
             lyricsJob?.cancel()
+            referenceJob?.cancel()
         }
     }
 
     private suspend fun onRecordingState(recordingState: RecordingState) {
+        if (left.get()) return
         updateState {
             it.copy(
                 recordingState = recordingState,
                 keepScreenOn = recordingState === RecordingState.Starting ||
-                    recordingState is RecordingState.Recording || recordingState === RecordingState.Finalizing,
+                    recordingState is RecordingState.Recording || recordingState is RecordingState.Paused || recordingState === RecordingState.Finalizing,
                 recordingDurationMillis = coordinator.recordingDurationMillis,
                 playbackPositionMillis = coordinator.playbackPositionMillis,
             )
@@ -247,7 +315,7 @@ class RecordingViewModel(
                 updateState {
                     it.copy(
                         recordingDurationMillis = recordingState.durationMillis,
-                        navigateReviewDraftId = draftId,
+                        navigateReviewDraftId = if (it.showExitConfirmation || it.exitBusy) null else draftId,
                     )
                 }
             }
@@ -258,6 +326,7 @@ class RecordingViewModel(
                 }
                 updateState { it.copy(errorMessage = recordingState.reason.patientMessage()) }
             }
+            is RecordingState.Paused -> ticker?.cancel()
             else -> Unit
         }
     }

@@ -17,6 +17,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,6 +52,9 @@ data class RecordingUiState(
     val keepScreenOn: Boolean = false,
     val navigateReviewDraftId: String? = null,
     val errorMessage: String? = null,
+    val showExitConfirmation: Boolean = false,
+    val exitBusy: Boolean = false,
+    val canResumeRecording: Boolean = true,
 )
 
 @Composable
@@ -60,11 +65,15 @@ fun RecordingScreen(
     onClose: () -> Unit,
     onModeChange: (com.vocaease.patient.core.media.SongPlaybackMode) -> Unit = {},
     onRetryLyrics: () -> Unit = {},
+    onRetryReferencePitch: () -> Unit = {},
+    onConfirmExit: () -> Unit = {},
+    onCancelExit: () -> Unit = {},
 ) {
     val statusLabel = when (val recording = state.recordingState) {
         is RecordingState.Countdown -> "准备录制 ${recording.remainingSeconds}"
         RecordingState.Starting -> "正在启动录制"
         is RecordingState.Recording -> "●  REC  ${formatTime(state.recordingDurationMillis)}"
+        is RecordingState.Paused -> "录制已暂停"
         RecordingState.Finalizing -> "正在保存录制…"
         is RecordingState.Reviewable -> "录制已保存"
         is RecordingState.Interrupted -> "录制已中断"
@@ -82,8 +91,9 @@ fun RecordingScreen(
         ) {
             IconButton(
                 onClick = onClose,
+                enabled = !state.exitBusy,
                 modifier = Modifier.size(48.dp).semantics {
-                    contentDescription = "关闭并取消录制"
+                    contentDescription = "返回演唱准备"
                     role = Role.Button
                 },
             ) {
@@ -99,7 +109,7 @@ fun RecordingScreen(
             }
             Spacer(Modifier.size(48.dp))
         }
-        SingingPitchTimeline(state,Modifier.fillMaxWidth().height(170.dp).clip(RoundedCornerShape(22.dp)).background(panel).padding(14.dp))
+        SingingPitchTimeline(state,Modifier.fillMaxWidth().height(170.dp).clip(RoundedCornerShape(22.dp)).background(panel).padding(14.dp),onRetryReferencePitch)
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Center) {
             com.vocaease.patient.core.media.SongPlaybackMode.entries.forEach { mode ->
                 androidx.compose.material3.TextButton(onClick={onModeChange(mode)},enabled=state.recordingState is RecordingState.Recording && !state.switchingMode,modifier=Modifier.height(48.dp).testTag("recording-mode-${mode.wire}")) {
@@ -136,13 +146,22 @@ fun RecordingScreen(
             )
             IconButton(
                 onClick = onStop,
-                enabled = state.recordingState is RecordingState.Recording,
+                enabled = state.recordingState is RecordingState.Recording && !state.exitBusy && !state.showExitConfirmation,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).size(58.dp)
                     .background(Color(0xFFF6FAF7), CircleShape).semantics { contentDescription = "结束录制" },
             ) {
                 Box(Modifier.size(20.dp).background(AppError, RoundedCornerShape(4.dp)))
             }
         }
+    }
+    if (state.showExitConfirmation) {
+        AlertDialog(
+            onDismissRequest = { if (!state.exitBusy && state.canResumeRecording) onCancelExit() },
+            title = { Text("确认不保存并返回？") },
+            text = { Text(if (state.canResumeRecording) "歌曲和录制已暂停。返回后，本次录制将被丢弃。" else state.errorMessage ?: "本次录制将被丢弃，返回演唱准备页。") },
+            confirmButton = { TextButton(onClick = onConfirmExit, enabled = !state.exitBusy) { Text(if (state.exitBusy) "正在返回…" else "不保存并返回") } },
+            dismissButton = { TextButton(onClick = onCancelExit, enabled = !state.exitBusy && state.canResumeRecording) { Text("取消，继续演唱") } },
+        )
     }
 }
 

@@ -70,6 +70,16 @@ class PatientRecordingCapture(
         } catch(failure:Exception) { microphone.release();throw failure }
     }
     override fun stop() { if(stopped.compareAndSet(false,true)) camera.stop() }
+    override suspend fun pause() {
+        check(!released.get() && !stopped.get())
+        microphone.pause()
+        camera.pause()
+    }
+    override suspend fun resume() {
+        check(!released.get() && !stopped.get())
+        camera.resume()
+        microphone.resume()
+    }
     override fun release() {
         if(!released.compareAndSet(false,true)) return
         camera.release();microphone.release();samples.close();scope.cancel()

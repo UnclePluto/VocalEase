@@ -19,7 +19,7 @@ fun songTimeAt(recordingMs:Long,anchors:List<PlaybackAnchor>):Long? {
 }
 
 @Composable
-fun SingingPitchTimeline(state:RecordingUiState,modifier:Modifier=Modifier) {
+fun SingingPitchTimeline(state:RecordingUiState,modifier:Modifier=Modifier,onRetry:()->Unit={}) {
     val notes=(state.referencePitch as? ReferencePitchState.Ready)?.notes ?: emptyList()
     val viewport = remember { PatientPitchViewport() }
     val songRange = remember(notes) { if (notes.isEmpty()) null else referencePitchRange(notes) }
@@ -60,10 +60,16 @@ fun SingingPitchTimeline(state:RecordingUiState,modifier:Modifier=Modifier) {
                 drawCircle(Color.White.copy(alpha=.18f),10.dp.toPx(),Offset(axis,y));drawCircle(Color.White,4.dp.toPx(),Offset(axis,y))
             }
         }
-        if(notes.isEmpty()) Text(when (state.referencePitch) {
+        if(notes.isEmpty()) Row(verticalAlignment=androidx.compose.ui.Alignment.CenterVertically) {
+            Text(when (state.referencePitch) {
             is ReferencePitchState.Failed -> "参考音高加载失败；仍显示您的声音"
+            ReferencePitchState.Loading -> "参考音高加载中…"
             ReferencePitchState.Unaligned -> "伴奏起点未校准；仍显示您的声音"
             else -> "暂无参考音高；仍显示您的声音"
-        },color=Color(0xFF89A094),fontSize=11.sp)
+            },color=Color(0xFF89A094),fontSize=11.sp,modifier=Modifier.weight(1f))
+            if(state.referencePitch == ReferencePitchState.Failed) androidx.compose.material3.TextButton(onClick=onRetry) {
+                Text("重试",color=Color(0xFF36CB89),fontSize=11.sp)
+            }
+        }
     }
 }
