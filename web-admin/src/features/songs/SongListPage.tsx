@@ -17,7 +17,7 @@ import { SongUploadModal } from './SongUploadModal'
 import { SongManualUploadModal } from './SongManualUploadModal'
 import { SongResourcesModal } from './SongResourcesModal'
 import { SongReferencePitchModal } from './SongReferencePitchModal'
-import { referencePitchLabels } from './referencePitchLabels'
+import { SongArtifactIcons } from './SongArtifactIcons'
 import type { Song, SongArtifacts, SongListQuery } from './types'
 
 const pageSizes = new Set([10, 20, 50, 100])
@@ -50,10 +50,18 @@ function AnalysisStatus({ song, onPreview }: { song: Song; onPreview: (song: Son
     const terminalKey = latest && !['pending', 'processing', 'retrying'].includes(latest.status) ? `${latest.id}:${latest.status}` : ''
     if (active && terminalKey && reportedTerminal.current !== terminalKey) { reportedTerminal.current = terminalKey; void client.invalidateQueries({ queryKey: songKeys.lists() }) }
   }, [active, client, latest])
-  const status = analysisLabels[latestStatus] ?? { label: latestStatus, color: 'default' }
   const queryError = analysis.error instanceof ApiError ? analysis.error : null
-  if (song.ingestion_mode === 'manual') return <Space size={4} wrap><Tag color="blue">人工上传</Tag>{(['source', 'vocal', 'accompaniment', 'lyrics'] as const).map((kind) => <Tag key={kind} color={song.artifacts?.[kind] ? 'success' : 'default'}>{({ source: '原曲', vocal: '人声', accompaniment: '伴奏', lyrics: '歌词' })[kind]}{song.artifacts?.[kind] ? '已上传' : '未上传'}</Tag>)}<Button type="link" size="small" aria-label={`试听${song.title}`} icon={<PlayCircleOutlined />} onClick={() => onPreview(song, song.artifacts ?? { source: Boolean(song.source_asset) })}>试听</Button></Space>
-  return <div className="song-analysis-cell"><Space size={4} wrap><Tag color={status.color}>{status.label}</Tag>{latestStatus === 'succeeded' || tasks.some((task) => task.result?.is_mock) ? <Tag color="gold">模拟分析 / 非临床</Tag> : null}<Button type="link" size="small" aria-label={`试听${song.title}`} icon={<PlayCircleOutlined />} onClick={() => onPreview(song, { source: Boolean(song.source_asset) })}>试听</Button></Space>
+  const artifacts: SongArtifacts = {
+    source: song.artifacts?.source ?? Boolean(song.source_asset),
+    vocal: song.artifacts?.vocal ?? Boolean(song.vocal_asset),
+    accompaniment: song.artifacts?.accompaniment ?? Boolean(song.accompaniment_asset),
+    lyrics: song.artifacts?.lyrics ?? Boolean(song.lyrics_asset),
+  }
+  return <div className="song-analysis-cell"><div className="song-artifacts">
+    <SongArtifactIcons artifacts={artifacts} referencePitch={song.reference_pitch} />
+    <Button className="song-artifacts-preview" type="link" size="small" aria-label={`试听${song.title}`} icon={<PlayCircleOutlined />} onClick={() => onPreview(song, artifacts)}>试听</Button>
+  </div>
+    {song.ingestion_mode !== 'manual' && (latestStatus === 'succeeded' || tasks.some((task) => task.result?.is_mock)) ? <Tag className="song-analysis-mock" color="gold">模拟分析 / 非临床</Tag> : null}
     {queryError ? <Alert type="error" showIcon title={queryError.message} description={queryError.requestId ? `请求编号：${queryError.requestId}` : undefined} action={<Button size="small" aria-label={`重试${song.title}分析状态`} onClick={() => void analysis.refetch()}>重试</Button>} /> : null}
     {latest?.status === 'failed' ? <Alert type="error" showIcon title={latest.error_summary || '分析失败'} description={latest.error_code ? `错误代码：${latest.error_code}` : undefined} /> : null}
   </div>
@@ -78,7 +86,7 @@ export function SongListPage() {
     { title: '歌手', dataIndex: 'artist', width: 120 },
     { title: '时长', dataIndex: 'duration_seconds', width: 80, render: seconds },
     { title: '分析状态', dataIndex: 'analysis_status', width: 120, render: (value: string, row) => { if (row.ingestion_mode === 'manual') return <Tag color="blue">人工上传</Tag>; const status = analysisLabels[value] ?? { label: value, color: 'default' }; return <Tag color={status.color}>{status.label}</Tag> } },
-    { title: '分析产物', key: 'analysis', width: 260, render: (_value, row) => <div><AnalysisStatus song={row} onPreview={(song, artifacts) => setPreview({ song, artifacts })} />{row.reference_pitch ? <Tag color={row.reference_pitch.status === 'ready' ? 'success' : 'default'}>原唱音高 {referencePitchLabels[row.reference_pitch.status]}</Tag> : null}</div> },
+    { title: '分析产物', key: 'analysis', width: 260, render: (_value, row) => <AnalysisStatus song={row} onPreview={(song, artifacts) => setPreview({ song, artifacts })} /> },
     { title: '上传时间', dataIndex: 'uploaded_at', width: 150, render: (value: string) => new Date(value).toLocaleDateString('zh-CN') },
     { title: '操作', key: 'actions', width: compact ? 76 : 206, fixed: 'right', render: (_value, row) => { const publishingRow = publication.isPending && publication.variables?.id === row.id; const reanalyzingRow = reanalyze.isPending && reanalyze.variables?.id === row.id; const actions = [{ key: 'pitch', label: '原唱音高', onClick: () => setPitchSong(row) }, { key: 'publish', label: row.publication_status === 'published' ? '下架' : '发布', disabled: publishingRow, onClick: () => runPublish(row) }, ...(row.ingestion_mode === 'manual' ? [{ key: 'resources', label: '管理资源', onClick: () => setResourcesSong(row) }] : [{ key: 'reanalyze', label: '重新分析', disabled: reanalyzingRow, onClick: () => runReanalyze(row) }])]; return compact ? <Dropdown menu={{ items: [{ key: 'edit', label: '编辑', onClick: () => setEditSong(row) }, ...actions, { key: 'delete', label: '删除', danger: true, onClick: () => { deleteGuard.current = false; remove.reset(); setDeleteSongTarget(row) } }] }} trigger={['click']}><Button type="text" size="small" icon={<MoreOutlined />} aria-label={`更多${row.title}操作`}>更多</Button></Dropdown> : <Space size={2}><Button type="link" size="small" icon={<EditOutlined />} onClick={() => setEditSong(row)} aria-label={`编辑${row.title}`}>编辑</Button><Dropdown menu={{ items: actions }} trigger={['click']}><Button type="link" size="small" loading={publishingRow || reanalyzingRow}>更多</Button></Dropdown><Button type="link" danger size="small" icon={<DeleteOutlined />} onClick={() => { deleteGuard.current = false; remove.reset(); setDeleteSongTarget(row) }}>删除</Button></Space> } },
   ], [compact, publication.isPending, publication.variables, reanalyze.isPending, reanalyze.variables, remove, runPublish, runReanalyze])

@@ -192,7 +192,6 @@ describe('曲库管理页面', () => {
     expect(attempts).toBe(1)
     await act(async () => { await vi.advanceTimersByTimeAsync(1) })
     await advanceUntil(() => expect(attempts).toBe(2))
-    await advanceUntil(() => expect(screen.getByText('分析完成')).toBeInTheDocument())
     await advanceUntil(() => expect(server.calls('/api/v1/admin/songs/').length).toBeGreaterThan(1))
     const terminalCount = attempts
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })

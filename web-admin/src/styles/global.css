@@ -173,6 +173,14 @@ textarea, select { font: inherit; }
 .song-list-error { margin-bottom: 16px; }
 .song-analysis-cell { display: grid; gap: 6px; }
 .song-analysis-cell .ant-alert { padding: 6px 8px; }
+.song-artifacts { display: flex; align-items: center; gap: 6px; }
+.song-artifact-icons { display: inline-flex; align-items: center; gap: 8px; }
+.song-artifact-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 30px; flex-shrink: 0; color: #cfd3da; border-radius: 4px; }
+.song-artifact-icon.is-ready { color: #344054; }
+.song-artifact-icon svg { width: 24px; height: 24px; }
+.song-artifact-icon:focus-visible { outline: 2px solid #1677ff; outline-offset: 3px; }
+.song-artifacts .song-artifacts-preview { padding-inline: 4px; font-size: 13px; }
+.song-analysis-mock { justify-self: start; }
 .song-page { display: grid; gap: 16px; }
 .song-upload-card { height: 168px; padding: 24px; background: #fff; border-radius: 8px; }
 .song-upload-zone {
