@@ -1,5 +1,5 @@
 import { PauseOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { Alert, Button, Space } from 'antd'
+import { Button, Space } from 'antd'
 import WaveSurfer from 'wavesurfer.js'
 import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
@@ -11,6 +11,7 @@ import { ApiError } from '../../../api/errors'
 import { createPlaybackClock, type PlaybackClock } from '../PlaybackClock'
 import type { AnalysisResult, PlaybackMetadata } from '../types'
 import { LiveVoiceBoard } from './LiveVoiceBoard'
+import { DetailToast } from './DetailToast'
 import type { PatientAudioFrame } from './PatientAudioAnalyser'
 import { createVisualizerAdapter, type VisualizerAdapter } from './VisualizerAdapter'
 
@@ -137,7 +138,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     clock.current?.setMode(activeTrack)
   }, [activeTrack])
 
-  if (!mixed) return <p className="inline-error">缺少可播放的真实演唱录音。</p>
+  if (!mixed) return <DetailToast type="warning" text="缺少可播放的真实演唱录音。" />
 
   const refresh = async (asset: Track, force = false): Promise<boolean> => {
     if (!onRefreshMedia) return false
@@ -188,14 +189,13 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     setActiveTrack(track)
   }
 
-  const videoMessage = media.video && videoFailed ? '录像加载失败，已降级为音频回放。' : media.videoExpected ? '录像授权尚未可用，音频回放不受影响。' : '未提供录像，音频回放不受影响。'
   return <section className="waveform-player" aria-label="演唱回放">
+    <DetailToast text={failure?.message} requestId={failure?.requestId} retryLabel="重试媒体授权" onRetry={failure ? () => void refresh(failure.asset, true) : undefined} />
     <div className="audio-workspace">
       <div className="spectrum-card">
         <h2>声音波形</h2>
         <audio key={`${selectedTrack?.assetId}:${selectedUrl}`} ref={audio} crossOrigin="anonymous" src={selectedUrl} onPause={(event) => { if(audio.current===event.currentTarget){wanted.current=false;setPlaying(false); visualizer.current?.stop()} }} onEnded={() => { wanted.current=false;setPlaying(false); visualizer.current?.stop() }} onError={() => selectedTrack && void refresh(selectedTrack)} />
         {media.accompaniment ? <audio ref={backing} crossOrigin="anonymous" src={backingUrl} onError={() => { selectTrack('patient'); void refresh(media.accompaniment!) }} /> : null}
-        {failure ? <Alert className="media-playback-error" type="error" showIcon title={failure.message} description={failure.requestId ? `请求编号：${failure.requestId}` : undefined} action={<Button aria-label="重试媒体授权" onClick={() => void refresh(failure.asset, true)}>重试</Button>} /> : null}
         <Space>
           <Button type="primary" shape="circle" aria-label={playing ? '暂停' : '播放'} icon={playing ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => {
             if (playing) { wanted.current=false;clock.current?.pause(); visualizer.current?.stop(); setPlaying(false) } else void play()
@@ -213,7 +213,7 @@ export function WaveformPlayer({ media, events, waveFactory, visualizerFactory =
     </div>
     <aside className="video-card">
       <h2>演唱录像</h2>
-      {videoTrack ? <video ref={video} src={videoUrl} onError={() => { void refresh(videoTrack).then((renewed) => { if (!renewed) setVideoFailed(true) }) }} muted playsInline /> : <div className="video-placeholder"><PlayCircleOutlined /><p>{videoMessage}</p></div>}
+      {videoTrack ? <video ref={video} src={videoUrl} onError={() => { void refresh(videoTrack).then((renewed) => { if (!renewed) setVideoFailed(true) }) }} muted playsInline /> : <div className="video-placeholder"><PlayCircleOutlined /><p>暂无可播放录像</p></div>}
     </aside>
   </section>
 }

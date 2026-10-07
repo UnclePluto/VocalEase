@@ -12,7 +12,7 @@ function wav(frequency:number){
 }
 const envelope=(data:unknown)=>({code:'ok',message:'',request_id:'media-browser',data})
 const session={id:'s1',status:'completed',duration_seconds:10,score:80,burp_count:1,is_mock:true,patient:{name:'测试患者',medical_record_no:'P001'},song:{title:'音轨验证'},media:[{asset_id:'patient',media_type:'singing_audio',status:'ready',mime:'audio/wav',size:960044}],analysis_results:[{task_type:'singing_audio_metrics',status:'completed',is_mock:true,payload:{burp_events:[3]},time_series:{snr_db:{sample_interval_ms:1000,values:[32]}}}],playback:{source_asset_id:'source',accompaniment_asset_id:'backing',reference_version:null,combined_available:true,metadata:{schema_version:1,sample_rate:48000,source_asset_id:'source',accompaniment_asset_id:'backing',reference_version:null,mode_changes:[],anchors:[{recording_ms:0,song_ms:0,track:'accompaniment',playing:true,segment:0},{recording_ms:10000,song_ms:10000,track:'accompaniment',playing:false,segment:0}]}}}
-async function prepare(page:Page,frequency=220,denied=false,initial='/singing/s1',prepareMedia=true,withVideo=false,videoGate?:Promise<void>){
+async function prepare(page:Page,frequency=220,denied=false,initial='/singing/s1',prepareMedia=false,withVideo=false,videoGate?:Promise<void>){
  await page.route('**/api/**',async route=>{
   const path=new URL(route.request().url()).pathname
     if(!path.startsWith('/api/')){await route.continue();return}
@@ -71,18 +71,27 @@ test('真实PCM驱动双图，暂停恢复和模式切换保持同一个患者�
  await page.getByRole('tab',{name:'人声 + 伴奏'}).click()
  await expect.poll(()=>page.locator('audio').nth(1).evaluate(element=>(element as HTMLAudioElement).paused)).toBe(false)
  await expect.poll(()=>page.evaluate(()=>{const a=document.querySelectorAll('audio');return Math.abs(a[0].currentTime-a[1].currentTime)})).toBeLessThanOrEqual(.1)
- const pixels=await page.locator('canvas[aria-label="患者极坐标频谱"]').evaluate(element=>{const c=element as HTMLCanvasElement,d=c.getContext('2d')!.getImageData(0,0,c.width,c.height).data;let orange=0;for(let i=0;i<d.length;i+=4)if(d[i]>200&&d[i+1]>50&&d[i+1]<200)orange++;return orange})
- expect(pixels).toBeGreaterThan(100)
+ const pixels=()=>page.locator('canvas[aria-label="患者极坐标频谱"]').evaluate(element=>{const c=element as HTMLCanvasElement,d=c.getContext('2d')!.getImageData(0,0,c.width,c.height).data;let orange=0;for(let i=0;i<d.length;i+=4)if(d[i]>200&&d[i+1]>50&&d[i+1]<200)orange++;return orange})
+ await expect.poll(pixels).toBeGreaterThan(100)
  await page.screenshot({path:'/tmp/vocaease-voice-board-1440.png',fullPage:true})
  await page.setViewportSize({width:390,height:844});await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
  await page.screenshot({path:'/tmp/vocaease-voice-board-390.png',fullPage:true})
  expect(errors).toEqual([])
 })
 test('真实静音保持基线且不被当成跨域错误',async({page})=>{
- await prepare(page,0);await page.getByRole('button',{name:'播放',exact:true}).click();await expect(page.getByText('当前无稳定患者人声音高')).toBeVisible();await expect(page.locator('.voice-pitch')).toHaveText('—');await expect(page.getByText(/患者声音采样不可用/)).toHaveCount(0)
+ await prepare(page,0)
+ await expect(page.locator('.voice-board-plots')).toBeVisible()
+ const before=await page.locator('.voice-board-plots').boundingBox()
+ await page.getByRole('button',{name:'播放',exact:true}).click()
+ await expect.poll(()=>page.locator('audio').first().evaluate(node=>(node as HTMLAudioElement).currentTime)).toBeGreaterThan(.3)
+ await expect(page.getByText(/无稳定患者人声音高|患者声音采样不可用/)).toHaveCount(0)
+ await expect(page.locator('.voice-pitch')).toHaveText('—')
+ expect(await page.locator('.voice-board-plots').boundingBox()).toEqual(before)
+ await page.getByRole('button',{name:'暂停',exact:true}).click()
+ expect(await page.locator('.voice-board-plots').boundingBox()).toEqual(before)
 })
 test('拒绝授权时不显示假声音图和假音高',async({page})=>{
- await prepare(page,220,true);await expect(page.getByText('患者录音授权拒绝')).toBeVisible();await expect(page.locator('audio')).toHaveCount(0);await expect(page.locator('canvas')).toHaveCount(0)
+ await prepare(page,220,true);await expect(page.locator('.ant-message').getByText('患者录音授权拒绝')).toBeVisible();await expect(page.locator('.singing-detail-content .ant-alert')).toHaveCount(0);await expect(page.locator('audio')).toHaveCount(0);await expect(page.locator('canvas')).toHaveCount(0)
 })
 
 test('患者列表筛选经过详情与演唱明细两次返回仍保留',async({page})=>{
@@ -102,7 +111,7 @@ test('患者列表筛选经过详情与演唱明细两次返回仍保留',async(
 test('录像授权迟到时真实MP4静音跟随且患者播放连续',async({page})=>{
  let releaseVideo!:()=>void
  const gate=new Promise<void>(resolve=>{releaseVideo=resolve})
- await prepare(page,220,false,'/singing/s1',true,true,gate)
+ await prepare(page,220,false,'/singing/s1',false,true,gate)
  await page.getByRole('button',{name:'播放',exact:true}).click()
  await expect(page.locator('.voice-pitch')).toHaveText('220 Hz')
  const patient=page.locator('audio').first()

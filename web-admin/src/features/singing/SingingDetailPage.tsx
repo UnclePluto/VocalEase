@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeftOutlined } from '@ant-design/icons'
-import { Alert, Button, Spin } from 'antd'
+import { Button, Spin } from 'antd'
 /* eslint-disable react-refresh/only-export-components */
 import { useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -10,12 +10,13 @@ import { useAuthStore } from '../../auth/store'
 import { getPrivateMediaUrl, getSessionAccompanimentUrl, getSingingSession } from './api'
 import { nearestMetricSample } from './components/MetricPanel'
 import { WaveformPlayer, type PlayerMedia } from './components/WaveformPlayer'
+import { DetailToast, DetailToastProvider } from './components/DetailToast'
 import type { SingingSession } from './types'
 
 export { nearestMetricSample }
 
 function audioResult(session: SingingSession) { return session.analysis_results.find((item) => item.task_type === 'singing_audio_metrics') }
-function descriptionFor(error: unknown) { return error instanceof ApiError && error.requestId ? `请求编号：${error.requestId}` : undefined }
+function requestIdFor(error: unknown) { return error instanceof ApiError ? error.requestId : undefined }
 function messageFor(error: unknown, fallback: string) { return error instanceof Error ? error.message : fallback }
 
 function usePrivateMedia(session: SingingSession) {
@@ -74,7 +75,7 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
     return next.url
   }
   const analysisFailed = session.analysis_results.find((result) => result.status === 'failed')
-  return <section className="management-page singing-detail-page" aria-labelledby="singing-detail-title">
+  return <DetailToastProvider><section className="management-page singing-detail-page" aria-labelledby="singing-detail-title">
     <div className="management-heading"><div><h1 id="singing-detail-title">演唱明细</h1><p>模拟分析结果，不用于临床诊断或现场监测</p></div></div>
     <div className="singing-summary-card">
       <Button type="text" className="singing-back" icon={<ArrowLeftOutlined />} aria-label="返回" onClick={onBack} />
@@ -87,15 +88,13 @@ export function SingingDetailContent({ session, onBack }: { session: SingingSess
       <div className="singing-score"><strong>{session.score ?? '—'}</strong><span>综合得分</span></div>
     </div>
     <div className="singing-detail-content">
-      {analysisFailed ? <Alert type="warning" showIcon message="模拟分析任务失败，以下指标可能没有结果。" description={analysisFailed.error_summary || analysisFailed.error_code || '请稍后重试分析任务。'} /> : null}
-      {urls.audioBinding && urls.audio.isPending ? <Spin aria-label="正在获取媒体授权" /> : null}
-      {urls.audio.isError ? <Alert className="media-playback-error" type="error" showIcon title={messageFor(urls.audio.error, '媒体授权失败，请重试')} description={descriptionFor(urls.audio.error)} action={<Button aria-label="重试媒体授权" onClick={() => void urls.audio.refetch()}>重试</Button>} /> : null}
-      {urls.accompaniment.isError ? <Alert type="warning" title={messageFor(urls.accompaniment.error,'伴奏授权失败，患者人声仍可播放')} action={<Button onClick={()=>void urls.accompaniment.refetch()}>重试伴奏授权</Button>}/> : null}
-      {urls.videoBinding && urls.video.isPending ? <Spin aria-label="正在获取录像授权" /> : null}
-      {urls.video.isError ? <Alert className="media-playback-error" type="warning" showIcon title={messageFor(urls.video.error, '录像授权失败，音频仍可播放')} description={descriptionFor(urls.video.error)} action={<Button aria-label="重试录像授权" onClick={() => void urls.video.refetch()}>重试</Button>} /> : null}
+      <DetailToast type="warning" text={analysisFailed ? `模拟分析任务失败，以下指标可能没有结果。${analysisFailed.error_summary || analysisFailed.error_code || ''}` : undefined} />
+      <DetailToast text={urls.audio.isError ? messageFor(urls.audio.error, '媒体授权失败，请重试') : undefined} requestId={requestIdFor(urls.audio.error)} retryLabel="重试媒体授权" onRetry={() => void urls.audio.refetch()} />
+      <DetailToast type="warning" text={urls.accompaniment.isError ? messageFor(urls.accompaniment.error, '伴奏授权失败，患者人声仍可播放') : undefined} requestId={requestIdFor(urls.accompaniment.error)} retryLabel="重试伴奏授权" onRetry={() => void urls.accompaniment.refetch()} />
+      <DetailToast type="warning" text={urls.video.isError ? messageFor(urls.video.error, '录像授权失败，音频仍可播放') : undefined} requestId={requestIdFor(urls.video.error)} retryLabel="重试录像授权" onRetry={() => void urls.video.refetch()} />
       {(!urls.audio.isError && (!urls.audioBinding || !urls.audio.isPending)) ? <WaveformPlayer key={`${session.id}:${currentMedia.patientAudio?.assetId ?? 'none'}`} media={currentMedia} events={events} analysisResult={source} onRefreshMedia={refreshMedia} /> : null}
     </div>
-  </section>
+  </section></DetailToastProvider>
 }
 
 export function SingingDetailPage() {
@@ -104,6 +103,6 @@ export function SingingDetailPage() {
   const backTo=typeof location.state?.backTo==='string' && /^\/patients\/[^/?]+\/data(\?|$)/.test(location.state.backTo)? location.state.backTo:'/patient-data'
   const query = useQuery({ queryKey: ['singing', 'detail', sessionId], queryFn: ({ signal }) => getSingingSession(sessionId, signal), enabled: Boolean(sessionId), retry: false })
   if (query.isPending) return <Spin aria-label="正在加载演唱明细" />
-  if (query.isError || !query.data) return <Alert type="error" showIcon title={messageFor(query.error, '无法加载演唱明细')} description={descriptionFor(query.error)} action={<Button aria-label="重试加载演唱明细" onClick={() => void query.refetch()}>重试</Button>} />
+  if (query.isError || !query.data) return <DetailToast text={messageFor(query.error, '无法加载演唱明细')} requestId={requestIdFor(query.error)} retryLabel="重试加载演唱明细" onRetry={() => void query.refetch()} />
   return <SingingDetailContent key={query.data.id} session={query.data} onBack={()=>navigate(backTo,{state:{backTo:location.state?.patientDataBackTo}})} />
 }

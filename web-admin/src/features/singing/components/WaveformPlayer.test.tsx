@@ -1,9 +1,14 @@
 import type { PlaybackMetadata } from '../types'
 const metadata: PlaybackMetadata={schema_version:1,sample_rate:48000,source_asset_id:'s',accompaniment_asset_id:'a',reference_version:null,mode_changes:[],anchors:[{recording_ms:0,song_ms:0,track:'accompaniment',playing:true,segment:0},{recording_ms:60000,song_ms:60000,track:'accompaniment',playing:false,segment:0}]}
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render as renderRaw, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { WaveformPlayer } from './WaveformPlayer'
+import { ConfigProvider } from 'antd'
+import type { ReactElement } from 'react'
+
+// 与 AppProviders 的测试主题一致：jsdom 不会派发 CSS 动画结束事件。
+const render = (ui: ReactElement) => renderRaw(ui, { wrapper: ({ children }) => <ConfigProvider theme={{ token: { motion: false } }}>{children}</ConfigProvider> })
 
 describe('WaveformPlayer', () => {
   it('禁用未产出的分轨，为每个嗳气事件建立区域，且不伪造分轨', () => {
@@ -48,6 +53,8 @@ describe('WaveformPlayer', () => {
     fireEvent.error(audio); fireEvent.error(audio)
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
     expect(await screen.findByText('授权失效')).toBeInTheDocument()
+    expect(screen.getByText('授权失效').closest('.ant-message')).not.toBeNull()
+    expect(container.querySelector('.media-playback-error')).toBeNull()
     expect(screen.getByText('请求编号：media-403')).toBeInTheDocument()
     await screen.findByRole('button', { name: '重试媒体授权' })
   })
@@ -77,7 +84,7 @@ describe('WaveformPlayer', () => {
     const refresh = vi.fn().mockRejectedValue(new Error('录像授权失败'))
     const { container } = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' }, video: { assetId: 'video', url: '/video.mp4' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
     fireEvent.error(container.querySelector('video')!)
-    expect(await screen.findByText('录像加载失败，已降级为音频回放。')).toBeInTheDocument()
+    expect(await screen.findByText('暂无可播放录像')).toBeInTheDocument()
     expect(container.querySelector('audio')).toBeInTheDocument()
   })
 
@@ -112,7 +119,7 @@ describe('WaveformPlayer', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: '重试媒体授权' }))
     await waitFor(() => expect(view.container.querySelector('audio')).toHaveAttribute('src', '/manual.mp3'))
-    expect(screen.queryByText('授权自动刷新次数已用尽，请手动重试。')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('授权自动刷新次数已用尽，请手动重试。')).not.toBeInTheDocument())
   })
 
   it('同一资产连续手动重试时只有最新一代响应可以更新 URL', async () => {
@@ -136,7 +143,7 @@ describe('WaveformPlayer', () => {
     await act(async () => { resolveFirstManual('/stale.mp3'); await Promise.resolve() })
 
     expect(view.container.querySelector('audio')).toHaveAttribute('src', '/newest.mp3')
-    expect(screen.queryByText('初次授权失败')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('初次授权失败')).not.toBeInTheDocument())
   })
 
   it('自动刷新与手动重试交错时忽略较晚返回的旧自动响应', async () => {
@@ -167,7 +174,7 @@ describe('WaveformPlayer', () => {
     fireEvent.error(view.container.querySelector('video')!)
 
     expect(await screen.findByText('授权自动刷新次数已用尽，请手动重试。')).toBeInTheDocument()
-    expect(screen.getByText('录像加载失败，已降级为音频回放。')).toBeInTheDocument()
+    expect(screen.getByText('暂无可播放录像')).toBeInTheDocument()
     expect(refresh).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: '重试媒体授权' }))
     await waitFor(() => expect(view.container.querySelector('video')).toHaveAttribute('src', '/video-manual.mp4'))
@@ -177,8 +184,8 @@ describe('WaveformPlayer', () => {
     const refresh = vi.fn().mockRejectedValueOnce(new Error('录像失败')).mockResolvedValueOnce('/video-fresh.mp4')
     const view = render(<WaveformPlayer media={{ mixed: { assetId: 'audio', url: '/audio.mp3' }, video: { assetId: 'video', url: '/video.mp4' } }} events={[]} onRefreshMedia={refresh} waveFactory={() => ({ addRegion: vi.fn(), destroy: vi.fn() })} />)
     fireEvent.error(view.container.querySelector('video')!)
-    await screen.findByText('录像加载失败，已降级为音频回放。')
-    fireEvent.click(screen.getByRole('button', { name: '重试媒体授权' }))
+    await screen.findByText('暂无可播放录像')
+    fireEvent.click(await screen.findByRole('button', { name: '重试媒体授权' }))
     await waitFor(() => expect(view.container.querySelector('video')).toHaveAttribute('src', '/video-fresh.mp4'))
   })
 

@@ -356,6 +356,6 @@ textarea, select { font: inherit; }
 .voice-board-plots>div {padding:14px;background:#111b2d;border-radius:8px;min-width:0;}
 .voice-plot-title h3 {font-size:15px;margin:0 0 12px;color:#e5edf9;}.voice-plot-title span {color:#68829f;font-size:12px;}
 .voice-board-plots canvas {width:100%;height:auto;display:block;background:#0b1725;}
-.voice-sampling-error {color:#ffafb1;}.voice-sampling-status {color:#a5b5cb;font-size:12px;}
+.singing-detail-toast {display:inline-flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;}
 .spectrum-card [role=tab] {min-height:48px;cursor:pointer;}.spectrum-card [role=tab]:disabled{cursor:default;}
 @media(max-width:1000px){.voice-board-metrics{grid-template-columns:repeat(2,minmax(0,1fr));}.voice-board-plots{grid-template-columns:1fr;}}
