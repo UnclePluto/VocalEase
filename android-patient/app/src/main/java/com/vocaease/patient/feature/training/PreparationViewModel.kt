@@ -94,6 +94,7 @@ interface PreparationSavedState {
 
 data class PreparationUiState(
     val song: PreparationSong? = null,
+    val lyrics: LyricsState = LyricsState.Unavailable,
     val previewState: PreviewState = PreviewState.Idle,
     val previewMode: com.vocaease.patient.core.media.SongPlaybackMode = com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL,
     val preflight: PreflightResult = PreflightResult(
@@ -130,6 +131,7 @@ class PreparationViewModel(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val onPlaybackHandoff: (String, PreviewSession) -> Unit = { _, _ -> },
     private val onPlaybackHandoffCancelled: (String) -> Unit = {},
+    private val lyricsRepository: LyricsRepository? = null,
 ) : ViewModel() {
     private val creationMutex = Mutex()
     private val readinessMutex = Mutex()
@@ -138,6 +140,7 @@ class PreparationViewModel(
     private val readinessGeneration = AtomicLong()
     private val environmentStarted = AtomicBoolean()
     private val previewHandedOff = AtomicBoolean()
+    private var lyricsJob: kotlinx.coroutines.Job? = null
     private val mutableState = MutableStateFlow(PreparationUiState())
     val state: StateFlow<PreparationUiState> = mutableState.asStateFlow()
 
@@ -147,11 +150,23 @@ class PreparationViewModel(
         }
     }
 
+    fun retryLyrics() {
+        val repository = lyricsRepository ?: return
+        val id = currentState().song?.id?.toString() ?: return
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch(dispatcher) {
+            updateState { it.copy(lyrics = LyricsState.Loading) }
+            val result = repository.load(id)
+            updateState { if (it.song?.id?.toString() == id) it.copy(lyrics = result) else it }
+        }
+    }
+
     suspend fun load() {
         updateState { it.copy(isLoading = true, errorMessage = null) }
         try {
             val song = songSource.load(songId)
             updateState { it.copy(song = song) }
+            retryLyrics()
             preview.prepare(song.id.toString())
             refreshReadiness()
             updateState { it.copy(isLoading = false) }

@@ -38,6 +38,23 @@ class RecordingScreenTest {
     @get:Rule val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
+    fun 歌词随播放位置切句且不会显示未提供() {
+        val position = androidx.compose.runtime.mutableLongStateOf(500)
+        val lyrics = LyricsState.Ready(listOf(
+            com.vocaease.patient.core.network.dto.LyricLineDto(1000,"第一句真实歌词"),
+            com.vocaease.patient.core.network.dto.LyricLineDto(3000,"第二句真实歌词")))
+        composeRule.setContent { RecordingScreen(state=RecordingUiState(lyrics=lyrics,playbackPositionMillis=position.longValue),
+            preview={},onStop={},onClose={}) }
+        composeRule.onNodeWithText("前奏").assertIsDisplayed()
+        composeRule.runOnIdle { position.longValue = 1000 }
+        composeRule.onNodeWithText("第一句真实歌词").assertIsDisplayed()
+        composeRule.runOnIdle { position.longValue = 3000 }
+        composeRule.onNodeWithText("第二句真实歌词").assertIsDisplayed()
+        composeRule.onNodeWithText("第一句真实歌词").assertDoesNotExist()
+        composeRule.onNodeWithText("歌词暂未提供").assertDoesNotExist()
+    }
+
+    @Test
     fun 演唱页展示真实音高入口与两种歌曲模式() {
         composeRule.setContent {
             VocaEaseTheme {

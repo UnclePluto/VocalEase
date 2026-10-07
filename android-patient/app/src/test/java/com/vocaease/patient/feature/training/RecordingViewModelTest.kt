@@ -1,5 +1,7 @@
 package com.vocaease.patient.feature.training
 
+import com.vocaease.patient.core.network.dto.SongLyricsDto
+import com.vocaease.patient.core.network.dto.LyricLineDto
 import com.vocaease.patient.core.media.RecordingCoordinator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +18,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RecordingViewModelTest {
+    @Test fun `录制读取真实歌词失败也不阻止启动`() = runBlocking {
+        val model = RecordingViewModel("draft",FakeRecordingSession(),FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
+            lyricsRepository = LyricsRepository { SongLyricsDto(listOf(LyricLineDto(1000,"真实歌词"))) })
+        model.start()
+        assertEquals("真实歌词",(model.state.value.lyrics as LyricsState.Ready).lines.first().text)
+        model.leave()
+        val failed = RecordingViewModel("draft",FakeRecordingSession(),FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
+            lyricsRepository = LyricsRepository { error("断网") })
+        failed.start()
+        assertEquals(LyricsState.Failed,failed.state.value.lyrics)
+        assertTrue(failed.state.value.songTitle.isNotEmpty())
+        failed.leave()
+    }
+
     @Test fun `未校准的伴奏不展示原唱参考音高但保留录制启动`() = runBlocking {
         val coordinator = FakeRecordingSession().apply {
             playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion = "version", alignmentVerified = false)

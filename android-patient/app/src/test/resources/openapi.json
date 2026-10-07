@@ -2637,6 +2637,42 @@
                     }
                 }
             }
+        },
+        "/api/v1/patient/songs/{song_id}/lyrics/": {
+            "get": {
+                "operationId": "v1_patient_songs_lyrics_retrieve_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SongLyricsEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
         }
     },
     "components": {
@@ -4628,6 +4664,59 @@
                 ],
                 "type": "string",
                 "description": "* `active` - active\n* `pending` - pending\n* `completed` - completed\n* `cancelled` - cancelled\n* `none` - none"
+            },
+            "LyricLine": {
+                "type": "object",
+                "properties": {
+                    "time_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "text": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "text",
+                    "time_ms"
+                ]
+            },
+            "SongLyricsData": {
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/LyricLine"
+                        }
+                    }
+                },
+                "required": [
+                    "lines"
+                ]
+            },
+            "SongLyricsEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/SongLyricsData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
             }
         },
         "securitySchemes": {

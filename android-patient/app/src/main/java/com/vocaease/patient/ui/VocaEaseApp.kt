@@ -642,6 +642,7 @@ private fun PreparationRoute(
                 PreparationViewModel(
                     songId = songId,
                     songSource = VocaEasePreparationSongSource(container.patientApi),
+                    lyricsRepository = com.vocaease.patient.feature.training.LyricsRepository { container.patientApi.songLyrics(it).data },
                     readinessSource = AndroidReadinessSource(
                         activity,
                         { permissionsRequested },
@@ -711,6 +712,7 @@ private fun PreparationRoute(
     BackHandler(onBack = abandonAndBack)
     PreparationScreen(
         state = state,
+        onRetryLyrics = viewModel::retryLyrics,
         onBack = abandonAndBack,
         onStart = { scope.launch { viewModel.startTraining() } },
         onRequestPermissions = {
@@ -792,6 +794,7 @@ private fun RecordingRoute(
                     AccountScopedRecordingDraftGateway(storage),
                     // Task 7 已向患者展示 3、2、1；本页只完成状态机交接，避免重复等待。
                     countdownTick = {},
+                    lyricsRepository = com.vocaease.patient.feature.training.LyricsRepository { container.patientApi.songLyrics(it).data },
                     referenceRepository = com.vocaease.patient.feature.training.ReferencePitchRepository { id, version -> container.patientApi.referencePitch(id, version).data },
                     dispatcher = container.dispatchers.io,
                 )
@@ -853,6 +856,7 @@ private fun RecordingRoute(
     }
     BackHandler(onBack = leave)
     RecordingScreen(
+        onRetryLyrics = recordingViewModel::retryLyrics,
         state = state,
         preview = {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())

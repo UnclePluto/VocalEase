@@ -38,6 +38,7 @@ enum class ApiEndpoint(
     PATIENT_ME("GET", "/api/v1/patient/me/"),
     SONG_LIST("GET", "/api/v1/patient/songs/"),
     SONG_DETAIL("GET", "/api/v1/patient/songs/{song_id}/"),
+    SONG_LYRICS("GET", "/api/v1/patient/songs/{song_id}/lyrics/"),
     SONG_REFERENCE_PITCH("GET", "/api/v1/patient/songs/{song_id}/reference-pitch/"),
     SESSION_SONG_PLAYBACK("POST", "/api/v1/patient/singing-sessions/{session_id}/song-playback/"),
     SONG_PREVIEW("POST", "/api/v1/patient/songs/{song_id}/preview/"),

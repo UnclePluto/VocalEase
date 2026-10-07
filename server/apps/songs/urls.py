@@ -1,7 +1,7 @@
 from .alignment_views import AdminTrackAlignmentView
 from .reference_pitch_views import AdminReferencePitchView, PatientReferencePitchView, AdminGenerateReferencePitchView
 from django.urls import path
-from .resource_views import AdminSongLyricsView, AdminSongResourcesView
+from .resource_views import AdminSongLyricsView, AdminSongResourcesView, PatientSongLyricsView
 
 from .views import (AdminSongAnalysisStatusView, AdminSongDetailView, AdminSongListView,
                     AdminSongPreviewView, AdminSongPublishView, AdminSongReanalyzeView,
@@ -26,6 +26,7 @@ admin_urlpatterns = [
 ]
 
 patient_urlpatterns = [
+    path("<uuid:song_id>/lyrics/", PatientSongLyricsView.as_view(), name="patient-song-lyrics"),
     path("<uuid:song_id>/reference-pitch/", PatientReferencePitchView.as_view()),
     path("", PatientSongListView.as_view(), name="patient-song-list"),
     path("<uuid:song_id>/", PatientSongDetailView.as_view(), name="patient-song-detail"),

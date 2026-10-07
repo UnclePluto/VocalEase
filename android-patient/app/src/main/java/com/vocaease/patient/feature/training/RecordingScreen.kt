@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -34,6 +35,7 @@ import com.vocaease.patient.ui.theme.AppError
 
 data class RecordingUiState(
     val songTitle: String = "",
+    val lyrics: LyricsState = LyricsState.Unavailable,
     val totalDurationMillis: Long = 0,
     val playbackPositionMillis: Long = 0,
     val recordingDurationMillis: Long = 0,
@@ -57,6 +59,7 @@ fun RecordingScreen(
     onStop: () -> Unit,
     onClose: () -> Unit,
     onModeChange: (com.vocaease.patient.core.media.SongPlaybackMode) -> Unit = {},
+    onRetryLyrics: () -> Unit = {},
 ) {
     val statusLabel = when (val recording = state.recordingState) {
         is RecordingState.Countdown -> "准备录制 ${recording.remainingSeconds}"
@@ -106,10 +109,10 @@ fun RecordingScreen(
         }
         Spacer(Modifier.height(14.dp))
         Box(
-            modifier = Modifier.fillMaxWidth().height(48.dp).testTag("recording-lyrics"),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp, max = 88.dp).testTag("recording-lyrics"),
             contentAlignment = Alignment.Center,
         ) {
-            Text("歌词暂未提供", color = Color(0xFFF4FFF8), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            RecordingLyrics(state.lyrics, state.playbackPositionMillis, onRetryLyrics)
         }
         Spacer(Modifier.height(8.dp))
         Box(

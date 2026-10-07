@@ -71,6 +71,10 @@ internal interface VocaEaseApi {
     suspend fun sessionSongPlayback(@Path("session_id") sessionId: String, @Query("track") track: String,
         @Tag authContext: AuthRequestContext = AuthRequestContext.Current): ApiEnvelope<com.vocaease.patient.core.network.dto.SongPlaybackGrantDto>
 
+    @GET("api/v1/patient/songs/{song_id}/lyrics/")
+    suspend fun songLyrics(@Path("song_id") songId: String,
+        @Tag authContext: AuthRequestContext = AuthRequestContext.Current): ApiEnvelope<com.vocaease.patient.core.network.dto.SongLyricsDto>
+
     @GET("api/v1/patient/songs/{song_id}/reference-pitch/")
     suspend fun referencePitch(@Path("song_id") songId: String, @Query("version") version: String?,
         @Tag authContext: AuthRequestContext = AuthRequestContext.Current): ApiEnvelope<com.vocaease.patient.core.network.dto.ReferencePitchDto>

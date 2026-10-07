@@ -34,6 +34,19 @@ class PreparationScreenTest {
     val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
+    fun 已上传歌词显示正文而不是占位提示() {
+        composeRule.setContent {
+            VocaEaseTheme {
+                PreparationScreen(state=state().copy(lyrics=LyricsState.Ready(listOf(
+                    com.vocaease.patient.core.network.dto.LyricLineDto(1000,"成都真实歌词")))),
+                    onBack={},onStart={},onRequestPermissions={},onOpenSettings={},onRetry={})
+            }
+        }
+        composeRule.onNodeWithText("成都真实歌词").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("歌词暂未提供").assertDoesNotExist()
+    }
+
+    @Test
     fun 小屏大字体时开始始终可见且权限说明可以滚动到达() {
         var starts = 0
         composeRule.setContent {

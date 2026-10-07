@@ -66,6 +66,7 @@ fun PreparationScreen(
     onRetryPreview: () -> Unit = {},
     modifier: Modifier = Modifier,
     onModeChange: (com.vocaease.patient.core.media.SongPlaybackMode) -> Unit = {},
+    onRetryLyrics: () -> Unit = {},
 ) {
     Column(
         modifier = modifier
@@ -126,7 +127,7 @@ fun PreparationScreen(
                     }
                 }
             }
-            LyricsUnavailable()
+            PreparationLyrics(state.lyrics, onRetryLyrics)
             Text(
                 "开始前请确认",
                 modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 8.dp),
@@ -277,24 +278,6 @@ private fun SongIdentity(
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
-}
-
-@Composable
-private fun LyricsUnavailable() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(104.dp)
-            .background(AppSurfaceVariant, RoundedCornerShape(22.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            "歌词暂未提供",
-            color = TextSecondary,
-            fontSize = 14.sp, lineHeight = 20.sp,
-            fontWeight = FontWeight.Medium,
-        )
-    }
 }
 
 @Composable

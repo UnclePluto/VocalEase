@@ -61,6 +61,16 @@ class ApiContractTest {
     }
 
     @Test
+    fun `真实歌词接口解析毫秒与中文文本`() = runBlocking {
+        server.enqueue(MockResponse().setHeader("Content-Type","application/json").setBody(
+            """{"code":"ok","message":"","request_id":"lyrics","data":{"lines":[{"time_ms":1200,"text":"真实歌词"}]}}"""))
+        val result = api().songLyrics("song").data
+        assertEquals(1200L,result.lines.single().timeMs)
+        assertEquals("真实歌词",result.lines.single().text)
+        assertEquals("/api/v1/patient/songs/song/lyrics/",server.takeRequest().path)
+    }
+
+    @Test
     fun `OpenAPI 固定患者端路径、必需字段、空值与枚举`() {
         val document = apiJson.parseToJsonElement(fixture("openapi.json")).jsonObject
         val paths = document.objectAt("paths")
@@ -73,6 +83,7 @@ class ApiContractTest {
             "get /api/v1/patient/me/",
             "get /api/v1/patient/songs/",
             "get /api/v1/patient/songs/{song_id}/",
+            "get /api/v1/patient/songs/{song_id}/lyrics/",
             "get /api/v1/patient/songs/{song_id}/reference-pitch/",
             "post /api/v1/patient/singing-sessions/{session_id}/song-playback/",
             "post /api/v1/patient/songs/{song_id}/preview/",
@@ -101,7 +112,7 @@ class ApiContractTest {
         assertEquals(
             setOf(
                 "login", "refresh", "changePassword", "logout", "patientMe",
-                "songs", "song", "previewSong", "referencePitch", "sessionSongPlayback", "sessions", "createSession", "session",
+                "songs", "song", "songLyrics", "previewSong", "referencePitch", "sessionSongPlayback", "sessions", "createSession", "session",
                 "sessionUploadGrant", "patientMediaUploadGrant", "confirmSessionMedia",
                 "submitSession", "cancelSession", "retrySession", "patientMediaPrivateUrl",
             ),

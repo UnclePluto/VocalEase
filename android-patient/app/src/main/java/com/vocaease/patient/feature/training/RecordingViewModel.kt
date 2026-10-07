@@ -80,12 +80,15 @@ class RecordingViewModel(
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val cleanupDispatcher: CoroutineDispatcher = dispatcher,
     private val referenceRepository: ReferencePitchRepository? = null,
+    private val lyricsRepository: LyricsRepository? = null,
 ) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val lifecycleMutex = Mutex()
     private val acknowledged = AtomicBoolean()
     private val left = AtomicBoolean()
     private var ticker: Job? = null
+    private var lyricsJob: Job? = null
+    private var lyricsSongId: String? = null
     @Volatile private var cleanupJob: Job? = null
     private val mutableState = MutableStateFlow(RecordingUiState())
     val state: StateFlow<RecordingUiState> = mutableState.asStateFlow()
@@ -104,6 +107,8 @@ class RecordingViewModel(
                 songTitle = info.songTitle,
                 totalDurationMillis = info.totalDurationMillis,
             ) }
+            lyricsSongId = info.songId
+            retryLyrics()
             val version = coordinator.playbackBinding?.referenceVersion
             val aligned = coordinator.playbackBinding?.let { it.alignmentVerified && it.accompanimentOffsetMs != null } == true
             if (version != null && !aligned) updateState { it.copy(referencePitch = ReferencePitchState.Unaligned) }
@@ -133,6 +138,18 @@ class RecordingViewModel(
         }
     }
 
+    fun retryLyrics() {
+        val repository = lyricsRepository ?: return
+        val id = lyricsSongId ?: return
+        if (left.get()) return
+        lyricsJob?.cancel()
+        lyricsJob = scope.launch {
+            updateState { it.copy(lyrics = LyricsState.Loading) }
+            val result = repository.load(id)
+            if (!left.get()) updateState { it.copy(lyrics = result) }
+        }
+    }
+
     suspend fun stop() = coordinator.stop()
 
     suspend fun onHostStopped() = coordinator.interrupt(RecordingInterruption.CAMERA)
@@ -152,6 +169,7 @@ class RecordingViewModel(
         if (mutableState.value.recordingState is RecordingState.Reviewable) {
             coordinator.close()
             ticker?.cancel()
+            lyricsJob?.cancel()
             return
         }
         val cleanupScope = CoroutineScope(SupervisorJob() + cleanupDispatcher)
@@ -193,6 +211,7 @@ class RecordingViewModel(
         } finally {
             coordinator.close()
             ticker?.cancel()
+            lyricsJob?.cancel()
         }
     }
 
