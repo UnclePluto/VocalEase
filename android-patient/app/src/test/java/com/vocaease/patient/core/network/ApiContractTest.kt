@@ -61,6 +61,27 @@ class ApiContractTest {
     }
 
     @Test
+    fun `参考音高接受服务端的出处字段并显示绑定版本`() = runBlocking {
+        val version = "10000000-0000-4000-8000-000000000001"
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
+            """{"code":"ok","message":"","request_id":"reference","data":{"status":"ready","version":"$version","schema_version":1,"origin":{"type":"vocal_yin","fingerprint":"verified-input"},"notes":[{"start_ms":1000,"end_ms":2000,"midi_note":60.5,"confidence":0.9}]}}"""))
+        val repository = com.vocaease.patient.feature.training.ReferencePitchRepository { id, bound -> api().referencePitch(id, bound).data }
+        val state = repository.load("song", version)
+        assertTrue("真实服务端音高数据不应显示加载失败：$state", state is com.vocaease.patient.feature.training.ReferencePitchState.Ready)
+        assertEquals("/api/v1/patient/songs/song/reference-pitch/?version=$version", server.takeRequest().path)
+    }
+
+    @Test
+    fun `真实歌词接口解析毫秒与中文文本`() = runBlocking {
+        server.enqueue(MockResponse().setHeader("Content-Type","application/json").setBody(
+            """{"code":"ok","message":"","request_id":"lyrics","data":{"lines":[{"time_ms":1200,"text":"真实歌词"}]}}"""))
+        val result = api().songLyrics("song").data
+        assertEquals(1200L,result.lines.single().timeMs)
+        assertEquals("真实歌词",result.lines.single().text)
+        assertEquals("/api/v1/patient/songs/song/lyrics/",server.takeRequest().path)
+    }
+
+    @Test
     fun `OpenAPI 固定患者端路径、必需字段、空值与枚举`() {
         val document = apiJson.parseToJsonElement(fixture("openapi.json")).jsonObject
         val paths = document.objectAt("paths")
@@ -73,6 +94,9 @@ class ApiContractTest {
             "get /api/v1/patient/me/",
             "get /api/v1/patient/songs/",
             "get /api/v1/patient/songs/{song_id}/",
+            "get /api/v1/patient/songs/{song_id}/lyrics/",
+            "get /api/v1/patient/songs/{song_id}/reference-pitch/",
+            "post /api/v1/patient/singing-sessions/{session_id}/song-playback/",
             "post /api/v1/patient/songs/{song_id}/preview/",
             "get /api/v1/patient/singing-sessions/",
             "post /api/v1/patient/singing-sessions/",
@@ -99,7 +123,7 @@ class ApiContractTest {
         assertEquals(
             setOf(
                 "login", "refresh", "changePassword", "logout", "patientMe",
-                "songs", "song", "previewSong", "sessions", "createSession", "session",
+                "songs", "song", "songLyrics", "previewSong", "referencePitch", "sessionSongPlayback", "sessions", "createSession", "session",
                 "sessionUploadGrant", "patientMediaUploadGrant", "confirmSessionMedia",
                 "submitSession", "cancelSession", "retrySession", "patientMediaPrivateUrl",
             ),
@@ -301,7 +325,7 @@ class ApiContractTest {
         assertTrue(api.previewSong(SONG_ID).data.url.startsWith("https://private.example/"))
             server.takeRequest().also { request ->
                 assertEquals("POST", request.method)
-                assertEquals("/api/v1/patient/songs/$SONG_ID/preview/?track=accompaniment", request.path)
+                assertEquals("/api/v1/patient/songs/$SONG_ID/preview/?track=source", request.path)
                 assertNull(request.getHeader("Idempotency-Key"))
                 assertEquals(0L, request.bodySize)
             }
@@ -434,7 +458,7 @@ class ApiContractTest {
                 "/api/v1/patient/singing-sessions/$SESSION_ID/submit/",
                 request.requestUrl?.encodedPath,
             )
-            assertEquals(0L, request.bodySize)
+            assertJson("{}", request.body.readUtf8())
         }
 
         enqueue("fixtures/session.json")

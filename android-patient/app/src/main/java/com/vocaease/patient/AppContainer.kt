@@ -78,6 +78,7 @@ fun interface AppMonotonicClock {
 
 fun interface RecordingCaptureFactory {
     fun create(context: Context, lifecycleOwner: LifecycleOwner, surfaceProvider: Preview.SurfaceProvider): RecordingCapture
+    fun create(context:Context,lifecycleOwner:LifecycleOwner,surfaceProvider:Preview.SurfaceProvider,viewPortProvider:()->androidx.camera.core.ViewPort?):RecordingCapture = create(context,lifecycleOwner,surfaceProvider)
 }
 
 fun interface QiniuUploaderFactory {
@@ -92,8 +93,11 @@ data class AndroidAppDependencies(
     val clock: AppClock = AppClock(System::currentTimeMillis),
     val monotonicClock: AppMonotonicClock = AppMonotonicClock(System::nanoTime),
     val connectivityFactory: (Context) -> AppConnectivity = ::AndroidAppConnectivity,
-    val recordingCaptureFactory: RecordingCaptureFactory = RecordingCaptureFactory { context, owner, surface ->
-        CameraXRecordingCapture(context, owner, surface)
+    val recordingCaptureFactory: RecordingCaptureFactory = object:RecordingCaptureFactory {
+        override fun create(context:Context,lifecycleOwner:LifecycleOwner,surfaceProvider:Preview.SurfaceProvider):RecordingCapture =
+            com.vocaease.patient.core.media.PatientRecordingCapture(CameraXRecordingCapture(context,lifecycleOwner,surfaceProvider))
+        override fun create(context:Context,lifecycleOwner:LifecycleOwner,surfaceProvider:Preview.SurfaceProvider,viewPortProvider:()->androidx.camera.core.ViewPort?):RecordingCapture =
+            com.vocaease.patient.core.media.PatientRecordingCapture(CameraXRecordingCapture(context,lifecycleOwner,surfaceProvider,viewPortProvider=viewPortProvider))
     },
     val qiniuUploaderFactory: QiniuUploaderFactory = QiniuUploaderFactory(::QiniuV2Uploader),
 )

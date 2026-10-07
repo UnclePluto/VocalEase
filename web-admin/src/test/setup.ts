@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { cleanup, configure } from '@testing-library/react'
+import { act, cleanup, configure } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 
 import { resetApiClientForTests } from '../api/client'
@@ -54,7 +54,7 @@ Object.defineProperty(HTMLMediaElement.prototype, 'pause', { configurable: true,
 Object.defineProperty(HTMLMediaElement.prototype, 'load', { configurable: true, value: vi.fn() })
 
 beforeAll(() => server.listen())
-afterEach(() => {
+afterEach(async () => {
   cleanup()
   useAuthStore.getState().reset()
   resetApiClientForTests()
@@ -66,5 +66,8 @@ afterEach(() => {
   vi.useRealTimers()
   window.innerWidth = 1024
   window.history.replaceState(null, '', '/')
+  // Ant Design Form 的 useDebounce 在卸载时仍可有 10ms 待执行回调；
+  // 在 jsdom 销毁前排空，避免回调访问已移除的 window。
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
 })
 afterAll(() => server.close())

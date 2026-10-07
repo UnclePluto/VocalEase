@@ -156,3 +156,23 @@ class SessionMutationDataSerializer(serializers.Serializer):
 
 class SessionMutationEnvelopeSerializer(ApiEnvelopeSerializer):
     data = SessionMutationDataSerializer()
+
+
+class SongPlaybackGrantSerializer(PrivateUrlDataSerializer):
+    asset_id = serializers.UUIDField()
+
+
+class SongPlaybackGrantEnvelopeSerializer(ApiEnvelopeSerializer):
+    data = SongPlaybackGrantSerializer()
+
+
+class ReferencePitchDataSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    version = serializers.UUIDField(allow_null=True)
+    schema_version = serializers.IntegerField()
+    notes = serializers.ListField(child=serializers.DictField())
+    origin = serializers.DictField(required=False)
+
+
+class ReferencePitchEnvelopeSerializer(ApiEnvelopeSerializer):
+    data = ReferencePitchDataSerializer()

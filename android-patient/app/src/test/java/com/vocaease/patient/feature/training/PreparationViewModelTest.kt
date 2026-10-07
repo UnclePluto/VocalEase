@@ -22,6 +22,31 @@ import org.junit.Test
 
 class PreparationViewModelTest {
     @Test
+    fun `准备页读取歌词并可单独重试且不影响演唱门禁`() = runBlocking {
+        var failed = true
+        val model = viewModel(FakePreparationStore(),FakeSessionCreator { createdSession() },lyricsRepository=LyricsRepository {
+            if(failed) error("断网") else com.vocaease.patient.core.network.dto.SongLyricsDto(listOf(
+                com.vocaease.patient.core.network.dto.LyricLineDto(1000,"成都歌词")))
+        })
+        model.load()
+        assertEquals(LyricsState.Failed,model.state.value.lyrics)
+        assertTrue(model.state.value.preflight.canStart)
+        failed = false
+        model.retryLyrics()
+        assertEquals("成都歌词",(model.state.value.lyrics as LyricsState.Ready).lines.single().text)
+    }
+
+    @Test
+    fun `切换试听失败保留原唱且向患者显示错误`() = runBlocking {
+        val preview = FakePreviewSession().apply { switchSucceeds = false }
+        val model = viewModel(FakePreparationStore(), FakeSessionCreator { createdSession() }, preview = preview)
+        model.load()
+        assertFalse(model.switchPreviewMode(com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT))
+        assertEquals(com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL, model.state.value.previewMode)
+        assertTrue(model.state.value.errorMessage?.contains("切换") == true)
+    }
+
+    @Test
     fun `导航发布时把已预缓冲播放器一次性交给Task8且onCleared不再释放`() = runBlocking {
         val preview = FakePreviewSession()
         val handed = mutableListOf<Pair<String, PreviewSession>>()
@@ -430,10 +455,12 @@ class PreparationViewModelTest {
         preview: FakePreviewSession = FakePreviewSession(),
         onPlaybackHandoff: (String, PreviewSession) -> Unit = { _, _ -> },
         onPlaybackHandoffCancelled: (String) -> Unit = {},
+        lyricsRepository: LyricsRepository? = null,
         countdown: suspend (Int) -> Unit = {},
     ) = PreparationViewModel(
         songId = SONG_ID,
         songSource = PreparationSongSource { song() },
+        lyricsRepository = lyricsRepository,
         readinessSource = readinessSource,
         environmentMonitor = environmentMonitor,
         preview = preview,
@@ -492,6 +519,8 @@ private class FakePreviewSession(
     private val releaseCompletion: CompletableDeferred<Unit> = CompletableDeferred(Unit),
 ) : PreviewSession {
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Buffered)
+    var switchSucceeds = true
+    override suspend fun switchMode(mode: com.vocaease.patient.core.media.SongPlaybackMode) = switchSucceeds
     var releaseCount = 0
     var awaitReleasedCount = 0
     var rewindCount = 0

@@ -113,6 +113,11 @@ def test_openapi_schema_and_docs_are_publicly_available():
     document = schema.json()
     paths = document["paths"]
     write_contract = {
+        ("/api/v1/admin/songs/{song_id}/track-alignment/", "post"): (True, {"200"}),
+        ("/api/v1/admin/songs/{song_id}/reference-pitch/", "post"): (True, {"200"}),
+        ("/api/v1/admin/songs/{song_id}/reference-pitch/generate/", "post"): (True, {"202"}),
+        ("/api/v1/patient/singing-sessions/{session_id}/song-playback/", "post"): (False, {"200"}),
+        ("/api/v1/admin/singing-sessions/{session_id}/playback-accompaniment/", "post"): (False, {"200"}),
         ("/api/v1/admin/analytics/exports/", "post"): (True, {"200", "202"}),
         ("/api/v1/admin/analytics/exports/{job_id}/private-url/", "post"): (False, {"200"}),
         ("/api/v1/admin/doctors/", "post"): (True, {"201"}),
@@ -149,7 +154,7 @@ def test_openapi_schema_and_docs_are_publicly_available():
         ("/api/v1/patient/singing-sessions/{session_id}/cancel/", "post"): (False, {"200"}),
         ("/api/v1/patient/singing-sessions/{session_id}/confirm-upload/", "post"): (True, {"200"}),
         ("/api/v1/patient/singing-sessions/{session_id}/retry/", "post"): (False, {"200", "202"}),
-        ("/api/v1/patient/singing-sessions/{session_id}/submit/", "post"): (False, {"200", "202"}),
+        ("/api/v1/patient/singing-sessions/{session_id}/submit/", "post"): (True, {"200", "202"}),
         ("/api/v1/patient/singing-sessions/{session_id}/upload-grants/", "post"): (True, {"200", "201"}),
         ("/api/v1/patient/songs/{song_id}/preview/", "post"): (False, {"200"}),
     }

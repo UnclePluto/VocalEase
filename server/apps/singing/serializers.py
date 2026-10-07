@@ -79,14 +79,24 @@ class SingingSessionSummarySerializer(serializers.ModelSerializer):
         )
 
 
+class SubmitSessionSerializer(serializers.Serializer):
+    playback_metadata = serializers.JSONField(required=False, allow_null=True)
+
+
 class SingingSessionReadSerializer(SingingSessionSummarySerializer):
+    playback = serializers.SerializerMethodField()
+
+    def get_playback(self, obj) -> dict:
+        from .playback import playback_description
+        return playback_description(obj)
+
     media = SessionMediaReadSerializer(source="media_bindings", many=True, read_only=True)
     analysis_task_ids = serializers.SerializerMethodField()
     analysis_results = serializers.SerializerMethodField()
 
     class Meta(SingingSessionSummarySerializer.Meta):
         fields = SingingSessionSummarySerializer.Meta.fields + (
-            "media", "analysis_task_ids", "analysis_results",
+            "media", "analysis_task_ids", "analysis_results", "playback",
         )
 
     @staticmethod

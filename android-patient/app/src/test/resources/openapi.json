@@ -868,6 +868,42 @@
                 }
             }
         },
+        "/api/v1/admin/singing-sessions/{session_id}/playback-accompaniment/": {
+            "post": {
+                "operationId": "v1_admin_singing_sessions_playback_accompaniment_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SongPlaybackGrantEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
         "/api/v1/admin/songs/": {
             "get": {
                 "operationId": "v1_admin_songs_retrieve",
@@ -1268,6 +1304,118 @@
                         "description": ""
                     },
                     "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApiEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/reference-pitch/": {
+            "post": {
+                "operationId": "v1_admin_songs_reference_pitch_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ApiEnvelopeRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ApiEnvelopeRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ApiEnvelopeRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ReferencePitchEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/songs/{song_id}/reference-pitch/generate/": {
+            "post": {
+                "operationId": "v1_admin_songs_reference_pitch_generate_create_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ApiEnvelopeRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ApiEnvelopeRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ApiEnvelopeRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "202": {
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -2152,6 +2300,53 @@
                 }
             }
         },
+        "/api/v1/patient/singing-sessions/{session_id}/song-playback/": {
+            "post": {
+                "operationId": "v1_patient_singing_sessions_song_playback_create_by_session_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "session_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    },
+                    {
+                        "in": "query",
+                        "name": "track",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "accompaniment",
+                                "source"
+                            ]
+                        }
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SongPlaybackGrantEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
         "/api/v1/patient/singing-sessions/{session_id}/submit/": {
             "post": {
                 "operationId": "v1_patient_singing_sessions_submit_create_by_session_id",
@@ -2177,6 +2372,25 @@
                 "tags": [
                     "v1"
                 ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SubmitSessionRequest"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SubmitSessionRequest"
+                            }
+                        },
+                        "multipart/form-data": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SubmitSessionRequest"
+                            }
+                        }
+                    }
+                },
                 "security": [
                     {
                         "bearerAuth": []
@@ -2387,6 +2601,78 @@
                     }
                 }
             }
+        },
+        "/api/v1/patient/songs/{song_id}/reference-pitch/": {
+            "get": {
+                "operationId": "v1_patient_songs_reference_pitch_retrieve_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ReferencePitchEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
+        },
+        "/api/v1/patient/songs/{song_id}/lyrics/": {
+            "get": {
+                "operationId": "v1_patient_songs_lyrics_retrieve_by_song_id",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "song_id",
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "required": true
+                    }
+                ],
+                "tags": [
+                    "v1"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SongLyricsEnvelope"
+                                }
+                            }
+                        },
+                        "description": ""
+                    }
+                }
+            }
         }
     },
     "components": {
@@ -2453,6 +2739,28 @@
                 "properties": {
                     "code": {
                         "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {},
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
+            "ApiEnvelopeRequest": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "minLength": 1
                     },
                     "message": {
                         "type": "string"
@@ -3209,6 +3517,11 @@
                             "$ref": "#/components/schemas/SingingAnalysisResult"
                         },
                         "readOnly": true
+                    },
+                    "playback": {
+                        "type": "object",
+                        "additionalProperties": {},
+                        "readOnly": true
                     }
                 },
                 "required": [
@@ -3218,6 +3531,7 @@
                     "id",
                     "media",
                     "patient",
+                    "playback",
                     "song",
                     "status",
                     "treatment_plan",
@@ -3629,6 +3943,62 @@
                 ],
                 "type": "string",
                 "description": "* `vocal_separation` - vocal_separation\n* `accompaniment_generation` - accompaniment_generation\n* `lyrics_recognition` - lyrics_recognition"
+            },
+            "ReferencePitchData": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string"
+                    },
+                    "version": {
+                        "type": "string",
+                        "format": "uuid",
+                        "nullable": true
+                    },
+                    "schema_version": {
+                        "type": "integer"
+                    },
+                    "notes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": {}
+                        }
+                    },
+                    "origin": {
+                        "type": "object",
+                        "additionalProperties": {}
+                    }
+                },
+                "required": [
+                    "notes",
+                    "schema_version",
+                    "status",
+                    "version"
+                ]
+            },
+            "ReferencePitchEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/ReferencePitchData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
             },
             "RefreshData": {
                 "type": "object",
@@ -4052,6 +4422,50 @@
                     "cancelled"
                 ]
             },
+            "SongPlaybackGrant": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string"
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "asset_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    }
+                },
+                "required": [
+                    "asset_id",
+                    "expires_at",
+                    "url"
+                ]
+            },
+            "SongPlaybackGrantEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/SongPlaybackGrant"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
+            },
             "SongPreviewRequest": {
                 "type": "object",
                 "properties": {
@@ -4178,6 +4592,14 @@
                     "title"
                 ]
             },
+            "SubmitSessionRequest": {
+                "type": "object",
+                "properties": {
+                    "playback_metadata": {
+                        "nullable": true
+                    }
+                }
+            },
             "TrackEnum": {
                 "enum": [
                     "source",
@@ -4242,6 +4664,59 @@
                 ],
                 "type": "string",
                 "description": "* `active` - active\n* `pending` - pending\n* `completed` - completed\n* `cancelled` - cancelled\n* `none` - none"
+            },
+            "LyricLine": {
+                "type": "object",
+                "properties": {
+                    "time_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "text": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "text",
+                    "time_ms"
+                ]
+            },
+            "SongLyricsData": {
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/LyricLine"
+                        }
+                    }
+                },
+                "required": [
+                    "lines"
+                ]
+            },
+            "SongLyricsEnvelope": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "data": {
+                        "$ref": "#/components/schemas/SongLyricsData"
+                    },
+                    "request_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code",
+                    "data",
+                    "message",
+                    "request_id"
+                ]
             }
         },
         "securitySchemes": {

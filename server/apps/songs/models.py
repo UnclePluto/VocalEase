@@ -29,6 +29,7 @@ class Song(UUIDSoftDeleteModel):
     vocal_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="vocal_songs")
     accompaniment_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="accompaniment_songs")
     lyrics_asset = models.ForeignKey("media.MediaAsset", on_delete=models.PROTECT, null=True, blank=True, related_name="lyrics_songs")
+    playback_alignment = models.JSONField(null=True, blank=True)
     ingestion_mode = models.CharField(max_length=16, choices=IngestionMode.choices, default=IngestionMode.EXISTING)
     source_available = models.BooleanField(default=False)
     source_verified_at = models.DateTimeField(null=True, blank=True)
@@ -122,3 +123,23 @@ class SongAvailabilityScanState(models.Model):
                 name="song_availability_scan_claim_valid",
             ),
         ]
+
+
+class SongReferencePitch(models.Model):
+    """每次发布一个不可变版本；新版本不修改既有会话绑定。"""
+    import uuid
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    song = models.ForeignKey(Song, on_delete=models.PROTECT, related_name='reference_versions')
+    status = models.CharField(max_length=16, default='pending', choices=[(s, s) for s in ('pending', 'processing', 'ready', 'failed', 'stale')])
+    input_asset = models.ForeignKey('media.MediaAsset', on_delete=models.PROTECT, null=True, blank=True)
+    input_fingerprint = models.CharField(max_length=64, blank=True)
+    document = models.JSONField(default=dict)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    attempt = models.PositiveSmallIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']

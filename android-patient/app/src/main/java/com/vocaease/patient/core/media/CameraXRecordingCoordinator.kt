@@ -42,13 +42,16 @@ internal sealed interface CameraXBackendEvent {
 }
 
 internal interface CameraXBackend {
+    val captureStartNanos:Long? get()=null
     suspend fun bind(selector: CameraSelector)
     fun start(output: File, audioEnabled: Boolean, callback: (CameraXBackendEvent) -> Unit)
+    suspend fun pause() { error("CameraX暂停未实现") }
+    suspend fun resume() { error("CameraX恢复未实现") }
     fun stop()
     fun release()
 }
 
-/** CameraX 是唯一录音链路；适配层固定前摄并只传一个 audioEnabled=true。 */
+/** CameraX 固定前摄，只录制视频；麦克风由 MicrophonePcmCapture 独占。 */
 class CameraXRecordingCapture internal constructor(
     private val backend: CameraXBackend,
     callbackDispatcher: CoroutineDispatcher = Dispatchers.Default,
@@ -58,12 +61,14 @@ class CameraXRecordingCapture internal constructor(
         lifecycleOwner: LifecycleOwner,
         surfaceProvider: Preview.SurfaceProvider,
         executor: Executor = ContextCompat.getMainExecutor(context),
-    ) : this(AndroidCameraXBackend(context, lifecycleOwner, surfaceProvider, executor), Dispatchers.Default)
+        viewPortProvider: (() -> androidx.camera.core.ViewPort?)? = null,
+    ) : this(AndroidCameraXBackend(context, lifecycleOwner, surfaceProvider, executor, viewPortProvider), Dispatchers.Default)
 
     private val scope = CoroutineScope(SupervisorJob() + callbackDispatcher)
     private val events = Channel<CaptureEvent>(Channel.UNLIMITED)
     private val released = AtomicBoolean()
     override var listener: suspend (CaptureEvent) -> Unit = {}
+    override val captureStartNanos get()=backend.captureStartNanos
 
     init {
         scope.launch {
@@ -79,7 +84,7 @@ class CameraXRecordingCapture internal constructor(
     override fun start(output: File) {
         check(!released.get())
         try {
-            backend.start(output, audioEnabled = true) { event ->
+            backend.start(output, audioEnabled = false) { event ->
                 val mapped = when (event) {
                     CameraXBackendEvent.Started -> CaptureEvent.Started
                     is CameraXBackendEvent.Finalized -> CaptureEvent.Finalized(
@@ -96,6 +101,8 @@ class CameraXRecordingCapture internal constructor(
     }
 
     override fun stop() = backend.stop()
+    override suspend fun pause() { check(!released.get()); backend.pause() }
+    override suspend fun resume() { check(!released.get()); backend.resume() }
 
     override fun release() {
         if (!released.compareAndSet(false, true)) return
@@ -110,15 +117,25 @@ private class AndroidCameraXBackend(
     private val lifecycleOwner: LifecycleOwner,
     private val surfaceProvider: Preview.SurfaceProvider,
     private val executor: Executor,
+    private val viewPortProvider: (() -> androidx.camera.core.ViewPort?)?,
 ) : CameraXBackend {
     private val appContext = context.applicationContext
     private var cameraProvider: ProcessCameraProvider? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
+    @Volatile private var pauseWaiter: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    @Volatile private var resumeWaiter: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    private val frameOrigin=java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
+    override val captureStartNanos get()=frameOrigin.get().takeUnless { it==Long.MIN_VALUE }
 
     override suspend fun bind(selector: CameraSelector) {
         val provider = awaitCameraProvider()
         withContext(Dispatchers.Main.immediate) {
+            val viewPort = if(viewPortProvider==null) null else kotlinx.coroutines.withTimeout(5000) {
+                var value=viewPortProvider.invoke()
+                while(value==null) { kotlinx.coroutines.delay(16);value=viewPortProvider.invoke() }
+                value
+            }
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(surfaceProvider) }
             val recorder = Recorder.Builder()
                 .setQualitySelector(
@@ -128,9 +145,10 @@ private class AndroidCameraXBackend(
                     ),
                 )
                 .build()
-            val capture = VideoCapture.withOutput(recorder)
+            val capture = VideoCapture.Builder(recorder).setMirrorMode(androidx.camera.core.MirrorMode.MIRROR_MODE_ON_FRONT_ONLY).build()
             provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+            if(viewPort==null) provider.bindToLifecycle(lifecycleOwner,selector,preview,capture)
+            else provider.bindToLifecycle(lifecycleOwner,selector,androidx.camera.core.UseCaseGroup.Builder().setViewPort(viewPort).addUseCase(preview).addUseCase(capture).build())
             cameraProvider = provider
             videoCapture = capture
         }
@@ -142,15 +160,23 @@ private class AndroidCameraXBackend(
                 check(activeRecording == null)
                 val capture = checkNotNull(videoCapture) { "前置摄像头尚未绑定" }
                 val pending = capture.output.prepareRecording(appContext, FileOutputOptions.Builder(output).build())
-                check(audioEnabled) { "CameraX音频必须启用" }
+                check(!audioEnabled) { "CameraX仅采集视频" }
                 if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     callback(CameraXBackendEvent.Failed(RecordingInterruption.AUDIO))
                     return@execute
                 }
-                activeRecording = pending.withAudioEnabled().start(executor) { event ->
+                frameOrigin.set(Long.MIN_VALUE)
+                // 直接在 Recorder 顺序执行器上取首帧 PTS，随后业务事件仍经队列串行投递。
+                activeRecording = pending.start(Executor { it.run() }) { event ->
                     when (event) {
-                        is VideoRecordEvent.Start -> callback(CameraXBackendEvent.Started)
+                        is VideoRecordEvent.Pause -> pauseWaiter?.complete(Unit)
+                        is VideoRecordEvent.Resume -> resumeWaiter?.complete(Unit)
+                        is VideoRecordEvent.Status -> if(event.recordingStats.numBytesRecorded>0 && frameOrigin.get()==Long.MIN_VALUE) {
+                            val origin=androidx.camera.video.RecorderTimeBridge.firstFrameTimeNanos(capture.output)
+                            if(frameOrigin.compareAndSet(Long.MIN_VALUE,origin)) callback(CameraXBackendEvent.Started)
+                        }
                         is VideoRecordEvent.Finalize -> {
+                            failPauseTransition()
                             activeRecording = null
                             val durationMillis = event.recordingStats.recordedDurationNanos / 1_000_000L
                             if (!event.hasError()) {
@@ -176,11 +202,39 @@ private class AndroidCameraXBackend(
     }
 
     override fun stop() {
-        executor.execute { activeRecording?.stop() }
+        executor.execute { failPauseTransition(); activeRecording?.stop() }
+    }
+
+    override suspend fun pause() = changePause(true)
+    override suspend fun resume() = changePause(false)
+
+    private suspend fun changePause(pausing: Boolean) {
+        val waiter = kotlinx.coroutines.CompletableDeferred<Unit>()
+        executor.execute {
+            try {
+                val recording = checkNotNull(activeRecording) { "录制已结束" }
+                if (pausing) { pauseWaiter = waiter; recording.pause() }
+                else { resumeWaiter = waiter; recording.resume() }
+            } catch (error: Exception) { waiter.completeExceptionally(error) }
+        }
+        try { check(kotlinx.coroutines.withTimeoutOrNull(5_000) { waiter.await(); true } == true) { "录制暂停或恢复超时" } }
+        finally {
+            executor.execute {
+                if (pauseWaiter === waiter) pauseWaiter = null
+                if (resumeWaiter === waiter) resumeWaiter = null
+            }
+        }
+    }
+
+    private fun failPauseTransition() {
+        val failure = IllegalStateException("录制已停止")
+        pauseWaiter?.completeExceptionally(failure)
+        resumeWaiter?.completeExceptionally(failure)
     }
 
     override fun release() {
         executor.execute {
+            failPauseTransition()
             activeRecording?.stop()
             activeRecording = null
             cameraProvider?.unbindAll()

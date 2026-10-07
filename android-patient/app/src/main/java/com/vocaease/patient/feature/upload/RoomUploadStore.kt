@@ -82,6 +82,8 @@ class RoomUploadStore(
         }
     }
 
+    override suspend fun loadPlaybackMetadata() = storage.loadPlaybackMetadata(draftId)
+
     override suspend fun load(): UploadRecord {
         val bundle = storage.loadUploadBundle(draftId)
         val audio = bundle.media.single { it.type == MediaType.AUDIO }

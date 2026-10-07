@@ -1,3 +1,4 @@
+from .serializers import SubmitSessionSerializer
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
@@ -228,7 +229,7 @@ class PatientSessionConfirmUploadView(PatientSessionMixin, APIView):
 
 class PatientSessionSubmitView(PatientSessionMixin, APIView):
     @extend_schema(
-        request=None,
+        request=SubmitSessionSerializer,
         parameters=[
             OpenApiParameter(
                 name="Idempotency-Key",
@@ -244,9 +245,12 @@ class PatientSessionSubmitView(PatientSessionMixin, APIView):
     )
     def post(self, request, session_id):
         session = self.get_session(request, session_id)
+        body = SubmitSessionSerializer(data=request.data or {})
+        body.is_valid(raise_exception=True)
         result = submit_session(
             session_id=session.id, patient_id=session.patient_id,
             idempotency_key=request.headers.get("Idempotency-Key", ""),
+            playback_metadata=body.validated_data.get("playback_metadata"),
         )
         return api_response(
             data={"session_id": str(result.session.id), "status": result.session.status, "analysis_task_ids": [str(value) for value in result.task_ids]},

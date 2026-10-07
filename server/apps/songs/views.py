@@ -241,9 +241,12 @@ class PatientSongPreviewView(APIView):
             raise ValidationError({"track": "不支持的音轨"})
         serializer = SongPreviewSerializer(data={"track": track})
         serializer.is_valid(raise_exception=True)
+        from .alignment import current_alignment
+        song=PatientSongDetailView().get_object(song_id)
+        alignment=current_alignment(song)
         private_url = preview_song_resource(
             actor=request.user, request_id=request.request_id,
-            song=PatientSongDetailView().get_object(song_id),
+            song=song,
             track=serializer.validated_data["track"],
         )
-        return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat()}, request_id=request.request_id)
+        return api_response(data={"url": private_url.url, "expires_at": private_url.expires_at.isoformat(), "alignment_verified":bool(alignment), "accompaniment_offset_ms":alignment["offset_ms"] if alignment else None}, request_id=request.request_id)

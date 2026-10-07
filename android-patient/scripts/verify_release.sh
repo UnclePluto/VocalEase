@@ -42,6 +42,9 @@ fi
 [[ -n "$apkanalyzer" && -x "$apkanalyzer" ]] || { echo "找不到 PATH 或 Android SDK cmdline-tools 中的 apkanalyzer" >&2; exit 2; }
 : "${VOCAEASE_API_BASE_URL:?请设置 VOCAEASE_API_BASE_URL（完整 HTTPS URL，且以 / 结尾）}"
 
+# 校验真实构建门禁拒绝重复接口路径，再核对当前发布地址。
+./scripts/test_release_api_base_url.sh
+
 # 与 release lifecycle 共用 buildSrc 的 java.net.URI 校验，避免 shell 与构建规则漂移。
 ./gradlew --offline -PvocaeaseApiBaseUrl="$VOCAEASE_API_BASE_URL" :app:validateReleaseApiBaseUrl >/dev/null
 
@@ -90,6 +93,7 @@ echo "[6/7] 隐私扫描器稳定正例与负例"
 echo "[7/7] release 源码、DEX、resources 与 native 隐私扫描"
 ./scripts/scan_release_privacy.sh app/src/main/java "$apk"
 
+python3 ./scripts/test_release_response_types.py
 python3 ./scripts/check_release_response_types.py "$apk" app/build/outputs/mapping/release/mapping.txt
 
 echo "release 验证通过（API 主机与凭据未输出）"

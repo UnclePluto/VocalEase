@@ -97,6 +97,7 @@ def create_session(
 ) -> SessionCreationResult:
     if not idempotency_key.strip() or len(idempotency_key) > 128:
         raise ValidationError({"idempotency_key": "幂等键不能为空且长度不能超过 128"})
+    from .playback import snapshot_playback
     validation_error = None
     session = None
     with transaction.atomic():
@@ -148,6 +149,7 @@ def create_session(
                 } if plan else None,
                 creation_idempotency_key=idempotency_key,
                 created_source=created_source,
+                **snapshot_playback(song),
             )
     if validation_error is not None:
         raise validation_error
@@ -347,7 +349,7 @@ def _create_generation_tasks_locked(*, session: SingingSession, generation: int)
     return tasks
 
 
-def submit_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) -> SubmissionResult:
+def submit_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str, playback_metadata: dict | None = None) -> SubmissionResult:
     if not idempotency_key or len(idempotency_key) > 128:
         raise ValidationError({"idempotency_key": "必须提供长度不超过 128 的幂等键"})
     with transaction.atomic():
@@ -355,7 +357,13 @@ def submit_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) 
             session = SingingSession.objects.select_for_update().get(pk=session_id, patient_id=patient_id)
         except SingingSession.DoesNotExist as exc:
             raise NotFound() from exc
+        from .playback import validate_playback_metadata
+        import hashlib, json
+        metadata = validate_playback_metadata(playback_metadata, session=session)
+        digest = hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         if session.submission_idempotency_key:
+            if session.submission_body_digest and session.submission_body_digest != digest:
+                raise SingingSubmissionConflict('同一幂等键的播放元数据不同')
             if session.submission_idempotency_key != idempotency_key:
                 raise SingingSubmissionConflict()
             tasks = tuple(_session_tasks(session.id, generation=0).values_list("id", flat=True))
@@ -365,10 +373,12 @@ def submit_session(*, session_id: UUID, patient_id: UUID, idempotency_key: str) 
         if session.analysis_generation != 0:
             raise SingingSubmissionConflict("首次提交的分析代际无效")
         tasks = _create_generation_tasks_locked(session=session, generation=0)
+        session.playback_metadata = metadata
+        session.submission_body_digest = digest
         session.submission_idempotency_key = idempotency_key
         session.status = SingingSession.Status.PROCESSING
         session.submitted_at = timezone.now()
-        session.save(update_fields=["submission_idempotency_key", "status", "submitted_at", "updated_at"])
+        session.save(update_fields=["submission_idempotency_key", "submission_body_digest", "playback_metadata", "status", "submitted_at", "updated_at"])
         for task in tasks:
             transaction.on_commit(lambda task_id=task.id: schedule_singing_analysis_task(task_id))
         task_ids = tuple(_session_tasks(session.id, generation=0).values_list("id", flat=True))

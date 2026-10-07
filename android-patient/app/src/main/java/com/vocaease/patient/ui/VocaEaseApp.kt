@@ -356,7 +356,16 @@ private fun AppNavHost(
             val route = entry.toRoute<AppRoute.Recording>()
             recordingContent(
                 route.draftId,
-                { navController.popBackStack() },
+                {
+                    val preparation = navController.previousBackStackEntry
+                    if (preparation?.destination?.hasRoute<AppRoute.Preparation>() == true) {
+                        val songId = preparation.toRoute<AppRoute.Preparation>().songId
+                        navController.navigate(AppRoute.Preparation(songId)) {
+                            popUpTo<AppRoute.Preparation> { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    } else navController.popBackStack()
+                },
                 { draftId ->
                     navController.navigate(AppRoute.Review(draftId)) {
                         popUpTo(AppRoute.Recording(draftId)) { inclusive = true }
@@ -642,6 +651,7 @@ private fun PreparationRoute(
                 PreparationViewModel(
                     songId = songId,
                     songSource = VocaEasePreparationSongSource(container.patientApi),
+                    lyricsRepository = com.vocaease.patient.feature.training.LyricsRepository { container.patientApi.songLyrics(it).data },
                     readinessSource = AndroidReadinessSource(
                         activity,
                         { permissionsRequested },
@@ -711,6 +721,7 @@ private fun PreparationRoute(
     BackHandler(onBack = abandonAndBack)
     PreparationScreen(
         state = state,
+        onRetryLyrics = viewModel::retryLyrics,
         onBack = abandonAndBack,
         onStart = { scope.launch { viewModel.startTraining() } },
         onRequestPermissions = {
@@ -727,6 +738,7 @@ private fun PreparationRoute(
         },
         onRetry = { scope.launch { viewModel.load() } },
         onPreviewToggle = { scope.launch { viewModel.togglePreview() } },
+        onModeChange = { mode -> scope.launch { viewModel.switchPreviewMode(mode) } },
         onRetryPreview = { scope.launch { viewModel.retryPreview() } },
     )
 }
@@ -774,11 +786,12 @@ private fun RecordingRoute(
     val tempFiles = remember(context) { PrivateRecordingTempFiles(context).also { it.cleanupOrphans() } }
     val coordinator = remember(draftId, previewView, lifecycleOwner, playback, storage) {
         DefaultRecordingCoordinator(
-            capture = container.recordingCaptureFactory.create(context, lifecycleOwner, previewView.surfaceProvider),
+            capture = container.recordingCaptureFactory.create(context, lifecycleOwner, previewView.surfaceProvider) { previewView.viewPort },
             playback = playback,
             clockNanos = container.monotonicClock::nowNanoseconds,
             tempFiles = tempFiles,
             publisher = AccountScopedRecordingArtifactPublisher(storage),
+            persistMetadata = storage::savePlaybackMetadata,
         )
     }
     val factory = remember(draftId, coordinator, storage) {
@@ -790,6 +803,8 @@ private fun RecordingRoute(
                     AccountScopedRecordingDraftGateway(storage),
                     // Task 7 已向患者展示 3、2、1；本页只完成状态机交接，避免重复等待。
                     countdownTick = {},
+                    lyricsRepository = com.vocaease.patient.feature.training.LyricsRepository { container.patientApi.songLyrics(it).data },
+                    referenceRepository = com.vocaease.patient.feature.training.ReferencePitchRepository { id, version -> container.patientApi.referencePitch(id, version).data },
                     dispatcher = container.dispatchers.io,
                 )
             }
@@ -843,18 +858,22 @@ private fun RecordingRoute(
     }
     val leave = {
         scope.launch {
-            recordingViewModel.leave()
-            onBack()
+            recordingViewModel.requestExit()
         }
         Unit
     }
     BackHandler(onBack = leave)
     RecordingScreen(
+        onRetryLyrics = recordingViewModel::retryLyrics,
+        onRetryReferencePitch = recordingViewModel::retryReferencePitch,
+        onConfirmExit = { scope.launch { if (recordingViewModel.confirmExit()) onBack() } },
+        onCancelExit = { scope.launch { recordingViewModel.cancelExit() } },
         state = state,
         preview = {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
         },
         onStop = { scope.launch { recordingViewModel.stop() } },
+        onModeChange = { mode -> scope.launch { recordingViewModel.switchMode(mode) } },
         onClose = leave,
     )
 }

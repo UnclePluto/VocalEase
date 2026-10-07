@@ -64,8 +64,20 @@ internal interface VocaEaseApi {
     suspend fun previewSong(
         @Path("song_id") songId: String,
         @Tag authContext: AuthRequestContext = AuthRequestContext.Current,
-        @Query("track") track: String = "accompaniment",
+        @Query("track") track: String = "source",
     ): ApiEnvelope<PrivateUrlDto>
+
+    @POST("api/v1/patient/singing-sessions/{session_id}/song-playback/")
+    suspend fun sessionSongPlayback(@Path("session_id") sessionId: String, @Query("track") track: String,
+        @Tag authContext: AuthRequestContext = AuthRequestContext.Current): ApiEnvelope<com.vocaease.patient.core.network.dto.SongPlaybackGrantDto>
+
+    @GET("api/v1/patient/songs/{song_id}/lyrics/")
+    suspend fun songLyrics(@Path("song_id") songId: String,
+        @Tag authContext: AuthRequestContext = AuthRequestContext.Current): ApiEnvelope<com.vocaease.patient.core.network.dto.SongLyricsDto>
+
+    @GET("api/v1/patient/songs/{song_id}/reference-pitch/")
+    suspend fun referencePitch(@Path("song_id") songId: String, @Query("version") version: String?,
+        @Tag authContext: AuthRequestContext = AuthRequestContext.Current): ApiEnvelope<com.vocaease.patient.core.network.dto.ReferencePitchDto>
 
     @GET("api/v1/patient/singing-sessions/")
     suspend fun sessions(
@@ -116,6 +128,7 @@ internal interface VocaEaseApi {
         @Path("session_id") sessionId: String,
         @Header("Idempotency-Key") idempotencyKey: String,
         @Tag authContext: AuthRequestContext = AuthRequestContext.Current,
+        @Body request: com.vocaease.patient.core.network.dto.SubmitSessionRequestDto = com.vocaease.patient.core.network.dto.SubmitSessionRequestDto(),
     ): ApiEnvelope<SessionMutationDto>
 
     @POST("api/v1/patient/singing-sessions/{session_id}/cancel/")

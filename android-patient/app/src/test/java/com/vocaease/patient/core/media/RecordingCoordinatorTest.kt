@@ -15,6 +15,37 @@ import org.junit.Test
 
 class RecordingCoordinatorTest {
     @Test
+    fun `退出弹框暂停采集播放且取消后同次录制继续并扣除暂停时长`() = runBlocking {
+        var now = 1_000_000_000L
+        val capture = FakeCapture()
+        val playback = FakePlayback()
+        val publisher = FakePublisher()
+        val coordinator = DefaultRecordingCoordinator(capture, playback, { now }, FakeTempFiles(), publisher)
+        coordinator.takeOver("draft")
+        coordinator.onCountdownFinished()
+        capture.emit(CaptureEvent.Started)
+        now += 2_000_000_000L
+        assertTrue(coordinator.pause())
+        assertTrue(capture.paused)
+        assertFalse(playback.playing)
+        assertTrue(coordinator.state.value is RecordingState.Paused)
+        now += 10_000_000_000L
+        assertEquals(2_000L, coordinator.recordingDurationMillis)
+        assertTrue(coordinator.resume())
+        assertFalse(capture.paused)
+        assertTrue(playback.playing)
+        now += 1_000_000_000L
+        assertEquals(3_000L, coordinator.recordingDurationMillis)
+        assertEquals(1, capture.startCount)
+        assertEquals(0, publisher.calls)
+        assertTrue(coordinator.pause())
+        coordinator.interrupt(RecordingInterruption.CANCELLED)
+        coordinator.close()
+        capture.emit(CaptureEvent.Finalized(3_000))
+        assertEquals(0, publisher.calls)
+        assertFalse(coordinator.resume())
+    }
+    @Test
     fun `Countdown中断后倒计时协程迟到不得创建暂存启动采集或播放`() = runBlocking {
         for (reason in listOf(RecordingInterruption.AUDIO, RecordingInterruption.CAMERA)) {
             val capture = FakeCapture()
@@ -351,12 +382,37 @@ class RecordingCoordinatorTest {
         assertEquals(0L, starting.recordingDurationMillis)
     }
 
+    @Test fun `元数据写入失败停止采集并禁止发布`() = runBlocking {
+        for (failureAt in listOf(1,2)) for (failure in listOf(java.io.IOException("磁盘已满"), StaleAccountScopeException())) {
+            val now=java.util.concurrent.atomic.AtomicLong(1_000_000_000L);var writes=0
+            val capture = FakeCapture(); val playback = FakePlayback()
+            val bound = object : RecordingPlayback by playback {
+                override val playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto("00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002")
+            }
+            val files = FakeTempFiles(); val publisher = FakePublisher()
+            val coordinator = DefaultRecordingCoordinator(capture, bound, now::get, files, publisher) { _, _ -> if(++writes==failureAt) throw failure else now.addAndGet(5_000_000_000L) }
+            try {
+                coordinator.takeOver("draft-1"); coordinator.onCountdownFinished(); capture.emit(CaptureEvent.Started)
+                kotlinx.coroutines.withTimeout(2000) {
+                    while (coordinator.state.value !is RecordingState.Interrupted) kotlinx.coroutines.delay(10)
+                }
+                val reason = if (failure is StaleAccountScopeException) RecordingInterruption.ACCOUNT_CHANGED else RecordingInterruption.STORAGE
+                assertEquals(RecordingState.Interrupted(reason), coordinator.state.value)
+                assertEquals(1, capture.stopCount); assertTrue(files.cleaned)
+                capture.emit(CaptureEvent.Finalized(1000)); assertEquals(0, publisher.calls)
+            } finally { coordinator.close() }
+        }
+    }
+
     private fun coordinator(capture: FakeCapture) = DefaultRecordingCoordinator(
         capture, FakePlayback(), { 1L }, FakeTempFiles(), FakePublisher(),
     )
 }
 
 private class FakeCapture(private val calls: MutableList<String> = mutableListOf()) : RecordingCapture {
+    var paused = false
+    override suspend fun pause() { paused = true }
+    override suspend fun resume() { paused = false }
     override var listener: suspend (CaptureEvent) -> Unit = {}
     var frontCamera = false
     var audioEnabled = false
@@ -378,6 +434,8 @@ private class FakeCapture(private val calls: MutableList<String> = mutableListOf
 }
 
 private class FakePlayback(private val calls: MutableList<String> = mutableListOf()) : RecordingPlayback {
+    override suspend fun pause(): Boolean { playing = false; return true }
+    override suspend fun resume(): Boolean { play(); return true }
     override val currentPositionMillis: Long = 0
     var playing = false
     var playCount = 0

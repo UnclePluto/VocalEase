@@ -30,6 +30,27 @@ import org.junit.Test
 
 class DtoDomainMappingTest {
     @Test
+    fun `创建响应包含医生伴奏能力字段时仍可恢复患者会话`() {
+        val root = apiJson.parseToJsonElement(fixture("fixtures/session.json")).jsonObject
+        val data = root.getValue("data").jsonObject
+        val playback = JsonObject(mapOf(
+            "source_asset_id" to JsonPrimitive(ASSET_ID),
+            "accompaniment_asset_id" to JsonPrimitive(ASSET_ID),
+            "reference_version" to JsonNull,
+            "combined_available" to JsonPrimitive(false),
+            "metadata" to JsonNull,
+            "alignment_verified" to JsonPrimitive(false),
+            "accompaniment_offset_ms" to JsonNull,
+            "accompaniment_preview_available" to JsonPrimitive(true),
+            "accompaniment_preview_asset_id" to JsonPrimitive(ASSET_ID),
+        ))
+        val response = JsonObject(root + ("data" to JsonObject(data + ("playback" to playback))))
+        val session = apiJson.decodeFromString<ApiEnvelope<SingingSessionDto>>(response.toString()).data.toDomain()
+        assertEquals(UUID.fromString(SESSION_ID), session.id)
+        assertEquals(ASSET_ID, session.playback?.accompanimentAssetId)
+    }
+
+    @Test
     fun `自由演唱详情与历史允许没有治疗计划`() {
         val detail = apiJson.decodeFromString<ApiEnvelope<SingingSessionDto>>(
             fixture("fixtures/session.json"),

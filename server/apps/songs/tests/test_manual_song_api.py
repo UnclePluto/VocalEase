@@ -34,6 +34,8 @@ def test_manual_song_publishes_and_resource_update_uses_expected_asset(tmp_path,
     vocal = upload("song_vocal", b"vocal", song_id)
     first = client.patch(f"/api/v1/admin/songs/{song_id}/resources/", {"updates": {"vocal_asset": vocal["asset_id"]}, "expected": {"vocal_asset": None}}, format="json")
     assert first.status_code == 200, first.content
+    from apps.songs.models import SongReferencePitch
+    assert SongReferencePitch.objects.filter(song_id=song_id, input_asset_id=vocal['asset_id'], status='pending').exists()
     assert first.json()["data"]["publication_status"] == "published"
     assert client.patch(f"/api/v1/admin/songs/{song_id}/resources/", {"updates": {"vocal_asset": vocal["asset_id"]}, "expected": {"vocal_asset": None}}, format="json").status_code == 409
     preview = client.post(f"/api/v1/admin/songs/{song_id}/preview/", {"track": "vocal"}, format="json")

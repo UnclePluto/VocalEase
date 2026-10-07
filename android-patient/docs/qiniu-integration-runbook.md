@@ -199,3 +199,11 @@ adb -s emulator-5556 shell start
 
 交付 APK：`app/build/outputs/apk/online-test/vocaease-aac-online-test-20260929.apk`（本地测试签名）。
 SHA-256：`88155f6f98d80cbf6cf753bb6af1dd6d6c31b3346220c03a8e582311be67160a`。
+
+## 新演唱同步合同验收
+
+使用授权测试账户创建会话后记录 source/accompaniment/reference UUID（不记录私有URL）。录制结束确认仅一条患者AAC和一条H.264，上传双方可信回执后提交 playback_metadata：schema_version=1、sample_rate=48000或44100、会话绑定资产及参考版本、recording_ms/song_ms/track/playing/segment锚点和模式变化。
+
+同一幂等键不同元数据应409；完全相同重试应成功复用。后台伴奏授权必须来自会话 playback-accompaniment API；曲库换轨不能影响已创建会话。后台只读取 singing_audio 的实际采样，录像静音，组合播放用患者音频主时钟映射锚点。
+
+七牛域名的 Range/CORS、前台/后台应用来源及签名过期刷新必须实测。静音可显示无稳定音高，授权/CORS错误应明确失败，不绘制随机回退数据。真实参考可从核验的 song_vocal 生成或由医生导入带出处的标注；验收曲目全部 ready 才能宣称参考图完成。

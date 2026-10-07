@@ -1,10 +1,13 @@
 package com.vocaease.patient.feature.training
 
+import com.vocaease.patient.core.network.dto.SongLyricsDto
+import com.vocaease.patient.core.network.dto.LyricLineDto
 import com.vocaease.patient.core.media.RecordingCoordinator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -16,6 +19,90 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RecordingViewModelTest {
+    @Test
+    fun `返回先暂停二次确认取消继续确认丢弃且重复确认不重复导航`() = runBlocking {
+        val coordinator = FakeRecordingSession()
+        val gateway = FakeRecordingDraftGateway()
+        val model = RecordingViewModel("draft", coordinator, gateway, {}, kotlinx.coroutines.Dispatchers.Unconfined)
+        model.start()
+        coordinator.emit(RecordingState.Recording(1L, 0L))
+        model.requestExit()
+        assertTrue(model.state.value.showExitConfirmation)
+        assertEquals(1, coordinator.pauseCount)
+        assertEquals(0, coordinator.closeCount)
+        assertEquals(0, gateway.discardCount)
+        model.cancelExit()
+        assertFalse(model.state.value.showExitConfirmation)
+        assertEquals(1, coordinator.resumeCount)
+        model.requestExit()
+        assertTrue(model.confirmExit())
+        assertFalse(model.confirmExit())
+        assertEquals(1, gateway.discardCount)
+        assertEquals(1, coordinator.closeCount)
+        assertEquals(listOf(RecordingInterruption.CANCELLED), coordinator.interruptions)
+    }
+
+    @Test
+    fun `等待录制启动时请求返回不得错过暂停且音高失败可单独重试`() = runBlocking {
+        val coordinator = FakeRecordingSession().apply {
+            playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion="bound", alignmentVerified=true, accompanimentOffsetMs=0)
+        }
+        var failing = true
+        val model = RecordingViewModel("draft",coordinator,FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
+            referenceRepository=ReferencePitchRepository { _,version -> if(failing) error("offline") else com.vocaease.patient.core.network.dto.ReferencePitchDto("ready",version) })
+        model.start()
+        assertEquals(ReferencePitchState.Failed,model.state.value.referencePitch)
+        failing = false
+        model.retryReferencePitch()
+        assertTrue(model.state.value.referencePitch is ReferencePitchState.Ready)
+        val request = async { model.requestExit() }
+        assertFalse(model.state.value.showExitConfirmation)
+        coordinator.emit(RecordingState.Recording(1L,0L))
+        request.await()
+        assertTrue(model.state.value.showExitConfirmation)
+        assertTrue(model.confirmExit())
+    }
+    @Test fun `录制读取真实歌词失败也不阻止启动`() = runBlocking {
+        val model = RecordingViewModel("draft",FakeRecordingSession(),FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
+            lyricsRepository = LyricsRepository { SongLyricsDto(listOf(LyricLineDto(1000,"真实歌词"))) })
+        model.start()
+        assertEquals("真实歌词",(model.state.value.lyrics as LyricsState.Ready).lines.first().text)
+        model.leave()
+        val failed = RecordingViewModel("draft",FakeRecordingSession(),FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,
+            lyricsRepository = LyricsRepository { error("断网") })
+        failed.start()
+        assertEquals(LyricsState.Failed,failed.state.value.lyrics)
+        assertTrue(failed.state.value.songTitle.isNotEmpty())
+        failed.leave()
+    }
+
+    @Test fun `未校准的伴奏不展示原唱参考音高但保留录制启动`() = runBlocking {
+        val coordinator = FakeRecordingSession().apply {
+            playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion = "version", alignmentVerified = false)
+        }
+        val reference = ReferencePitchRepository { _, version ->
+            com.vocaease.patient.core.network.dto.ReferencePitchDto("ready", version, notes = listOf(com.vocaease.patient.core.network.dto.ReferenceNoteDto(1000,2000,60f,1f)))
+        }
+        val model = RecordingViewModel("draft",coordinator,FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,referenceRepository = reference)
+        model.start()
+        assertFalse(model.state.value.referencePitch is ReferencePitchState.Ready)
+        assertTrue(model.state.value.songTitle.isNotEmpty())
+        model.leave()
+    }
+
+    @Test fun `已校准的伴奏仍展示绑定版本的参考音高`() = runBlocking {
+        val coordinator = FakeRecordingSession().apply {
+            playbackBinding = com.vocaease.patient.core.network.dto.PlaybackBindingDto(referenceVersion = "version", alignmentVerified = true, accompanimentOffsetMs = 2000)
+        }
+        val reference = ReferencePitchRepository { _, version ->
+            com.vocaease.patient.core.network.dto.ReferencePitchDto("ready", version, notes = listOf(com.vocaease.patient.core.network.dto.ReferenceNoteDto(1000,2000,60f,1f)))
+        }
+        val model = RecordingViewModel("draft",coordinator,FakeRecordingDraftGateway(),{},kotlinx.coroutines.Dispatchers.Unconfined,referenceRepository = reference)
+        model.start()
+        assertEquals(ReferencePitchState.Ready("version",listOf(com.vocaease.patient.core.network.dto.ReferenceNoteDto(1000,2000,60f,1f))),model.state.value.referencePitch)
+        model.leave()
+    }
+
     @Test
     fun `真正进入Recording后才确认Task7 handoff并开启屏幕常亮`() = runBlocking {
         val coordinator = FakeRecordingSession()
@@ -181,6 +268,21 @@ class RecordingViewModelTest {
 }
 
 private class FakeRecordingSession : RecordingCoordinator {
+    var pauseCount = 0
+    var resumeCount = 0
+    override suspend fun pause(): Boolean {
+        val recording = mutable.value as? RecordingState.Recording ?: return false
+        pauseCount++
+        mutable.value = RecordingState.Paused(recording, recording.startedAtNanos)
+        return true
+    }
+    override suspend fun resume(): Boolean {
+        val paused = mutable.value as? RecordingState.Paused ?: return false
+        resumeCount++
+        mutable.value = paused.recording
+        return true
+    }
+    override var playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null
     private val mutable = MutableStateFlow<RecordingState>(RecordingState.Countdown(3))
     override val state: StateFlow<RecordingState> = mutable
     var stopCount = 0
@@ -207,6 +309,8 @@ private class FakeRecordingSession : RecordingCoordinator {
 }
 
 private class FakeRecordingDraftGateway : RecordingDraftGateway {
+    var discardCount = 0
+    override suspend fun discard(draftId: String) { discardCount++ }
     var ackCount = 0
     var interruption: RecordingInterruption? = null
     var ackFailure = false

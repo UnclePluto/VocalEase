@@ -20,6 +20,7 @@ import com.vocaease.patient.core.media.PreviewGrantSource
 import com.vocaease.patient.core.network.NetworkContractException
 import com.vocaease.patient.core.network.PatientApi
 import com.vocaease.patient.core.network.dto.CreateSessionRequestDto
+import com.vocaease.patient.core.network.dto.asInstant
 import com.vocaease.patient.core.network.dto.toDomain
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -39,8 +40,24 @@ class VocaEasePreparationSongSource(
 class VocaEasePreviewGrantSource(
     private val api: PatientApi,
 ) : PreviewGrantSource {
-    override suspend fun fetch(songId: String): PreviewGrant = api.previewSong(songId).data.toDomain().let {
-        PreviewGrant(it.url, it.expiresAt)
+    override suspend fun fetch(songId: String): PreviewGrant = fetch(songId, com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL, null)
+    override suspend fun fetch(songId: String, mode: com.vocaease.patient.core.media.SongPlaybackMode, sessionId: String?): PreviewGrant {
+        if (sessionId == null) {
+            val grant=api.previewSong(songId,mode.wire).data
+            val offset=if(mode==com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT) {
+                if (grant.alignmentVerified) grant.accompanimentOffsetMs ?: throw NetworkContractException("伴奏同步数据不完整") else 0L
+            } else 0L
+            val url=grant.toDomain()
+            return PreviewGrant(url.url,url.expiresAt,timelineOffsetMillis=offset)
+        }
+        val binding = api.session(sessionId).data.playback ?: error("会话缺少媒体快照")
+        val grant = api.sessionSongPlayback(sessionId, mode.wire).data
+        val expected = if (mode == com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL) binding.sourceAssetId else binding.accompanimentAssetId
+        require(grant.assetId.isNotBlank() && grant.assetId == expected) { "会话媒体版本不一致" }
+        val offset=if(mode==com.vocaease.patient.core.media.SongPlaybackMode.ACCOMPANIMENT) {
+            if (binding.alignmentVerified) binding.accompanimentOffsetMs ?: throw NetworkContractException("会话伴奏同步数据不完整") else 0L
+        } else 0L
+        return PreviewGrant(grant.url, grant.expiresAt.asInstant("grant.expires_at"), grant.assetId, binding,offset)
     }
 }
 

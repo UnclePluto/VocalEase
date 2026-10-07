@@ -188,6 +188,9 @@ def create_song(*, actor, request_id: str, song_id: UUID | None, source_asset: U
             **values,
         )
         record(actor=actor, action="song.create", target=song, changes={"title": song.title, "artist": song.artist, "genre": song.genre, "language": song.language, "duration_seconds": song.duration_seconds, "source": _source_snapshot(asset)}, request_id=request_id)
+        if song.vocal_asset_id:
+            from .reference_pitch_services import queue_reference_pitch
+            queue_reference_pitch(song)
         if auto_analyze:
             from apps.analysis.services import request_song_analysis
             request_song_analysis(song=song, source_asset=asset, task_type="vocal_separation")

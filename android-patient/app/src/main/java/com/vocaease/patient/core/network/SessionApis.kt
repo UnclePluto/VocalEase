@@ -34,6 +34,10 @@ interface PatientApi {
     suspend fun songs(page: Int? = null, pageSize: Int? = null, keyword: String? = null, sort: String? = null): ApiEnvelope<SongPageDto>
     suspend fun song(songId: String): ApiEnvelope<SongDto>
     suspend fun previewSong(songId: String): ApiEnvelope<PrivateUrlDto>
+    suspend fun previewSong(songId: String, track: String): ApiEnvelope<PrivateUrlDto> = previewSong(songId)
+    suspend fun sessionSongPlayback(sessionId: String, track: String): ApiEnvelope<com.vocaease.patient.core.network.dto.SongPlaybackGrantDto> = error("会话播放未实现")
+    suspend fun songLyrics(songId: String): ApiEnvelope<com.vocaease.patient.core.network.dto.SongLyricsDto> = error("歌词未实现")
+    suspend fun referencePitch(songId: String, version: String?): ApiEnvelope<com.vocaease.patient.core.network.dto.ReferencePitchDto> = error("参考音高未实现")
     suspend fun sessions(
         page: Int? = null,
         pageSize: Int? = null,
@@ -51,6 +55,7 @@ interface PatientApi {
     suspend fun patientMediaUploadGrant(request: PatientMediaUploadGrantRequestDto): ApiEnvelope<PatientMediaUploadGrantDto>
     suspend fun confirmSessionMedia(sessionId: String, request: ConfirmSessionMediaRequestDto): ApiEnvelope<SingingSessionDto>
     suspend fun submitSession(sessionId: String, idempotencyKey: String): ApiEnvelope<SessionMutationDto>
+    suspend fun submitSession(sessionId:String,idempotencyKey:String,metadata:com.vocaease.patient.core.media.PlaybackMetadata?):ApiEnvelope<SessionMutationDto> = submitSession(sessionId,idempotencyKey)
     suspend fun cancelSession(sessionId: String): ApiEnvelope<SingingSessionDto>
     suspend fun retrySession(sessionId: String, idempotencyKey: String): ApiEnvelope<SessionMutationDto>
     suspend fun patientMediaPrivateUrl(assetId: String): ApiEnvelope<PrivateUrlDto>
@@ -76,6 +81,10 @@ internal class RefreshingPatientApi(
     override suspend fun songs(page: Int?, pageSize: Int?, keyword: String?, sort: String?) =
         protectedCall { authContext -> songs(page, pageSize, keyword, sort, authContext) }
     override suspend fun song(songId: String) = protectedCall { authContext -> song(songId, authContext) }
+    override suspend fun previewSong(songId: String, track: String) = protectedCall { context -> previewSong(songId, context, track) }
+    override suspend fun sessionSongPlayback(sessionId: String, track: String) = protectedCall { context -> sessionSongPlayback(sessionId, track, context) }
+    override suspend fun songLyrics(songId: String) = protectedCall { context -> songLyrics(songId, context) }
+    override suspend fun referencePitch(songId: String, version: String?) = protectedCall { context -> referencePitch(songId, version, context) }
     override suspend fun previewSong(songId: String) =
         protectedCall { authContext -> previewSong(songId, authContext) }
     override suspend fun sessions(
@@ -97,6 +106,7 @@ internal class RefreshingPatientApi(
         protectedCall { authContext -> patientMediaUploadGrant(request, authContext) }
     override suspend fun confirmSessionMedia(sessionId: String, request: ConfirmSessionMediaRequestDto) =
         protectedCall { authContext -> confirmSessionMedia(sessionId, request, authContext) }
+    override suspend fun submitSession(sessionId:String,idempotencyKey:String,metadata:com.vocaease.patient.core.media.PlaybackMetadata?) = protectedCall { context -> submitSession(sessionId,idempotencyKey,context,com.vocaease.patient.core.network.dto.SubmitSessionRequestDto(metadata)) }
     override suspend fun submitSession(sessionId: String, idempotencyKey: String) =
         protectedCall { authContext -> submitSession(sessionId, idempotencyKey, authContext) }
     override suspend fun cancelSession(sessionId: String) =

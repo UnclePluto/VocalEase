@@ -36,14 +36,14 @@ public abstract class ValidateReleaseApiBaseUrlTask extends DefaultTask {
                 && uri.getRawUserInfo() == null
                 && uri.getRawQuery() == null
                 && uri.getRawFragment() == null
-                && rawUrl.endsWith("/");
+                && "/".equals(uri.getRawPath());
         if (!valid) {
             throw invalidUrl(null);
         }
     }
 
     private GradleException invalidUrl(Throwable cause) {
-        String message = "release API 地址必须是包含真实主机且以 / 结尾的完整 HTTPS URL";
+        String message = "release API 地址必须是 HTTPS 域名根地址（例如 https://api.example/），不能包含 /api/ 等路径；接口会自动添加 api/v1";
         return cause == null ? new GradleException(message) : new GradleException(message, cause);
     }
 }

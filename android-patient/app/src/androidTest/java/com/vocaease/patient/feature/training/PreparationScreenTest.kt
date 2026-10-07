@@ -1,6 +1,13 @@
 package com.vocaease.patient.feature.training
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -27,6 +34,54 @@ class PreparationScreenTest {
     val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
+    fun 已上传歌词显示正文而不是占位提示() {
+        composeRule.setContent {
+            VocaEaseTheme {
+                PreparationScreen(state=state().copy(lyrics=LyricsState.Ready(listOf(
+                    com.vocaease.patient.core.network.dto.LyricLineDto(1000,"成都真实歌词")))),
+                    onBack={},onStart={},onRequestPermissions={},onOpenSettings={},onRetry={})
+            }
+        }
+        composeRule.onNodeWithText("成都真实歌词").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("歌词暂未提供").assertDoesNotExist()
+    }
+
+    @Test
+    fun 小屏大字体时开始始终可见且权限说明可以滚动到达() {
+        var starts = 0
+        composeRule.setContent {
+            VocaEaseTheme {
+                CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1.4f)) {
+                    Box(Modifier.requiredSize(320.dp, 520.dp)) {
+                        PreparationScreen(
+                            state = state(), onBack = {}, onStart = { starts++ },
+                            onRequestPermissions = {}, onOpenSettings = {}, onRetry = {},
+                        )
+                    }
+                }
+            }
+        }
+        composeRule.onNodeWithTag("start-singing").assertIsDisplayed().performClick()
+        composeRule.runOnIdle { assertEquals(1, starts) }
+        composeRule.onNodeWithText("摄像头与麦克风已就绪").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("start-singing").assertIsDisplayed()
+    }
+
+    @Test
+    fun 小屏上切换失败提示始终可见() {
+        composeRule.setContent {
+            VocaEaseTheme {
+                Box(Modifier.requiredSize(320.dp, 520.dp)) {
+                    PreparationScreen(state = state().copy(errorMessage = "试听切换失败，已保留原唱，请重试"),
+                        onBack = {}, onStart = {}, onRequestPermissions = {}, onOpenSettings = {}, onRetry = {})
+                }
+            }
+        }
+        composeRule.onNodeWithText("试听切换失败，已保留原唱，请重试").assertIsDisplayed()
+        composeRule.onNodeWithTag("start-singing").assertIsDisplayed()
+    }
+
+    @Test
     fun 准备页匹配PEN信息结构且歌词只显示产品空态() {
         composeRule.setContent {
             VocaEaseTheme {
@@ -43,10 +98,14 @@ class PreparationScreenTest {
 
         listOf(
             "演唱准备", "小幸运", "田馥甄  ·  4:25", "歌词暂未提供", "开始前请确认",
-            "完整露出面部", "将手机放稳，确保面部完整出现在画面中。",
+            "露出嘴部、下颌和颈部", "将手机放稳，让鼻子以下到颈部出现在引导框中。",
             "建议连接带麦耳机", "推荐使用带 Mic 的有线或蓝牙耳机，收音更清晰。",
             "摄像头与麦克风已就绪", "开始演唱",
-        ).forEach { composeRule.onNodeWithText(it).assertIsDisplayed() }
+        ).forEach {
+            val node = composeRule.onNodeWithText(it)
+            if (it != "演唱准备" && it != "开始演唱") node.performScrollTo()
+            node.assertIsDisplayed()
+        }
         composeRule.onNodeWithText("我听见雨滴落在青青草地").assertDoesNotExist()
         composeRule.onNodeWithText("非临床结论").assertDoesNotExist()
         composeRule.onNodeWithTag("start-singing").assertIsEnabled().assertHeightIsAtLeast(56.dp)
@@ -76,7 +135,7 @@ class PreparationScreenTest {
         }
 
         composeRule.onNodeWithTag("start-singing").assertIsNotEnabled()
-        composeRule.onNodeWithText("前往系统设置").performClick()
+        composeRule.onNodeWithText("前往系统设置").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(1, openSettings) }
     }
 
@@ -97,7 +156,7 @@ class PreparationScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("未检测到耳机，使用扬声器可能产生串音").assertIsDisplayed()
+        composeRule.onNodeWithText("未检测到耳机，使用扬声器可能产生串音").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("start-singing").assertIsEnabled()
     }
 
@@ -123,9 +182,9 @@ class PreparationScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("试听加载失败，请重试").assertIsDisplayed()
+        composeRule.onNodeWithText("试听加载失败，请重试").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("歌曲正在缓冲").assertDoesNotExist()
-        composeRule.onNodeWithText("重新试听").performClick()
+        composeRule.onNodeWithText("重新试听").performScrollTo().performClick()
         composeRule.runOnIdle {
             assertEquals(0, previewToggle)
             assertEquals(1, previewRetry)

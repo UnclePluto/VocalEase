@@ -1,6 +1,8 @@
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework.views import APIView
+from rest_framework import serializers
+from .views import PatientCatalogPermission, PatientSongDetailView
 
 from apps.accounts.views import api_response
 from common.api.permissions import IsAdminNamespaceUser, MustChangePasswordPermission
@@ -29,3 +31,26 @@ class AdminSongLyricsView(APIView):
     def get(self, request, song_id):
         song = get_object_or_404(songs_for_admin(), pk=song_id)
         return api_response(data={"lines": read_song_lyrics(song=song)}, request_id=request.request_id)
+
+
+class LyricLineSerializer(serializers.Serializer):
+    time_ms = serializers.IntegerField(min_value=0)
+    text = serializers.CharField(allow_blank=True)
+
+
+class SongLyricsDataSerializer(serializers.Serializer):
+    lines = LyricLineSerializer(many=True)
+
+
+class SongLyricsEnvelopeSerializer(ApiEnvelopeSerializer):
+    data = SongLyricsDataSerializer()
+
+
+class PatientSongLyricsView(APIView):
+    permission_classes = [PatientCatalogPermission, MustChangePasswordPermission]
+
+    @extend_schema(responses={200: SongLyricsEnvelopeSerializer})
+    def get(self, request, song_id):
+        song = PatientSongDetailView().get_object(song_id)
+        lines = read_song_lyrics(song=song) if song.lyrics_asset_id else []
+        return api_response(data={"lines": lines}, request_id=request.request_id)

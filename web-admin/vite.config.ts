@@ -9,6 +9,8 @@ export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, 'e2e/**'],
     environment: 'jsdom',
+    // Waviz 的 ESM 包省略内部扩展名，交给 Vite 解析，与生产构建一致。
+    server: { deps: { inline: ['waviz'] } },
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     restoreMocks: true,

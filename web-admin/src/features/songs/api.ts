@@ -125,3 +125,9 @@ export function uploadWithGrant(grant: UploadGrant, file: File, options: { signa
     }
   })
 }
+
+export function generateSongReferencePitch(id: string, fingerprint: string, force = false) {
+  return apiRequest<{ version: string; status: string }>(`/v1/admin/songs/${id}/reference-pitch/generate/`, {
+    method: 'POST', body: JSON.stringify({ expected_fingerprint: fingerprint, force }),
+  })
+}

@@ -18,7 +18,7 @@ analyzer = Path(os.environ["ANDROID_HOME"]) / "cmdline-tools/latest/bin/apkanaly
 dex = subprocess.check_output([str(analyzer), "dex", "code", "--class", classes[api], str(apk)], text=True)
 methods = re.findall(r"\.method[\s\S]*?\.end method", dex)
 source = (root / "app/src/main/java/com/vocaease/patient/core/network/VocaEaseApi.kt").read_text()
-responses = re.findall(r"suspend fun (\w+)\([\s\S]*?\): ApiEnvelope<(\w+)>", source)
+responses = re.findall(r"suspend fun (\w+)\((?:(?!suspend fun)[\s\S])*?\):\s*ApiEnvelope<([\w.]+)>", source)
 if not responses:
     sys.exit("未找到待检查的接口")
 section = mapping.split(api + " -> " + classes[api] + ":", 1)[1].split("\ncom.", 1)[0]
@@ -31,7 +31,7 @@ for method_name, dto in responses:
             errors.append("changePassword: 改密接口已移除")
         continue  # 没有生产调用的接口方法可以被正常移除。
     checked += 1
-    candidates = [v for k, v in classes.items() if k.endswith("." + dto)]
+    candidates = [v for k, v in classes.items() if k == dto or ("." not in dto and k.endswith("." + dto))]
     if len(candidates) != 1:
         errors.append(f"{method_name}: 响应类型 {dto} 已移除或无法定位")
         continue

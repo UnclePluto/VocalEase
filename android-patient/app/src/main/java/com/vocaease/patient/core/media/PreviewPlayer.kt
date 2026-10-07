@@ -31,10 +31,14 @@ import retrofit2.HttpException
 data class PreviewGrant(
     val url: String,
     val expiresAt: Instant,
+    val assetId: String? = null,
+    val binding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null,
+    val timelineOffsetMillis:Long=0,
 )
 
 fun interface PreviewGrantSource {
     suspend fun fetch(songId: String): PreviewGrant
+    suspend fun fetch(songId: String, mode: SongPlaybackMode, sessionId: String?): PreviewGrant = fetch(songId)
 }
 
 sealed interface PreviewState {
@@ -67,7 +71,11 @@ interface PreviewEngine {
 }
 
 interface PreviewSession {
+    val playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? get() = null
     val state: StateFlow<PreviewState>
+    val activeMode: StateFlow<SongPlaybackMode> get() = MutableStateFlow(SongPlaybackMode.ORIGINAL)
+    suspend fun switchMode(mode: SongPlaybackMode): Boolean = true
+    suspend fun bindSession(sessionId: String): Boolean = true
     val currentPositionMillis: Long get() = 0
     suspend fun prepare(songId: String)
     suspend fun play(): Boolean
@@ -104,13 +112,22 @@ class PreviewPlayer internal constructor(
     private val actorJob: Job
     private val mutableState = MutableStateFlow<PreviewState>(PreviewState.Idle)
     override val state: StateFlow<PreviewState> = mutableState.asStateFlow()
-    override val currentPositionMillis: Long get() = engine.currentPositionMillis.coerceAtLeast(0)
+    override val currentPositionMillis: Long get() = (engine.currentPositionMillis-(currentGrant?.timelineOffsetMillis ?: 0)).coerceAtLeast(0)
+    private val modeState = MutableStateFlow(SongPlaybackMode.ORIGINAL)
+    override val activeMode = modeState.asStateFlow()
+    private var requestedMode = SongPlaybackMode.ORIGINAL
+    private var boundSessionId: String? = null
+    private var pendingSwitch: CompletableDeferred<Boolean>? = null
+    private var switchBackup: SwitchBackup? = null
+    private data class SwitchBackup(val grant: PreviewGrant?, val mode: SongPlaybackMode, val position: Long, val playing: Boolean)
+    override var playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? = null; private set
     private var acceptingCommands = true
     private var generation = 0L
     private var songId: String? = null
     private var currentGrant: PreviewGrant? = null
     private var refreshUsed = false
     private var resumeAfterReady = false
+    private var pausedDuringBuffering = false
     private var mediaLoaded = false
     private var activePreparationToken: PreparationToken? = null
     private var pendingPreparation: CompletableDeferred<Result<Unit>>? = null
@@ -163,6 +180,14 @@ class PreviewPlayer internal constructor(
         return completion.await()
     }
 
+    override suspend fun switchMode(mode: SongPlaybackMode): Boolean = requestSwitch(mode, null, false)
+    override suspend fun bindSession(sessionId: String): Boolean = requestSwitch(SongPlaybackMode.ACCOMPANIMENT, sessionId, true)
+    private suspend fun requestSwitch(mode: SongPlaybackMode, sessionId: String?, reset: Boolean): Boolean {
+        val completion = CompletableDeferred<Boolean>()
+        if (!submit(PreviewCommand.Switch(mode, sessionId, reset, completion))) return false
+        return completion.await()
+    }
+
     override fun release() {
         synchronized(submissionLock) {
             if (acceptingCommands) {
@@ -186,6 +211,7 @@ class PreviewPlayer internal constructor(
                     }
                     is PreviewCommand.GrantResolved -> applyGrant(command)
                     is PreviewCommand.EngineEvent -> applyEngineEvent(command)
+                    is PreviewCommand.Switch -> beginSwitch(command)
                     is PreviewCommand.Play -> applyPlay(command)
                     is PreviewCommand.Pause -> applyPause(command)
                     is PreviewCommand.RewindToStart -> applyRewindToStart(command)
@@ -204,6 +230,37 @@ class PreviewPlayer internal constructor(
         }
     }
 
+    private fun beginSwitch(command: PreviewCommand.Switch) {
+        val id = songId
+        if (id == null || !mediaLoaded) { command.completion.complete(false); return }
+        if (!command.reset && command.mode == modeState.value && pendingSwitch == null) { command.completion.complete(true); return }
+        pendingSwitch?.complete(false)
+        if (switchBackup == null) switchBackup = SwitchBackup(currentGrant, modeState.value, currentPositionMillis, mutableState.value is PreviewState.Playing)
+        engine.pause()
+        activePreparationToken?.cancel()
+        val token = PreparationToken(); activePreparationToken = token
+        generation += 1; requestedMode = command.mode
+        command.sessionId?.let { boundSessionId = it }
+        pendingSwitch = command.completion
+        resumeAfterReady = !command.reset && switchBackup!!.playing
+        mutableState.value = PreviewState.Buffering
+        bindListener(generation, token)
+        fetchGrant(generation, token, id, if (command.reset) 0L else switchBackup!!.position)
+    }
+
+    private fun restoreSwitch(): Boolean {
+        val backup = switchBackup ?: return false
+        pendingSwitch?.complete(false); pendingSwitch = null; switchBackup = null
+        requestedMode = backup.mode; modeState.value = backup.mode
+        generation += 1
+        val token = PreparationToken(); activePreparationToken?.cancel(); activePreparationToken = token
+        bindListener(generation, token)
+        backup.grant?.let { currentGrant = it; engine.load(it.url); engine.seekTo((backup.position+it.timelineOffsetMillis).coerceAtLeast(0)); mediaLoaded = true }
+        resumeAfterReady = backup.playing
+        mutableState.value = PreviewState.Buffering
+        return true
+    }
+
     private fun beginPreparation(command: PreviewCommand.Prepare) {
         val claimed = command.token.withActive {
             activePreparationToken?.cancel()
@@ -216,6 +273,7 @@ class PreviewPlayer internal constructor(
     }
 
     private fun beginActivePreparation(command: PreviewCommand.Prepare) {
+        pendingSwitch?.complete(false); pendingSwitch = null; switchBackup = null
         activePreparationToken = command.token
         pendingPreparation = command.completion
         generation += 1
@@ -239,20 +297,23 @@ class PreviewPlayer internal constructor(
         if (command.generation != generation || command.token !== activePreparationToken) return
         command.result.fold(
             onSuccess = { grant ->
-                if (grant.url.isBlank()) {
+                if (grant.url.isBlank() || (boundSessionId != null && grant.assetId.isNullOrBlank())) {
+                    if (restoreSwitch()) return@fold
                     mutableState.value = PreviewState.Error(ERROR_MESSAGE)
                     pendingPreparation?.complete(Result.failure(IllegalArgumentException("试听地址不能为空")))
                     pendingPreparation = null
                     return@fold
                 }
+                playbackBinding = grant.binding ?: playbackBinding
                 currentGrant = grant
                 engine.load(grant.url)
-                command.positionMillis?.let { engine.seekTo(it) }
+                if(command.positionMillis!=null || grant.timelineOffsetMillis!=0L) engine.seekTo(((command.positionMillis ?: 0L)+grant.timelineOffsetMillis).coerceAtLeast(0))
                 mediaLoaded = true
                 pendingPreparation?.complete(Result.success(Unit))
                 pendingPreparation = null
             },
             onFailure = { error ->
+                if (restoreSwitch()) return@fold
                 mutableState.value = PreviewState.Error(ERROR_MESSAGE)
                 if (error.isRecoverablePreviewFailure()) {
                     pendingPreparation?.complete(Result.success(Unit))
@@ -279,6 +340,9 @@ class PreviewPlayer internal constructor(
         ) return
         when (val event = command.event) {
             PreviewEngineEvent.Ready -> if (mediaLoaded) {
+                pausedDuringBuffering = false
+                modeState.value = requestedMode
+                pendingSwitch?.complete(true); pendingSwitch = null; switchBackup = null
                 mutableState.value = PreviewState.Buffered
                 if (resumeAfterReady) {
                     resumeAfterReady = false
@@ -298,12 +362,13 @@ class PreviewPlayer internal constructor(
                 }
             }
             is PreviewEngineEvent.HttpError -> handleHttpError(event.status)
-            PreviewEngineEvent.PlaybackError -> mutableState.value = PreviewState.Error(ERROR_MESSAGE)
+            PreviewEngineEvent.PlaybackError -> if (!restoreSwitch()) mutableState.value = PreviewState.Error(ERROR_MESSAGE)
             PreviewEngineEvent.Ended -> mutableState.value = PreviewState.Ended
         }
     }
 
     private fun handleHttpError(status: Int) {
+        if (pendingSwitch != null && restoreSwitch()) return
         val activeSongId = songId
         val activeToken = activePreparationToken
         if (
@@ -315,7 +380,7 @@ class PreviewPlayer internal constructor(
         }
         refreshUsed = true
         resumeAfterReady = mutableState.value is PreviewState.Playing
-        val position = engine.currentPositionMillis.coerceAtLeast(0)
+        val position = currentPositionMillis
         generation += 1
         currentGrant = null
         mediaLoaded = false
@@ -325,6 +390,12 @@ class PreviewPlayer internal constructor(
     }
 
     private suspend fun applyPlay(command: PreviewCommand.Play) {
+        if (mediaLoaded && pausedDuringBuffering && mutableState.value is PreviewState.Buffering) {
+            resumeAfterReady = true
+            pausedDuringBuffering = false
+            command.completion.complete(true)
+            return
+        }
         if (mutableState.value !is PreviewState.Buffered || !mediaLoaded) {
             command.completion.complete(false)
             return
@@ -335,12 +406,15 @@ class PreviewPlayer internal constructor(
     }
 
     private suspend fun applyPause(command: PreviewCommand.Pause) {
-        if (mutableState.value !is PreviewState.Playing || !mediaLoaded) {
+        val state = mutableState.value
+        if (!mediaLoaded || (state !is PreviewState.Playing && state !is PreviewState.Buffered && state !is PreviewState.Buffering)) {
             command.completion.complete(false)
             return
         }
         engine.pause()
-        mutableState.value = PreviewState.Buffered
+        resumeAfterReady = false
+        pausedDuringBuffering = state is PreviewState.Buffering
+        if (state !is PreviewState.Buffering) mutableState.value = PreviewState.Buffered
         command.completion.complete(true)
     }
 
@@ -352,7 +426,7 @@ class PreviewPlayer internal constructor(
             return
         }
         if (mutableState.value is PreviewState.Playing) engine.pause()
-        engine.seekTo(0)
+        engine.seekTo((currentGrant?.timelineOffsetMillis ?: 0L).coerceAtLeast(0))
         mutableState.value = PreviewState.Buffered
         command.completion.complete(true)
     }
@@ -376,6 +450,7 @@ class PreviewPlayer internal constructor(
     }
 
     private suspend fun applyRelease() {
+        pendingSwitch?.complete(false); pendingSwitch = null
         activePreparationToken?.cancel()
         generation += 1
         activePreparationToken = null
@@ -406,9 +481,11 @@ class PreviewPlayer internal constructor(
         expectedSongId: String,
         positionMillis: Long?,
     ) {
+        val mode = requestedMode
+        val session = boundSessionId
         val job = actorScope.launch(Dispatchers.IO) {
             val result = try {
-                Result.success(grantSource.fetch(expectedSongId))
+                Result.success(grantSource.fetch(expectedSongId, mode, session))
             } catch (_: CancellationException) {
                 return@launch
             } catch (error: Throwable) {
@@ -438,6 +515,7 @@ class PreviewPlayer internal constructor(
 }
 
 private sealed interface PreviewCommand {
+    data class Switch(val mode: SongPlaybackMode, val sessionId: String?, val reset: Boolean, val completion: CompletableDeferred<Boolean>) : PreviewCommand
     data class Prepare(
         val songId: String,
         val token: PreparationToken,
@@ -587,6 +665,6 @@ class ExoPreviewEngine(context: Context) : PreviewEngine {
     }
 
     private companion object {
-        const val POSITION_SNAPSHOT_INTERVAL_MILLIS = 100L
+        const val POSITION_SNAPSHOT_INTERVAL_MILLIS = 50L
     }
 }

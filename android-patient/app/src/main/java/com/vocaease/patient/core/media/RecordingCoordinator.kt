@@ -25,21 +25,32 @@ sealed interface CaptureEvent {
     data class Finalized(
         val durationMillis: Long,
         val interruption: RecordingInterruption? = null,
+        val encoded: EncodedRecording? = null,
     ) : CaptureEvent
     data class Failure(val reason: RecordingInterruption) : CaptureEvent
 }
 
 interface RecordingCapture {
+    val pitch: StateFlow<PitchSample> get() = MutableStateFlow(PitchSample(0, null, 0f))
+    val captureStartNanos: Long? get() = null
     var listener: suspend (CaptureEvent) -> Unit
     suspend fun bindFrontCamera()
     fun start(output: File)
+    suspend fun pause() { error("采集暂停未实现") }
+    suspend fun resume() { error("采集恢复未实现") }
     fun stop()
     fun release() = Unit
 }
 
 interface RecordingPlayback {
+    val playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? get() = null
+    val activeMode: kotlinx.coroutines.flow.StateFlow<SongPlaybackMode> get() = kotlinx.coroutines.flow.MutableStateFlow(SongPlaybackMode.ACCOMPANIMENT)
+    val playbackState: kotlinx.coroutines.flow.StateFlow<PreviewState> get() = kotlinx.coroutines.flow.MutableStateFlow(PreviewState.Playing)
+    suspend fun switchMode(mode: SongPlaybackMode): Boolean = false
     val currentPositionMillis: Long
     fun play()
+    suspend fun pause(): Boolean = false
+    suspend fun resume(): Boolean = false
     fun stop()
     fun setOnEnded(listener: () -> Unit) = Unit
 }
@@ -63,6 +74,11 @@ fun interface RecordingArtifactPublisher {
 }
 
 interface RecordingCoordinator : AutoCloseable {
+    val pitch: StateFlow<PitchSample> get() = MutableStateFlow(PitchSample(0,null,0f))
+    val activeMode: StateFlow<SongPlaybackMode> get() = MutableStateFlow(SongPlaybackMode.ACCOMPANIMENT)
+    val playbackBinding: com.vocaease.patient.core.network.dto.PlaybackBindingDto? get() = null
+    val anchors: List<PlaybackAnchor> get() = emptyList()
+    suspend fun switchMode(mode: SongPlaybackMode): Boolean = false
     val state: StateFlow<RecordingState>
     val playbackPositionMillis: Long get() = 0
     val recordingDurationMillis: Long get() = 0
@@ -70,6 +86,8 @@ interface RecordingCoordinator : AutoCloseable {
     suspend fun takeOver(draftId: String, stagingIdentity: RecordingStagingIdentity) = takeOver(draftId)
     suspend fun onCountdownFinished()
     suspend fun stop()
+    suspend fun pause(): Boolean = false
+    suspend fun resume(): Boolean = false
     suspend fun onPlaybackEnded()
     suspend fun interrupt(reason: RecordingInterruption)
     override fun close()
@@ -81,7 +99,35 @@ class DefaultRecordingCoordinator(
     private val clockNanos: () -> Long,
     private val tempFiles: RecordingTempFiles,
     private val publisher: RecordingArtifactPublisher,
+    private val persistMetadata: suspend (String, PlaybackMetadata) -> Unit = { _, _ -> },
 ) : RecordingCoordinator {
+    override val pitch get() = capture.pitch
+    override val activeMode get() = playback.activeMode
+    override val playbackBinding get() = playback.playbackBinding
+    private var metadataRecorder: PlaybackMetadataRecorder? = null
+    override val anchors get() = metadataRecorder?.snapshot()?.anchors ?: emptyList()
+    private var metadataJob: kotlinx.coroutines.Job? = null
+    override suspend fun switchMode(mode: SongPlaybackMode): Boolean {
+        val result = playback.switchMode(mode)
+        if(result) mutex.withLock { recordAnchor() }
+        return result
+    }
+    private suspend fun recordAnchor() {
+        metadataRecorder?.let { recorder ->
+            try {
+                recorder.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
+                persistMetadata(requireNotNull(draftId),recorder.snapshot())
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                publicationAllowed.set(false)
+                metadataJob?.cancel()
+                issueStopOnce()
+                capture.release()
+                interruptInternal(if (generateSequence<Throwable>(failure) { it.cause }.any { it is StaleAccountScopeException }) RecordingInterruption.ACCOUNT_CHANGED else RecordingInterruption.STORAGE)
+            }
+        }
+    }
     private val callbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val machine = RecordingStateMachine()
     private val mutex = Mutex()
@@ -95,9 +141,11 @@ class DefaultRecordingCoordinator(
     override val state: StateFlow<RecordingState> = mutableState.asStateFlow()
     override val playbackPositionMillis: Long get() = playback.currentPositionMillis.coerceAtLeast(0)
     override val recordingDurationMillis: Long
-        get() = (mutableState.value as? RecordingState.Recording)?.let {
-            ((clockNanos() - it.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
-        } ?: terminalDurationMillis.get()
+        get() = when (val current = mutableState.value) {
+            is RecordingState.Recording -> ((clockNanos() - current.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
+            is RecordingState.Paused -> ((current.pausedAtNanos - current.recording.startedAtNanos) / 1_000_000L).coerceAtLeast(0)
+            else -> terminalDurationMillis.get()
+        }
     private var draftId: String? = null
     private var stagingIdentity: RecordingStagingIdentity? = null
     private var video: File? = null
@@ -156,12 +204,48 @@ class DefaultRecordingCoordinator(
 
     override suspend fun stop() = mutex.withLock { requestStop() }
 
+    override suspend fun pause(): Boolean = mutex.withLock {
+        if (closed.get()) return@withLock false
+        if (machine.state is RecordingState.Paused) return@withLock true
+        if (machine.state !is RecordingState.Recording) return@withLock false
+        try {
+            check(playback.pause()) { "歌曲暂停失败" }
+            capture.pause()
+            update(RecordingEvent.Paused(clockNanos()))
+            // 暂停区间不写入成片，不添加静止播放锚点；恢复时重新校准映射。
+            true
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            publicationAllowed.set(false)
+            interruptInternal(RecordingInterruption.CAMERA)
+            issueStopOnce()
+            false
+        }
+    }
+
+    override suspend fun resume(): Boolean = mutex.withLock {
+        if (closed.get() || machine.state !is RecordingState.Paused) return@withLock false
+        try {
+            capture.resume()
+            check(playback.resume()) { "歌曲恢复失败" }
+            update(RecordingEvent.Resumed(clockNanos()))
+            recordAnchor()
+            machine.state is RecordingState.Recording
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            publicationAllowed.set(false)
+            interruptInternal(RecordingInterruption.CAMERA)
+            issueStopOnce()
+            false
+        }
+    }
+
     override suspend fun onPlaybackEnded() = mutex.withLock { requestStop(playbackEnded = true) }
 
     override suspend fun interrupt(reason: RecordingInterruption) {
         if (!reason.isRecoverableSystemInterruption()) publicationAllowed.set(false)
         mutex.withLock {
-            if (reason.isRecoverableSystemInterruption() && machine.state is RecordingState.Recording) {
+            if (reason.isRecoverableSystemInterruption() && (machine.state is RecordingState.Recording || machine.state is RecordingState.Paused)) {
                 pendingInterruption = pendingInterruption ?: reason
                 requestStop()
             } else if (reason.isRecoverableSystemInterruption() && machine.state === RecordingState.Finalizing) {
@@ -205,11 +289,30 @@ class DefaultRecordingCoordinator(
                             capture.stop()
                         }
                     } else {
-                        val now = clockNanos()
+                        val now = capture.captureStartNanos ?: clockNanos()
                         val offset = playback.currentPositionMillis.coerceAtLeast(0)
                         update(RecordingEvent.CaptureStarted(now, offset))
                         acceptedStartedGeneration = generation
                         playback.play()
+                        playbackBinding?.let { binding ->
+                            if(binding.sourceAssetId != null && binding.accompanimentAssetId != null) {
+                                metadataRecorder=PlaybackMetadataRecorder(48000,binding.sourceAssetId,binding.accompanimentAssetId,binding.referenceVersion)
+                                metadataRecorder!!.record(0,offset,activeMode.value,false)
+                                metadataJob=callbackScope.launch {
+                                    var lastPlaying: Boolean? = null;var lastCalibration=0L
+                                    while(!closed.get()) {
+                                        kotlinx.coroutines.delay(50)
+                                        mutex.withLock {
+                                            if(machine.state is RecordingState.Recording) {
+                                                val playing=playback.playbackState.value is PreviewState.Playing
+                                                val now=recordingDurationMillis
+                                                if(lastPlaying != playing || now-lastCalibration>=5000) { recordAnchor();lastPlaying=playing;lastCalibration=now }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -218,7 +321,7 @@ class DefaultRecordingCoordinator(
                 interruptInternal(event.reason)
             }
             is CaptureEvent.Finalized -> {
-                if (event.interruption != null && machine.state is RecordingState.Recording) {
+                if (event.interruption != null && (machine.state is RecordingState.Recording || machine.state is RecordingState.Paused)) {
                     pendingInterruption = pendingInterruption ?: event.interruption
                     requestStop()
                 }
@@ -229,6 +332,10 @@ class DefaultRecordingCoordinator(
                 val currentVideo = video ?: return@withLock interruptInternal(RecordingInterruption.FINALIZE)
                 val currentAudio = tempFiles.createAudio().also { audio = it }
                 try {
+                    metadataJob?.cancel()
+                    metadataRecorder?.let { recorder ->
+                        persistMetadata(requireNotNull(draftId),recorder.finish(event.durationMillis,event.encoded?.sampleRate ?: 48000,event.encoded?.effectiveStartOffsetMillis ?: 0))
+                    }
                     publisher.publish(
                         requireNotNull(draftId),
                         currentVideo,
@@ -258,7 +365,8 @@ class DefaultRecordingCoordinator(
     }
 
     private fun requestStop(playbackEnded: Boolean = false) {
-        if (machine.state !is RecordingState.Recording && machine.state !== RecordingState.Finalizing) return
+        metadataRecorder?.record(recordingDurationMillis,playbackPositionMillis,activeMode.value,playback.playbackState.value is PreviewState.Playing)
+        if (machine.state !is RecordingState.Recording && machine.state !is RecordingState.Paused && machine.state !== RecordingState.Finalizing) return
         snapshotRecordingDuration()
         update(if (playbackEnded) RecordingEvent.PlaybackEnded else RecordingEvent.StopRequested)
         issueStopOnce()
@@ -277,10 +385,9 @@ class DefaultRecordingCoordinator(
     }
 
     private fun snapshotRecordingDuration() {
-        val recording = mutableState.value as? RecordingState.Recording ?: return
-        terminalDurationMillis.set(
-            ((clockNanos() - recording.startedAtNanos) / 1_000_000L).coerceAtLeast(0),
-        )
+        if (mutableState.value is RecordingState.Recording || mutableState.value is RecordingState.Paused) {
+            terminalDurationMillis.set(recordingDurationMillis)
+        }
     }
 
     private fun cleanupPlaintext() {

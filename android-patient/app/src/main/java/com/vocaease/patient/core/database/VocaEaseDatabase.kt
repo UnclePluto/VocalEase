@@ -94,7 +94,7 @@ class DatabaseConverters {
         AnalysisCheckpointEntity::class,
         AccountExitIntentEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -123,6 +123,7 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_7_8)
                 .addMigrations(MIGRATION_8_9)
                 .addMigrations(MIGRATION_9_10)
+                .addMigrations(MIGRATION_10_11)
                 .addCallback(DatabaseConstraintInstaller.callback(context.applicationContext))
             if (allowMainThreadQueries) builder.allowMainThreadQueries()
             return builder.build()
@@ -311,6 +312,13 @@ internal abstract class VocaEaseDatabase : RoomDatabase() {
                     )
                     """.trimIndent(),
                 )
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10,11) {
+            override fun migrate(db:SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE drafts ADD COLUMN playback_metadata_path TEXT")
+                db.execSQL("ALTER TABLE drafts ADD COLUMN playback_metadata_version INTEGER NOT NULL DEFAULT 0")
             }
         }
 

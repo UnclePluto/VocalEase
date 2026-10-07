@@ -17,6 +17,17 @@ from apps.singing.models import SingingSession
 from .test_submission_idempotency import uploaded_session
 
 
+@pytest.fixture(autouse=True)
+def legacy_boundary_before_experience_barrier(db, request):
+    # 此文件原有断言验证历史 singing 0001-0006 边界，显式退到新屏障之前。
+    # 最新整体 schema 的禁止回退另有独立断言，不能以历史测试绕开生产保护。
+    if not request.node.name.startswith("test_latest_singing_dependency_barrier"):
+        MigrationRecorder(connection).record_unapplied("media", "0010_singing_experience_schema_barrier")
+    yield
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+
+
 @pytest.mark.django_db(transaction=True, databases="__all__")
 def test_creation_idempotency_migration_is_reversible_and_enforces_patient_scoped_key():
     previous_target = [("singing", "0004_remove_analysistimeseries_generation")]
@@ -310,3 +321,10 @@ def test_generation_cleanup_migration_preserves_existing_result_and_series_paylo
     finally:
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
+
+@pytest.mark.django_db(transaction=True, databases="__all__")
+def test_latest_singing_dependency_barrier_stops_before_any_change():
+    before = _singing_schema_snapshot()
+    with pytest.raises(IrreversibleError):
+        MigrationExecutor(connection).migrate([("singing", "0006_alter_singingsession_treatment_plan_and_more")])
+    assert _singing_schema_snapshot() == before

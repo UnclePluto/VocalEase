@@ -41,4 +41,31 @@ class AuthTimestampCompatibilityTest {
             assertThrows(NetworkContractException::class.java) { session(it) }
         }
     }
+
+    @Test
+    fun sessionPlaybackGrantAcceptsServerUtcOffset() = kotlinx.coroutines.runBlocking {
+        val fixture = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            .context.assets.open("fixtures/session.json").bufferedReader().use { it.readText() }
+        val response = apiJson.decodeFromString<ApiEnvelope<com.vocaease.patient.core.network.dto.SingingSessionDto>>(fixture)
+        val assetId = "44444444-4444-4444-8444-444444444444"
+        val session = response.copy(data = response.data.copy(
+            playback = com.vocaease.patient.core.network.dto.PlaybackBindingDto(sourceAssetId = assetId),
+        ))
+        val api = java.lang.reflect.Proxy.newProxyInstance(
+            PatientApi::class.java.classLoader, arrayOf(PatientApi::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "session" -> session
+                "sessionSongPlayback" -> ApiEnvelope("ok", "",
+                    com.vocaease.patient.core.network.dto.SongPlaybackGrantDto(
+                        assetId, "https://example.invalid/song.wav", "2026-10-01T08:00:00+00:00",
+                    ), "test-grant")
+                else -> error("不应调用 ${method.name}")
+            }
+        } as PatientApi
+        val grant = com.vocaease.patient.feature.training.VocaEasePreviewGrantSource(api)
+            .fetch("song-id", com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL, session.data.id)
+        assertEquals(Instant.parse("2026-10-01T08:00:00Z"), grant.expiresAt)
+    }
+
 }

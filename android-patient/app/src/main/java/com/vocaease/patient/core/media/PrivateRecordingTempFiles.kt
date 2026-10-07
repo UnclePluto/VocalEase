@@ -85,6 +85,9 @@ class PrivateRecordingTempFiles internal constructor(
             if (!isDirectChild(file)) return@forEach
             runCatching {
                 file.delete()
+                File(directory, file.name + ".patient-audio").delete()
+                File(directory, file.name + ".merged").delete()
+                File(directory, file.name + ".timing").delete()
                 if (file.name.startsWith("video-") && file.name.endsWith(RECORDING_SUFFIX)) {
                     val base = file.name.removeSuffix(RECORDING_SUFFIX)
                     File(directory, "$base$METADATA_SUFFIX").delete()

@@ -8,6 +8,12 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 internal interface DraftDao {
+    @Query("UPDATE drafts SET playback_metadata_path=:path, playback_metadata_version=1 WHERE account_scope=:scope AND draft_id=:id AND state='RECORDING'")
+    suspend fun updatePlaybackMetadata(scope:String,id:String,path:String):Int
+
+    @Query("UPDATE drafts SET playback_metadata_path=NULL, playback_metadata_version=0 WHERE account_scope=:scope AND draft_id=:id")
+    suspend fun clearPlaybackMetadata(scope:String,id:String):Int
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(draft: DraftEntity)
 

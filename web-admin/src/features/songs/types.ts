@@ -3,6 +3,8 @@ export type SongPublicationStatus = 'draft' | 'published'
 export type SongResourceField = 'vocal_asset' | 'accompaniment_asset' | 'lyrics_asset'
 export type SongTrack = 'source' | 'vocal' | 'accompaniment'
 
+export type ReferencePitchStatus = { status: 'missing' | 'pending' | 'processing' | 'ready' | 'failed' | 'stale'; version: string | null; note_count: number }
+
 export type Song = {
   id: string
   title: string
@@ -11,6 +13,8 @@ export type Song = {
   language: string
   duration_seconds: number
   source_asset: string | null
+  vocal_fingerprint?: string
+  reference_pitch?: ReferencePitchStatus
   vocal_asset?: string | null
   accompaniment_asset?: string | null
   lyrics_asset?: string | null

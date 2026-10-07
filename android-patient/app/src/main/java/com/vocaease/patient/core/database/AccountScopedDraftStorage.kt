@@ -1,6 +1,10 @@
 package com.vocaease.patient.core.database
 
 import androidx.room.withTransaction
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import com.vocaease.patient.core.media.PlaybackMetadata
 import com.vocaease.patient.core.security.ChunkedAesGcmFileStore
 import com.vocaease.patient.core.media.EncryptedMediaDataSource
 import java.io.InputStream
@@ -109,6 +113,31 @@ class AccountScopedDraftStorage internal constructor(
 
     fun onLeaseInvalidated(listener: () -> Unit): AccountLeaseListenerRegistration =
         session.addLeaseChangedListener { if (session.current() !== lease) listener() }
+
+    suspend fun savePlaybackMetadata(draftId:String,metadata:PlaybackMetadata) = checked {
+        val bytes=Json.encodeToString(metadata).toByteArray(Charsets.UTF_8)
+        require(bytes.size<=1024*1024)
+        val prior=database.draftDao().find(lease.patientId,draftId) ?: throw ReviewMediaInvalidException()
+        require(prior.state==DraftState.RECORDING)
+        val encrypted=fileStore.encrypt(lease.patientId,bytes.inputStream(),bytes.size.toLong())
+        try {
+            database.withTransaction { check(database.draftDao().updatePlaybackMetadata(lease.patientId,draftId,encrypted.relativePath)==1) }
+        } catch(error:Throwable) { fileStore.deleteEncryptedMedia(lease.patientId,encrypted.relativePath);throw error }
+        prior.playbackMetadataPath?.let { fileStore.deleteEncryptedMedia(lease.patientId,it) }
+        bytes.fill(0)
+    }
+
+    suspend fun loadPlaybackMetadata(draftId:String):PlaybackMetadata? = checked {
+        val draft=database.draftDao().find(lease.patientId,draftId) ?: throw ReviewMediaInvalidException()
+        val path=draft.playbackMetadataPath ?: return@checked null
+        require(draft.playbackMetadataVersion==1)
+        fileStore.open(lease.patientId,path).use { reader ->
+            require(reader.length in 1..1024*1024)
+            val bytes=ByteArray(reader.length.toInt());var position=0
+            while(position<bytes.size) { val read=reader.read(position.toLong(),bytes,position,bytes.size-position);check(read>0);position+=read }
+            try { Json.decodeFromString<PlaybackMetadata>(bytes.toString(Charsets.UTF_8)) } finally { bytes.fill(0) }
+        }
+    }
 
     suspend fun encryptMedia(plaintext: InputStream, originalLength: Long): EncryptedMediaAsset = checked {
         fileStore.encrypt(lease.patientId, plaintext, originalLength).let {
@@ -276,6 +305,8 @@ class AccountScopedDraftStorage internal constructor(
         }
         fileStore.revokeEncryptedMediaReaders(lease.patientId, media.map { it.encryptedRelativePath }.toSet())
         media.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it.encryptedRelativePath) }
+        draft.playbackMetadataPath?.let { fileStore.deleteEncryptedMedia(lease.patientId,it) }
+        database.draftDao().clearPlaybackMetadata(lease.patientId,draftId)
         database.withTransaction {
             val current = database.draftDao().find(lease.patientId, draftId) ?: throw ReviewMediaInvalidException()
             if (current.sessionId != draft.sessionId || current.creationKey != draft.creationKey ||
@@ -308,6 +339,8 @@ class AccountScopedDraftStorage internal constructor(
         }
         fileStore.revokeEncryptedMediaReaders(lease.patientId, media.map { it.encryptedRelativePath }.toSet())
         media.forEach { fileStore.deleteEncryptedMedia(lease.patientId, it.encryptedRelativePath) }
+        draft.playbackMetadataPath?.let { fileStore.deleteEncryptedMedia(lease.patientId,it) }
+        database.draftDao().clearPlaybackMetadata(lease.patientId,draftId)
         database.withTransaction {
             val current = database.draftDao().find(lease.patientId, draftId) ?: return@withTransaction
             if (current.state !in setOf(DraftState.RECORDING, DraftState.REVIEW_READY, DraftState.INTERRUPTED)) {

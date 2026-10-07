@@ -94,7 +94,9 @@ interface PreparationSavedState {
 
 data class PreparationUiState(
     val song: PreparationSong? = null,
+    val lyrics: LyricsState = LyricsState.Unavailable,
     val previewState: PreviewState = PreviewState.Idle,
+    val previewMode: com.vocaease.patient.core.media.SongPlaybackMode = com.vocaease.patient.core.media.SongPlaybackMode.ORIGINAL,
     val preflight: PreflightResult = PreflightResult(
         blockers = setOf(
             PreflightBlocker.CAMERA_PERMISSION,
@@ -129,6 +131,7 @@ class PreparationViewModel(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val onPlaybackHandoff: (String, PreviewSession) -> Unit = { _, _ -> },
     private val onPlaybackHandoffCancelled: (String) -> Unit = {},
+    private val lyricsRepository: LyricsRepository? = null,
 ) : ViewModel() {
     private val creationMutex = Mutex()
     private val readinessMutex = Mutex()
@@ -137,6 +140,7 @@ class PreparationViewModel(
     private val readinessGeneration = AtomicLong()
     private val environmentStarted = AtomicBoolean()
     private val previewHandedOff = AtomicBoolean()
+    private var lyricsJob: kotlinx.coroutines.Job? = null
     private val mutableState = MutableStateFlow(PreparationUiState())
     val state: StateFlow<PreparationUiState> = mutableState.asStateFlow()
 
@@ -146,11 +150,23 @@ class PreparationViewModel(
         }
     }
 
+    fun retryLyrics() {
+        val repository = lyricsRepository ?: return
+        val id = currentState().song?.id?.toString() ?: return
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch(dispatcher) {
+            updateState { it.copy(lyrics = LyricsState.Loading) }
+            val result = repository.load(id)
+            updateState { if (it.song?.id?.toString() == id) it.copy(lyrics = result) else it }
+        }
+    }
+
     suspend fun load() {
         updateState { it.copy(isLoading = true, errorMessage = null) }
         try {
             val song = songSource.load(songId)
             updateState { it.copy(song = song) }
+            retryLyrics()
             preview.prepare(song.id.toString())
             refreshReadiness()
             updateState { it.copy(isLoading = false) }
@@ -246,6 +262,8 @@ class PreparationViewModel(
                     draft = requireNotNull(store.find(draft.draftId))
                 }
                 val sessionId = draft.serverSessionId ?: throw SessionBindingMismatchException()
+                if (!kotlinx.coroutines.withTimeout(20_000) { preview.bindSession(sessionId) }) throw IllegalStateException("演唱伴奏准备失败")
+                checkOperation(operation)
                 if (draft.status != PreparationDraftStatus.HANDOFF_PENDING) {
                     for (second in 3 downTo 1) {
                         checkOperation(operation)
@@ -299,6 +317,17 @@ class PreparationViewModel(
                 publishCreationFailure("试听未能安全归零，请重试")
             }
         }
+    }
+
+    suspend fun switchPreviewMode(mode: com.vocaease.patient.core.media.SongPlaybackMode): Boolean {
+        if (currentState().isCreatingSession) return false
+        val result=preview.switchMode(mode)
+        updateState { it.copy(
+            previewMode = preview.activeMode.value,
+            errorMessage = if (result) null else "试听切换失败，已保留${preview.activeMode.value.label}，请重试",
+        ) }
+        refreshReadiness()
+        return result
     }
 
     suspend fun togglePreview(): Boolean {
