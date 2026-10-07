@@ -34,7 +34,7 @@ export function PatientDataPage() {
   const { patientId = '' } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
-  const backTo = typeof location.state?.backTo === 'string' && /^\/(patient-data|patients)(\?|$)/.test(location.state.backTo) ? location.state.backTo : '/patients' 
+  const backTo = typeof location.state?.backTo === 'string' && /^\/(patient-data|patients)(\?|$)/.test(location.state.backTo) ? location.state.backTo : '/patients'
   const [page, setPage] = useState(1)
   const [dates, setDates] = useState<[string?, string?]>([])
   const [editing, setEditing] = useState(false)

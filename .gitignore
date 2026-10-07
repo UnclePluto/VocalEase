@@ -18,3 +18,4 @@ web-admin/dist/
 *.key
 server/.venv/
 deploy/releases/
+.playwright-cli/

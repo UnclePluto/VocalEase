@@ -1,6 +1,12 @@
 package com.vocaease.patient.ui
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Column
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
@@ -68,6 +74,38 @@ class AppNavigationTest {
         composeRule.onNodeWithText("歌曲已缓冲").assertIsDisplayed()
         composeRule.onNodeWithText("歌曲缓冲中").assertDoesNotExist()
         assertEquals(2, initialized)
+    }
+
+    @Test
+    fun 取消演唱返回新准备资源且重复返回不积累页面() {
+        composeRule.setContent {
+            AuthenticatedApp(
+                initialRoute = AppRoute.Catalog,
+                catalogContent = { openSong -> Button(onClick = { openSong("song-return") }) { Text("打开歌曲") } },
+                preparationContent = { songId, onBack, onRecording ->
+                    // 模拟交接后被录制释放的播放器，验证真实导航的 ViewModelStore 生命周期。
+                    val resource: PreparationResourceTestViewModel = viewModel()
+                    Column {
+                        Text("歌曲:$songId")
+                        Text(if (resource.released) "播放器已释放，无法就绪" else "新播放器已就绪")
+                        Button(onClick = { resource.released = true; onRecording("draft-return") }) { Text("进入录制") }
+                        Button(onClick = onBack) { Text("返回曲库") }
+                    }
+                },
+                recordingContent = { _, onBack, _ -> Button(onClick = onBack) { Text("取消录制") } },
+            )
+        }
+        composeRule.onNodeWithText("打开歌曲").performClick()
+        repeat(3) {
+            composeRule.onNodeWithText("新播放器已就绪").assertIsDisplayed()
+            composeRule.onNodeWithText("进入录制").performClick()
+            composeRule.onNodeWithText("取消录制").performClick()
+            composeRule.onNodeWithText("歌曲:song-return").assertIsDisplayed()
+            composeRule.onNodeWithText("新播放器已就绪").assertIsDisplayed()
+        }
+        composeRule.onNodeWithText("返回曲库").performClick()
+        composeRule.onNodeWithText("打开歌曲").assertIsDisplayed()
+        composeRule.onNodeWithText("去唱歌").assertIsDisplayed()
     }
 
     @Test
@@ -203,3 +241,7 @@ class AppNavigationTest {
 
 private class NavigationPreviewResource { var released = false }
 private class NavigationPreviewModel(val resource: NavigationPreviewResource) : androidx.lifecycle.ViewModel()
+
+class PreparationResourceTestViewModel : ViewModel() {
+    var released by mutableStateOf(false)
+}

@@ -31,4 +31,3 @@ export function uiParams(query: PatientListQuery) {
   if (query.doctor) params.set('doctor', query.doctor)
   return params
 }
-

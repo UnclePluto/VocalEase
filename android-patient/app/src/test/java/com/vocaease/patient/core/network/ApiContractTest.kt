@@ -573,6 +573,44 @@ class ApiContractTest {
         assertFalse(rendered.contains("?"))
     }
 
+    @Test
+    fun `真实人声分析来源可以严格解析并进入可绘制参考状态`() = runBlocking {
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""
+            {"code":"ok","message":"成功","request_id":"pitch-contract",
+             "data":{"status":"ready","version":"bound","schema_version":1,
+              "origin":{"type":"vocal_yin","fingerprint":"verified-vocal"},
+              "notes":[{"start_ms":18460,"end_ms":18740,"midi_note":57.2,"confidence":0.96}]}}
+        """.trimIndent()))
+        val repository = com.vocaease.patient.feature.training.ReferencePitchRepository { song, version ->
+            api().referencePitch(song, version).data
+        }
+        val result = repository.load("song", "bound")
+        assertTrue("真实后台参考数据必须进入 Ready，而不是解析失败", result is com.vocaease.patient.feature.training.ReferencePitchState.Ready)
+        val ready = result as com.vocaease.patient.feature.training.ReferencePitchState.Ready
+        assertEquals("bound", ready.version)
+        assertEquals(18460L, ready.notes.single().startMs)
+        assertEquals(57.2f, ready.notes.single().midiNote, 0.001f)
+        assertEquals("/api/v1/patient/songs/song/reference-pitch/?version=bound", server.takeRequest().path)
+    }
+
+    @Test
+    fun `人工标注来源与缺失数据兼容且参考接口仍拒绝未知顶层字段`() {
+        val annotated = apiJson.decodeFromString<com.vocaease.patient.core.network.dto.ReferencePitchDto>("""
+            {"status":"ready","version":"bound","schema_version":1,
+             "origin":{"type":"annotation","citation":"授权标注","annotator":"reviewed"},"notes":[]}
+        """.trimIndent())
+        assertEquals("授权标注", annotated.origin?.get("citation")?.jsonPrimitive?.content)
+        val missing = apiJson.decodeFromString<com.vocaease.patient.core.network.dto.ReferencePitchDto>(
+            """{"status":"missing","version":null,"schema_version":1,"notes":[]}""",
+        )
+        assertNull(missing.origin)
+        assertThrows(SerializationException::class.java) {
+            apiJson.decodeFromString<com.vocaease.patient.core.network.dto.ReferencePitchDto>(
+                """{"status":"missing","version":null,"unexpected":true}""",
+            )
+        }
+    }
+
     private fun api(): VocaEaseApi = NetworkModule.createApi(
         baseUrl = server.url("/").toString(),
         client = NetworkModule.createHttpClient(diagnosticSink = {}),
